@@ -7,6 +7,16 @@
 (function () {
   'use strict';
 
+  // Idioma de la interfaz: inglés por defecto; español si la persona lo eligió en Configuración.
+  if (typeof LossyI18n !== 'undefined') {
+    LossyI18n.setLanguage('en');
+    try {
+      chrome.storage.local.get('lossy.uiLanguage').then(stored => {
+        LossyI18n.setLanguage(stored['lossy.uiLanguage'] === 'es' ? 'es' : 'en');
+      }).catch(() => {});
+    } catch (_) { /* sin API de extensión */ }
+  }
+
   // Guard de idempotencia para prevenir colisión de listeners ante re-inyección dinámica
   if (typeof window !== 'undefined') {
     if (window.__LOSSY_CS_INITIALIZED__ || window.__LINER_CS_INITIALIZED__) {

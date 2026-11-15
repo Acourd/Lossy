@@ -38,7 +38,7 @@ Lossy guarda tus conversaciones de ChatGPT en tu navegador, las organiza en proy
 
 ## Conviene saber
 
-- Lossy sigue el idioma de tu navegador. La interfaz está disponible en inglés y en español.
+- Lossy se abre en inglés. Puedes cambiar a español en Configuración.
 - Lossy es un proyecto independiente. No está afiliado a OpenAI ni a Anthropic.
 - La captura en vivo funciona con ChatGPT. Si ChatGPT cambia sus páginas internas, Lossy lee la página en su lugar, o puedes importar tu exportación oficial de ChatGPT.
 

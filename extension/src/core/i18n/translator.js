@@ -1,7 +1,8 @@
 /*
  * Traducción de la interfaz al inglés.
  *
- * Se activa solo cuando el navegador está en inglés. Cada nodo de texto o atributo
+ * El inglés es el idioma predeterminado; el español se usa solo si la persona lo elige
+ * en Configuración. Cada nodo de texto o atributo
  * (title, aria-label, placeholder, alt) cuyo contenido coincide con una entrada de
  * en_strings.js se reemplaza por su traducción, también cuando la interfaz lo genera
  * después de cargar. Lo que no tiene entrada se muestra tal cual, en español.
@@ -23,20 +24,18 @@
     return typeof language === 'string' && /^en(?:[-_]|$)/i.test(language);
   }
 
-  // Prefiere el idioma de la interfaz del navegador; si no está disponible, el del navegador.
-  function currentLanguage() {
-    const chromeApi = root && root.chrome;
-    if (chromeApi && chromeApi.i18n && typeof chromeApi.i18n.getUILanguage === 'function') {
-      const uiLanguage = chromeApi.i18n.getUILanguage();
-      if (uiLanguage) return uiLanguage;
-    }
-    const nav = (root && root.navigator) || {};
-    return nav.language || (nav.languages && nav.languages[0]) || '';
+  // Idioma activo. El inglés es el predeterminado; el español solo se usa si la persona lo elige.
+  let activeLanguage = 'en';
+  function setLanguage(language) {
+    activeLanguage = language === 'es' ? 'es' : 'en';
+  }
+  function getLanguage() {
+    return activeLanguage;
   }
 
   // Traduce un texto completo. Conserva los espacios de los extremos.
   function translateText(value) {
-    if (typeof value !== 'string') return value;
+    if (activeLanguage !== 'en' || typeof value !== 'string') return value;
     const parts = /^(\s*)([\s\S]*?)(\s*)$/.exec(value);
     const core = parts[2];
     if (!core) return value;
@@ -76,10 +75,9 @@
   }
 
   // Traduce el documento y sigue traduciendo lo que se añada o cambie después.
-  // Devuelve el observador, o null si el idioma del navegador no es inglés.
-  function startDomTranslation(doc, language) {
-    const lang = language === undefined ? currentLanguage() : language;
-    if (!isEnglishLanguage(lang) || typeof MutationObserver === 'undefined') return null;
+  // Devuelve el observador, o null si el idioma activo no es inglés.
+  function startDomTranslation(doc) {
+    if (activeLanguage !== 'en' || typeof MutationObserver === 'undefined') return null;
     const scope = doc.body || doc.documentElement;
     translateNode(scope);
     const observer = new MutationObserver(records => {
@@ -101,7 +99,8 @@
 
   return {
     isEnglishLanguage,
-    currentLanguage,
+    setLanguage,
+    getLanguage,
     translateText,
     translateNode,
     startDomTranslation,

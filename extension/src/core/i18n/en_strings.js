@@ -302,6 +302,10 @@
     'Cerrar modal': 'Close dialog',
     'Aceptar': 'Accept',
     'Acciones de contexto Lossy': 'Lossy context actions',
+    // Selector de idioma en Configuración
+    'Idioma': 'Language',
+    'Elige el idioma de la interfaz. Se recuerda en este navegador.': 'Choose the interface language. It is remembered in this browser.',
+    'Idioma de la interfaz': 'Interface language',
     // Tarjetas y tablas de la biblioteca y de los proyectos
     'Retomar proyecto': 'Resume project',
     'Guarda una acción para retomarlo con claridad.': 'Save an action to pick it up with clarity.',

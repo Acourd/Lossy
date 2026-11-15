@@ -35,6 +35,18 @@ test('English output is not translated again', () => {
   assert.equal(i18n.translateText(english), english);
 });
 
+test('English is the default language and Spanish is used only when chosen', () => {
+  i18n.setLanguage('en');
+  assert.equal(i18n.getLanguage(), 'en');
+  assert.equal(i18n.translateText('Biblioteca'), 'Library');
+  i18n.setLanguage('es');
+  assert.equal(i18n.getLanguage(), 'es');
+  assert.equal(i18n.translateText('Biblioteca'), 'Biblioteca');
+  i18n.setLanguage('fr');
+  assert.equal(i18n.getLanguage(), 'en', 'un idioma no soportado vuelve al inglés');
+  i18n.setLanguage('en');
+});
+
 test('dictionary keys are trimmed, non-empty, and map to a different English text', () => {
   for (const [spanish, english] of Object.entries(TEXT)) {
     assert.equal(spanish, spanish.trim(), `La clave tiene espacios sobrantes: "${spanish}"`);
