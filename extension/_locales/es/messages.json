@@ -1,0 +1,8 @@
+{
+  "extensionName": {
+    "message": "Lossy — AI Context Portability"
+  },
+  "extensionDescription": {
+    "message": "Capa local-first de portabilidad de contexto y conversaciones entre ChatGPT, Claude y otros entornos. Sin backend."
+  }
+}

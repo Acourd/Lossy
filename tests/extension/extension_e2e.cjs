@@ -7,7 +7,7 @@ const fixture=require('./fixtures/chatgpt_assets.json');
 const output=path.resolve(process.env.LOSSY_QA_OUTPUTS||'scratch/extension-e2e');fs.mkdirSync(output,{recursive:true});
 const profile=path.resolve(process.env.LOSSY_QA_PROFILE||'scratch/extension-test-profile');
 (async()=>{
- const context=await chromium.launchPersistentContext(profile,{channel:'chromium',headless:true,timeout:20000,ignoreDefaultArgs:['--disable-extensions'],viewport:{width:1200,height:900},colorScheme:'dark',args:['--disable-extensions-except='+path.join(root,'extension'),'--load-extension='+path.join(root,'extension')],acceptDownloads:true});
+ const context=await chromium.launchPersistentContext(profile,{channel:'chromium',headless:true,timeout:20000,ignoreDefaultArgs:['--disable-extensions'],viewport:{width:1200,height:900},colorScheme:'dark',args:['--lang=es-ES','--disable-extensions-except='+path.join(root,'extension'),'--load-extension='+path.join(root,'extension')],acceptDownloads:true});
  context.setDefaultTimeout(20000);
  console.log('Extension test browser started.');
  let popup;const failures=[];const network=[];

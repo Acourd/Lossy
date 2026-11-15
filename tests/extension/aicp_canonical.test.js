@@ -2750,10 +2750,23 @@ test('Lossy P2: Formal Rebranding — Icons, Manifest, Brand Text, and Zero-Emoj
   const manifestPath = path.resolve(__dirname, '../../extension/manifest.json');
   const manifest = JSON.parse(fs.readFileSync(manifestPath, 'utf8'));
 
+  // El nombre se resuelve desde _locales (español por defecto, inglés en navegadores en inglés).
+  const esMessages = JSON.parse(fs.readFileSync(path.resolve(__dirname, '../../extension/_locales/es/messages.json'), 'utf8'));
+  const enMessages = JSON.parse(fs.readFileSync(path.resolve(__dirname, '../../extension/_locales/en/messages.json'), 'utf8'));
+  const resolveMessage = (value, messages) => {
+    const key = /^__MSG_(.+)__$/.exec(value);
+    return key ? messages[key[1]].message : value;
+  };
   assertions++;
-  assert.equal(manifest.name, 'Lossy — AI Context Portability');
+  assert.equal(manifest.default_locale, 'es');
   assertions++;
-  assert.equal(manifest.action.default_title, 'Lossy — AI Context Portability');
+  assert.equal(resolveMessage(manifest.name, esMessages), 'Lossy — AI Context Portability');
+  assertions++;
+  assert.equal(resolveMessage(manifest.action.default_title, enMessages), 'Lossy — AI Context Portability');
+  assertions++;
+  assert.ok(enMessages.extensionDescription.message.length <= 132, 'La descripción en inglés supera 132 caracteres');
+  assertions++;
+  assert.ok(esMessages.extensionDescription.message.length <= 132, 'La descripción en español supera 132 caracteres');
   assertions++;
   assert.equal(manifest.icons['16'], 'icons/icon16.png');
   assertions++;
@@ -2818,7 +2831,7 @@ test('Lossy P2: Formal Rebranding — Icons, Manifest, Brand Text, and Zero-Emoj
     assert.equal(emojiRegex.test(content), false, `Archivo ${rel} no debe contener emojis`);
   });
 
-  assert.equal(assertions, 45, 'Debe ejecutar exactamente 45 aserciones físicas de P2 Rebranding');
+  assert.equal(assertions, 48, 'Debe ejecutar exactamente 48 aserciones físicas de P2 Rebranding');
 });
 
 test('Lossy P3: Clips & Selective Context Primitive — Schema, Provenance, Non-Destructive Storage & Heterogeneous Collections', async () => {

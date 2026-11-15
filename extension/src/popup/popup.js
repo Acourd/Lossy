@@ -785,8 +785,9 @@ function initPopup() {
     el.textContent=info.ready+' de '+info.total+(capturePersisted?' imágenes guardadas':' imágenes disponibles en esta ventana')+(info.missing ? ' · Se intentarán recuperar las pendientes al exportar.' : capturePersisted?' · Disponibles sin conexión.':' · Esta captura no se ha guardado.');
     const badge=document.getElementById('export-readiness-label');
     if(badge)badge.textContent=info.missing?'REVISAR':extractedData.integrity?.status==='partial'?'PARCIAL':'LISTO';
-    if(info.missing && transitStatusSub)transitStatusSub.textContent='Imágenes pendientes';
-    else if(transitStatusSub?.textContent==='Imágenes pendientes')transitStatusSub.textContent='Capturado';
+    // Se marca con un atributo, porque el texto puede estar traducido al inglés.
+    if(info.missing && transitStatusSub){transitStatusSub.textContent='Imágenes pendientes';transitStatusSub.dataset.pending='1';}
+    else if(transitStatusSub?.dataset.pending==='1'){transitStatusSub.textContent='Capturado';delete transitStatusSub.dataset.pending;}
   }
 
   function chooseMarkdownStrategy() {

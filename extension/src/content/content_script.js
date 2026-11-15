@@ -1795,7 +1795,7 @@
       if (existing) existing.remove();
       const toast = doc.createElement('div');
       toast.className = 'lossy-toast-notice';
-      toast.textContent = message;
+      toast.textContent = typeof LossyI18n !== 'undefined' ? LossyI18n.translateText(message) : message;
       doc.body.appendChild(toast);
       setTimeout(() => {
         if (toast.parentNode) toast.parentNode.removeChild(toast);
@@ -1834,6 +1834,7 @@
           <span>Lossy</span>
         `;
 
+        if (typeof LossyI18n !== 'undefined') LossyI18n.translateNode(btn);
         btn.addEventListener('click', (e) => {
           e.stopPropagation();
           this.togglePopover(wrapper, container, idx, rootDoc);
@@ -1888,6 +1889,7 @@
         </div>
       `;
 
+      if (typeof LossyI18n !== 'undefined') LossyI18n.translateNode(popover);
       popover.addEventListener('click', async (e) => {
         e.stopPropagation();
         const target = e.target.closest('[data-action], [data-format]');
