@@ -1,5 +1,12 @@
 <p align="center">
-  <img src="docs/banner-en.png" alt="Lossy: save your ChatGPT conversations and take them to any AI" width="640">
+  <img src="docs/banner-en.png" alt="Lossy: save your ChatGPT conversations and take them to any AI" width="100%">
+</p>
+
+<p align="center">
+  <img src="https://img.shields.io/badge/license-MIT-green" alt="License: MIT">
+  <img src="https://img.shields.io/badge/version-1.6.1-blue" alt="Version 1.6.1">
+  <img src="https://img.shields.io/badge/browser-Chrome%20%7C%20Edge-informational" alt="Works in Chrome and Edge">
+  <img src="https://img.shields.io/badge/backend-none-brightgreen" alt="No backend">
 </p>
 
 <p align="center">
@@ -11,7 +18,7 @@
 Lossy keeps your ChatGPT conversations in your browser, organizes them into projects, and packs the context you need to continue somewhere else, such as Claude. Every export includes links to its source and an integrity receipt, so you always know exactly what you carried over.
 
 <p align="center">
-  <img src="docs/showcase-en.png" alt="Lossy in action: the capture popup, the library, and a transfer being prepared" width="830">
+  <img src="docs/showcase-en.png" alt="Lossy in action: the capture popup, the library, and a transfer being prepared" width="100%">
 </p>
 
 ## What you can do
