@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="docs/banner-en.png" alt="Lossy: save your ChatGPT conversations and take them to any AI" width="100%">
+  <img src="docs/banner-en-v2.png" alt="Lossy: save your ChatGPT conversations and take them to any AI" width="100%">
 </p>
 
 <p align="center">
@@ -18,7 +18,7 @@
 Lossy keeps your ChatGPT conversations in your browser, organizes them into projects, and packs the context you need to continue somewhere else, such as Claude. Every export includes links to its source and an integrity receipt, so you always know exactly what you carried over.
 
 <p align="center">
-  <img src="docs/showcase-en.png" alt="Lossy in action: the capture popup, the library, and a transfer being prepared" width="100%">
+  <img src="docs/showcase-en-v2.png" alt="Lossy in action: the capture popup, the library, and a transfer being prepared" width="100%">
 </p>
 
 ## What you can do

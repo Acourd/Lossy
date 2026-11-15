@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="docs/banner-es.png" alt="Lossy: guarda tus conversaciones de ChatGPT y llévalas a otra IA" width="100%">
+  <img src="docs/banner-es-v2.png" alt="Lossy: guarda tus conversaciones de ChatGPT y llévalas a otra IA" width="100%">
 </p>
 
 <p align="center">
@@ -18,7 +18,7 @@
 Lossy guarda tus conversaciones de ChatGPT en tu navegador, las organiza en proyectos y prepara el contexto que necesitas para seguir en otro lugar, como Claude. Cada exportación incluye enlaces a su origen y un recibo de integridad, así que siempre sabes qué llevaste contigo.
 
 <p align="center">
-  <img src="docs/showcase-es.png" alt="Lossy en uso: la ventana emergente de captura, la biblioteca y una transferencia en preparación" width="100%">
+  <img src="docs/showcase-es-v2.png" alt="Lossy en uso: la ventana emergente de captura, la biblioteca y una transferencia en preparación" width="100%">
 </p>
 
 ## Qué puedes hacer
