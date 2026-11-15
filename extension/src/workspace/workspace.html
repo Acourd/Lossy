@@ -1,0 +1,680 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Lossy Workspace — AI Context Portability</title>
+  <link rel="stylesheet" href="workspace.css">
+<link rel="icon" type="image/png" sizes="32x32" href="../../icons/icon32.png">
+</head>
+<body class="theme-dark">
+  <div class="app-layout">
+    <!-- Sidebar Navigation -->
+    <aside class="app-sidebar" aria-label="Navegación principal">
+      <div class="sidebar-brand">
+        <div class="brand-glyph-box" aria-hidden="true">
+          <img src="../../icons/icon128.png" alt="Lossy" class="brand-glyph-img" width="24" height="24">
+        </div>
+        <div class="brand-meta">
+          <span class="brand-name">Lossy</span>
+          <span class="brand-tag" title="Lossy 1.6.1">Tu espacio personal</span>
+        </div>
+      </div>
+
+      <nav class="sidebar-nav">
+        <button id="nav-library" aria-label="Biblioteca" title="Biblioteca" class="nav-item active" type="button" data-view="library">
+          <svg class="nav-icon" viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+            <path d="M4 4h12v12H4z"/>
+            <path d="M4 8h12"/>
+            <path d="M8 8v8"/>
+          </svg>
+          <span class="nav-label">Biblioteca</span>
+          <span id="nav-library-count" class="nav-badge">0</span>
+        </button>
+
+        <button id="nav-collections" aria-label="Proyectos" title="Proyectos" class="nav-item" type="button" data-view="collections">
+          <svg class="nav-icon" viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+            <path d="M3 5a2 2 0 0 1 2-2h4l2 2h6a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5z"/>
+          </svg>
+          <span class="nav-label">Proyectos</span>
+          <span id="nav-collections-count" class="nav-badge">0</span>
+        </button>
+
+        <!-- Árbol Jerárquico de Proyectos en Sidebar (Drop Targets) -->
+        <div id="sidebar-collections-container" class="sidebar-collections-container">
+          <div class="sidebar-collections-header" id="sidebar-collections-header" title="Arrastra conversaciones aquí o crea una nueva">
+            <span class="subnav-title">Proyectos</span>
+            <button id="btn-sidebar-new-collection" class="btn-icon-subtle" type="button" title="Nuevo proyecto" aria-label="Nuevo proyecto">
+              <svg viewBox="0 0 16 16" width="12" height="12" fill="none" stroke="currentColor" stroke-width="2">
+                <line x1="8" y1="3" x2="8" y2="13"/>
+                <line x1="3" y1="8" x2="13" y2="8"/>
+              </svg>
+            </button>
+          </div>
+          <div id="sidebar-collections-list" class="sidebar-collections-list">
+            <!-- Renderizado dinámico de proyectos como drop targets -->
+          </div>
+        </div>
+
+        <button id="nav-transfers" aria-label="Transferencias" title="Transferencias" class="nav-item" type="button" data-view="transfers">
+          <svg class="nav-icon" viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+            <circle cx="5" cy="15" r="2"/>
+            <circle cx="15" cy="5" r="2"/>
+            <circle cx="15" cy="15" r="2"/>
+            <path d="M7 15h6"/>
+            <path d="M5 13V8a3 3 0 0 1 3-3h5"/>
+          </svg>
+          <span class="nav-label">Transferencias</span>
+          <span id="nav-transfers-count" class="nav-badge">0</span>
+        </button>
+
+        <button id="nav-diagnostics" aria-label="Diagnósticos" title="Diagnósticos" class="nav-item" type="button" data-view="diagnostics">
+          <svg class="nav-icon" viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+            <circle cx="10" cy="10" r="7"/>
+            <path d="M10 7v3"/>
+            <circle cx="10" cy="13.5" r="0.75" fill="currentColor"/>
+          </svg>
+          <span class="nav-label">Diagnósticos</span>
+        </button>
+
+        <button id="nav-settings" aria-label="Configuración" title="Configuración" class="nav-item" type="button" data-view="settings">
+          <svg class="nav-icon" viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+            <circle cx="10" cy="10" r="3"/>
+            <path d="M16 10a6 6 0 0 1-.2 1.5l1.6 1.2-1.5 2.6-1.9-.8a6 6 0 0 1-1.6.1L12.4 18h-3l-.3-2.1a6 6 0 0 1-1.3-.8l-1.9.8-1.5-2.6 1.6-1.2A6 6 0 0 1 5.8 10l-1.6-1.2 1.5-2.6 1.9.8a6 6 0 0 1 1.3-.8L9.4 4h3l.3 2.1a6 6 0 0 1 1.6.1l1.9-.8 1.5 2.6-1.6 1.2z"/>
+          </svg>
+          <span class="nav-label">Configuración</span>
+        </button>
+      </nav>
+
+      <div class="sidebar-footer">
+        <div class="privacy-capsule">
+          <svg class="privacy-icon" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.8">
+            <path d="M8 1.5l5 2.5v4c0 3.8-2.5 6.2-5 7-2.5-.8-5-3.2-5-7V4l5-2.5z"/>
+          </svg>
+          <span>Tu biblioteca, en este navegador</span>
+        </div>
+      </div>
+    </aside>
+
+    <!-- Main Content Stage -->
+    <main class="app-main">
+      <!-- Top Action Header -->
+      <header class="main-header">
+        <div class="search-box">
+          <svg class="search-icon" viewBox="0 0 18 18" fill="none" stroke="currentColor" stroke-width="1.8">
+            <circle cx="8" cy="8" r="5"/>
+            <line x1="12" y1="12" x2="16" y2="16"/>
+          </svg>
+          <input type="search" id="global-search" class="search-input" placeholder="Buscar en tu contexto…" aria-label="Buscar en la biblioteca">
+        </div>
+
+        <div class="header-actions">
+          <button id="btn-header-new-transfer" class="btn btn-primary" type="button">
+            <svg class="btn-icon" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="2">
+              <line x1="8" y1="3" x2="8" y2="13"/>
+              <line x1="3" y1="8" x2="13" y2="8"/>
+            </svg>
+            <span>Preparar transferencia</span>
+          </button>
+        </div>
+      </header>
+
+      <!-- Persistent Bulk Selection Action Bar -->
+      <div id="bulk-action-bar" class="bulk-action-bar hidden" role="region" aria-label="Acciones de selección masiva">
+        <div class="bulk-info">
+          <span id="bulk-selected-count" class="bulk-count">0</span>
+          <span id="bulk-selected-label">seleccionadas</span>
+        </div>
+        <div class="bulk-buttons">
+          <button id="btn-bulk-collection" class="btn btn-sm btn-secondary" type="button">Añadir a Proyecto</button>
+          <button id="btn-bulk-document" class="btn btn-sm btn-secondary" type="button">Preparar documento</button>
+          <button id="btn-bulk-export-menu" class="btn btn-sm btn-secondary" type="button">Exportar</button>
+          <button id="btn-bulk-transfer" class="btn btn-sm btn-primary" type="button">Transferir</button>
+          <button id="btn-bulk-more" class="btn btn-sm btn-ghost" type="button" title="Más opciones">⋯</button>
+          <button id="btn-bulk-clear" class="btn btn-sm btn-ghost btn-bulk-close" type="button" title="Desmarcar selección" aria-label="Desmarcar">&times;</button>
+          <!-- Controles de soporte para compatibilidad de tests -->
+          <div style="display: none;" aria-hidden="true">
+            <button id="btn-bulk-capture" type="button">Actualizar</button>
+            <button id="btn-bulk-delete" type="button">Eliminar</button>
+            <button id="btn-bulk-export-md" type="button">Exportar .md</button>
+            <button id="btn-bulk-export-json" type="button">Exportar .json</button>
+          </div>
+        </div>
+      </div>
+
+      <!-- VIEW 1: Library -->
+      <section id="view-library" class="view-panel active">
+        <div class="library-heading">
+          <div class="library-intro"><span class="eyebrow">TU ARCHIVO PERSONAL</span><h1>Tu contexto, <span>a mano.</span></h1><p>Conversaciones, ideas y referencias. Todo listo para tu siguiente paso.</p></div>
+          <svg class="archive-art" viewBox="0 0 260 160" fill="none" aria-hidden="true" focusable="false">
+            <path class="art-line" d="M20 143h220M25 25h20M221 20v12" stroke-dasharray="2 5" opacity=".5"/>
+            <rect class="art-back" x="52" y="27" width="128" height="105" rx="11" transform="rotate(-10 116 80)"/>
+            <rect class="art-back" x="83" y="25" width="128" height="105" rx="11" transform="rotate(8 147 78)"/>
+            <rect class="art-sheet" x="63" y="31" width="128" height="105" rx="12"/>
+            <rect class="art-accent" x="80" y="49" width="27" height="27" rx="7" stroke-width=".8"/>
+            <path d="M88 57h9l3 3v9H88zM97 57v4h3" stroke="currentColor" stroke-width="1.2" stroke-linejoin="round"/>
+            <path class="art-line" d="M119 56h53M119 64h37M80 92h93M80 101h75M80 110h83" stroke-width="2" stroke-linecap="round"/>
+            <circle class="art-circle" cx="205" cy="116" r="20" stroke-width="1"/>
+            <path d="M198 116h14m-5-5 5 5-5 5" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/>
+            <rect class="art-accent" x="32" y="110" width="27" height="27" rx="8" stroke-width=".8"/>
+            <path d="M41 118h9v10h-9zM44 115h9v10" stroke="currentColor" stroke-width="1.2" stroke-linejoin="round"/>
+            <circle cx="216" cy="39" r="3" fill="currentColor"/>
+          </svg>
+          <span class="local-label"><span></span> Almacenamiento local</span>
+        </div>
+        <section class="project-home" aria-labelledby="project-home-title">
+          <div class="project-home-heading"><div><span class="eyebrow">CONTINUIDAD</span><h2 id="project-home-title">Retoma tu trabajo</h2></div><button id="btn-home-new-project" type="button" class="btn btn-secondary btn-sm">Nuevo proyecto</button></div>
+          <div id="project-home-list" class="project-home-grid" aria-live="polite"></div>
+        </section>
+        <div class="library-overview" aria-label="Resumen de biblioteca">
+          <div class="overview-item"><span>Conversaciones</span><strong id="summary-saved">0</strong><small>Tu historial, a mano</small><svg class="overview-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="3" y="4" width="18" height="16" rx="3"/><path d="M3 9h18M8 9v11"/></svg></div>
+          <div class="overview-item"><span>Clips</span><strong id="summary-clips">0</strong><small>Ideas que vale la pena conservar</small><svg class="overview-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M8 5h11v14H8zM5 16H3V3h11v2M11 9h5M11 13h5"/></svg></div>
+          <div class="overview-item"><span>Por revisar</span><strong id="summary-attention">0</strong><small>Capturas con avisos</small><svg class="overview-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="9"/><path d="M12 7v6M12 17h.01"/></svg></div>
+        </div>
+        <div class="library-content">
+        <!-- Pestañas de Vista de Biblioteca: Todas | Conversaciones | Clips -->
+        <div class="library-tabs" role="group" aria-label="Filtrar biblioteca por tipo">
+          <button id="tab-lib-all" class="btn btn-sm btn-ghost active" type="button" data-tab="all">Todas (<span id="count-tab-all">0</span>)</button>
+          <button id="tab-lib-convs" class="btn btn-sm btn-ghost" type="button" data-tab="conversations">Conversaciones (<span id="count-tab-convs">0</span>)</button>
+          <button id="tab-lib-clips" class="btn btn-sm btn-ghost" type="button" data-tab="clips">Clips (<span id="count-tab-clips">0</span>)</button>
+        </div>
+
+        <div class="view-controls">
+          <div class="filter-group">
+            <div class="filter-field"><label for="filter-platform" class="filter-label">Plataforma:</label>
+            <select id="filter-platform" class="select-input">
+              <option value="">Todas</option>
+              <option value="chatgpt">ChatGPT</option>
+              <option value="claude">Claude</option>
+            </select></div>
+
+            <div class="filter-field"><label for="filter-integrity" class="filter-label">Integridad:</label>
+            <select id="filter-integrity" class="select-input">
+              <option value="">Todas</option>
+              <option value="captured">Capturadas</option>
+              <option value="partial">Parciales</option>
+              <option value="degraded">Degradadas</option>
+              <option value="failed">Fallidas</option>
+            </select></div>
+          </div>
+          <div class="view-stats">
+            <span id="library-total-label">0 conversaciones</span>
+          </div>
+        </div>
+
+        <div class="table-container">
+          <table class="data-table" aria-label="Tabla de conversaciones">
+            <thead>
+              <tr>
+                <th class="col-drag" aria-label="Arrastrar"></th>
+                <th class="col-check"><input type="checkbox" id="check-all" aria-label="Seleccionar todas de esta página"></th>
+                <th class="col-title">Título</th>
+                <th class="col-platform">Origen</th>
+                <th class="col-model">Modelo</th>
+                <th class="col-messages">Mensajes</th>
+                <th class="col-date" title="Fecha de última captura o actualización">Actualizada</th>
+                <th class="col-integrity">Integridad</th>
+                <th class="col-actions">Acciones</th>
+              </tr>
+            </thead>
+            <tbody id="library-table-body">
+              <!-- Renderizado dinámico -->
+              <tr class="empty-row">
+                <td colspan="9">Cargando biblioteca local...</td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+        <div class="list-pagination"><button id="library-page-prev" type="button" class="btn btn-secondary btn-sm">Anterior</button><span id="library-page-state"></span><button id="library-page-next" type="button" class="btn btn-secondary btn-sm">Siguiente</button></div>
+        </div>
+      </section>
+
+      <!-- VIEW 2: Collections -->
+      <section id="view-collections" class="view-panel hidden">
+        <div class="panel-header">
+          <h2>Tus proyectos</h2>
+          <div class="project-list-actions"><button id="btn-restore-project" class="btn btn-secondary btn-sm" type="button">Restaurar proyecto (.zip)</button><button id="btn-new-collection" class="btn btn-primary btn-sm" type="button">Nuevo proyecto</button></div>
+        </div>
+        <p class="panel-sub">Reúne tus conversaciones y clips, guarda las decisiones y retoma el siguiente paso.</p>
+        <input id="file-restore-project" type="file" accept=".zip,application/zip" hidden><p id="project-import-status" class="project-import-status" role="status" aria-live="polite"></p>
+        <div id="collections-grid" class="collections-grid">
+          <!-- Renderizado dinámico -->
+        </div>
+
+        <!-- Vista detallada de proyecto seleccionada -->
+        <div id="collection-detail-panel" class="collection-detail-panel hidden" style="margin-top: 20px;">
+          <div class="panel-header" style="border-bottom: 1px solid var(--border-color); padding-bottom: 12px;">
+            <div>
+              <button id="btn-back-to-collections" class="btn btn-ghost btn-sm" type="button" style="margin-bottom: 6px;">&larr; Volver a todos los proyectos</button>
+              <h3 id="collection-detail-title" style="font-size: 16px; font-weight: 600;">Nombre de Proyecto</h3>
+              <p id="collection-detail-desc" class="panel-sub" style="margin-bottom: 0;">Descripción</p>
+            </div>
+            <div style="display: flex; gap: 8px; align-items: center; flex-wrap: wrap;">
+              <button id="btn-coll-create-transfer" class="btn btn-primary btn-sm" type="button">Continuar en otra IA</button>
+              <button id="btn-coll-document" class="btn btn-secondary btn-sm" type="button">Preparar documento</button>
+              <button id="btn-coll-export" class="btn btn-secondary btn-sm" type="button">Exportar proyecto (.zip)</button>
+              <button id="btn-coll-add-convs" class="btn btn-secondary btn-sm" type="button">Añadir conversaciones</button>
+              <button id="btn-coll-rename" class="btn btn-secondary btn-sm" type="button">Renombrar</button>
+              <button id="btn-coll-delete" class="btn btn-danger btn-sm" type="button">Eliminar Proyecto</button>
+            </div>
+          </div>
+          <form id="project-context-form" class="project-editor">
+            <div class="project-editor-heading"><div><span class="eyebrow">ESTADO ACTUAL</span><h3>Un punto claro para continuar</h3><p>Conserva lo que importa entre conversaciones y asistentes. Estos campos los defines tú.</p></div><label>Estado<select id="project-status" class="select-input"><option value="active">En curso</option><option value="paused">En pausa</option><option value="completed">Completado</option></select></label></div>
+            <div class="project-fields">
+              <label class="project-field-wide" for="project-goal">Objetivo<textarea id="project-goal" rows="2" maxlength="6000" placeholder="¿Qué estás intentando conseguir?"></textarea></label>
+              <label for="project-decisions">Decisiones tomadas<textarea id="project-decisions" rows="4" maxlength="12000" placeholder="Lo que ya decidiste y no quieres volver a discutir."></textarea></label>
+              <label for="project-questions">Preguntas y pendientes<textarea id="project-questions" rows="4" maxlength="12000" placeholder="Lo que falta resolver, comprobar o descartar."></textarea></label>
+              <label class="project-field-wide" for="project-next-step">Siguiente paso<textarea id="project-next-step" rows="2" maxlength="6000" placeholder="La acción concreta con la que quieres retomar."></textarea></label>
+            </div>
+            <div class="project-editor-footer"><span id="project-save-status" role="status" aria-live="polite">Sin cambios</span><div><button id="btn-project-save" class="btn btn-secondary" type="submit">Guardar contexto</button><button id="btn-project-copy" class="btn btn-primary" type="button">Copiar para continuar</button></div></div>
+            <p class="project-copy-help">Copiar lleva el estado y el listado de fuentes. Para incluir los mensajes y las imágenes, usa «Continuar en otra IA».</p>
+            <div id="project-recovery" class="project-recovery hidden"><button id="btn-project-draft" class="btn btn-secondary btn-sm" type="button">Copiar borrador</button><button id="btn-project-reload" class="btn btn-ghost btn-sm" type="button">Descartar cambios y recargar contexto</button></div>
+          </form>
+          <nav id="project-folder-nav" class="project-folder-nav hidden" aria-label="Carpetas del proyecto"></nav>
+          <div class="view-controls" style="margin-top: 12px; margin-bottom: 0;">
+            <div class="search-box" style="max-width: 320px;">
+              <svg class="search-icon" viewBox="0 0 18 18" fill="none" stroke="currentColor" stroke-width="1.8">
+                <circle cx="8" cy="8" r="5"/>
+                <line x1="12" y1="12" x2="16" y2="16"/>
+              </svg>
+              <input type="search" id="collection-search-input" class="search-input" placeholder="Buscar en este proyecto..." aria-label="Buscar en este proyecto">
+            </div>
+          </div>
+          <div class="table-container" style="margin-top: 14px;">
+            <table class="data-table" aria-label="Conversaciones en el proyecto">
+              <thead>
+                <tr>
+                  <th class="col-drag" aria-label="Arrastrar"></th>
+                  <th class="col-title">Título</th>
+                  <th class="col-platform">Origen</th>
+                  <th class="col-model">Modelo</th>
+                  <th class="col-messages">Mensajes</th>
+                  <th class="col-date" title="Fecha de última captura o actualización">Actualizada</th>
+                  <th class="col-integrity">Integridad</th>
+                  <th class="col-actions">Acciones</th>
+                </tr>
+              </thead>
+              <tbody id="collection-table-body">
+              </tbody>
+            </table>
+          </div>
+          <div class="list-pagination"><button id="project-page-prev" type="button" class="btn btn-secondary btn-sm">Anterior</button><span id="project-page-state"></span><button id="project-page-next" type="button" class="btn btn-secondary btn-sm">Siguiente</button></div>
+        </div>
+      </section>
+
+      <!-- VIEW 3: Transfers (Builder) -->
+      <section id="view-transfers" class="view-panel hidden">
+        <div class="panel-header">
+          <h2>Prepara el contexto para continuar</h2>
+            <p class="text-muted">Reúne conversaciones e imágenes en un paquete que puedas usar en tu próximo entorno.</p>
+        </div>
+        
+<div class="transfer-mode-tabs" role="tablist" aria-label="Tipo de transferencia"><button id="transfer-mode-archive" role="tab" aria-selected="true" aria-controls="chatgpt-migration" class="active" type="button">De ChatGPT a Claude</button><button id="transfer-mode-selection" role="tab" aria-selected="false" aria-controls="transfer-existing-builder" type="button">Selección de biblioteca</button></div>
+<section id="chatgpt-migration" class="migration-panel" aria-labelledby="migration-title">
+ <div class="migration-heading"><div><span class="eyebrow">CONTINUIDAD ENTRE ASISTENTES</span><h3 id="migration-title">De ChatGPT a Claude</h3><p>Conserva tu historial en un proyecto local. Después elige las conversaciones que necesitas para continuar.</p></div><span class="migration-local">Procesamiento local</span></div>
+ <div class="migration-file-actions"><button id="migration-choose-file" class="btn btn-primary" type="button">Elegir ZIP o JSON</button><button id="migration-choose-folder" class="btn btn-secondary" type="button">Carpeta descomprimida</button><button id="migration-cancel" class="btn btn-ghost hidden" type="button">Cancelar operación</button><input id="migration-file" type="file" accept=".zip,.json" multiple hidden><input id="migration-directory" type="file" webkitdirectory directory multiple hidden></div>
+ <p class="migration-help">Admite conversations.json y sus archivos numerados. Para ZIP mayores de 512 MB, selecciona la carpeta descomprimida; solo se leen el historial y los recursos necesarios.</p>
+ <label id="migration-existing-label" class="migration-existing hidden">Historiales ya importados<select id="migration-existing" class="select-input"><option value="">Elige un proyecto</option></select></label>
+ <progress id="migration-progress" class="hidden" max="100" value="0" aria-label="Progreso de migración"></progress><p id="migration-status" class="migration-status" role="status" aria-live="polite"></p>
+ <div id="migration-review" class="hidden">
+  <div id="migration-summary" class="migration-summary"></div>
+  <fieldset id="migration-import-options" class="migration-fields"><label>Nombre del proyecto<input id="migration-name" class="search-input" value="ChatGPT" maxlength="500"></label><label>Organizar carpetas<select id="migration-grouping" class="select-input"><option value="date">Por año y mes</option><option value="source">Por metadatos indicados</option></select></label><label id="migration-existing-copy-label" class="migration-check hidden"><input id="migration-existing-copy" type="checkbox"> Crear otro proyecto en vez de actualizar esta importación</label></fieldset>
+  <p id="migration-mode-help" class="migration-help"></p>
+  <div class="migration-picker-controls"><input id="migration-search" class="search-input" type="search" placeholder="Buscar conversaciones por título" aria-label="Buscar conversaciones de la migración"><select id="migration-folder" class="select-input hidden" aria-label="Carpeta de la migración"></select><button id="migration-select-matches" class="btn btn-secondary btn-sm" type="button">Seleccionar coincidencias</button><button id="migration-clear-selection" class="btn btn-ghost btn-sm" type="button">Limpiar selección</button></div>
+  <p id="migration-selection-count" class="migration-help"></p><div id="migration-chat-list" class="migration-chat-list"></div><div class="migration-pagination"><button id="migration-prev" class="btn btn-secondary btn-sm" type="button">Anterior</button><span id="migration-page-state"></span><button id="migration-next" class="btn btn-secondary btn-sm" type="button">Siguiente</button></div>
+  <div id="migration-import-actions" class="migration-footer"><button id="migration-import" class="btn btn-primary" type="button">Importar en Lossy</button><span>Las versiones locales distintas se conservan.</span></div>
+  <div id="migration-export-options" class="hidden"><div class="migration-fields"><label>¿Qué quieres continuar?<textarea id="migration-goal" rows="2" class="search-input" maxlength="6000" placeholder="Describe el objetivo actual para Claude"></textarea></label><label>Tamaño aproximado de las partes<select id="migration-part-size" class="select-input"><option value="32768">32 KB</option><option value="65536" selected>64 KB</option><option value="131072">128 KB</option></select></label></div><div class="migration-footer"><button id="migration-package" class="btn btn-primary" type="button">Preparar paquete para Claude</button><button id="migration-open-project" class="btn btn-secondary" type="button">Abrir proyecto local</button></div><p class="migration-help">Selecciona hasta 500 conversaciones por paquete. El ZIP contiene texto dividido, índice y recursos. Debes descomprimirlo y adjuntar en Claude solo los archivos pertinentes; no recrea automáticamente chats, memoria ni herramientas.</p></div>
+ </div>
+ <details class="migration-prompts"><summary>Plantillas para completar el contexto</summary><p>Úsalas en el asistente donde tengas la información y revisa el resultado antes de compartirlo.</p><label for="migration-template-kind">Qué necesitas trasladar</label><select id="migration-template-kind" class="select-input"><option value="project">Estado de un proyecto</option><option value="memory">Preferencias y memoria disponible</option><option value="assistant">GPT o complemento propio</option></select><textarea id="migration-template" rows="6" maxlength="20000" aria-label="Plantilla de migración editable"></textarea><button id="migration-copy-template" class="btn btn-secondary btn-sm" type="button">Copiar plantilla</button><a href="https://support.claude.com/en/articles/12123587-import-and-export-your-memory-from-claude" target="_blank" rel="noopener noreferrer">Cómo importar memoria en Claude</a></details>
+</section>
+
+        <div id="transfer-existing-builder" class="hidden">
+        <div id="transfer-project-summary" class="transfer-project-summary hidden" role="status"></div>
+        <div class="transfer-goal" style="margin-bottom:20px"><label for="transfer-goal" class="filter-label">¿Qué quieres continuar?</label><textarea id="transfer-goal" class="search-input" rows="2" style="width:100%;min-height:70px;padding:12px;margin-top:8px" placeholder="Por ejemplo: continuar el diseño del avatar conservando las referencias y las decisiones anteriores."></textarea></div>
+          <div class="transfer-stepper">
+          <div class="step-card">
+            <div class="step-num">1</div>
+            <div class="step-content">
+              <h3>Selecciona el contexto</h3>
+              <p>Elige conversaciones de la biblioteca o un proyecto activo.</p>
+              <div id="transfer-selected-preview" class="selection-chip-list">
+                <span class="chip">Ninguna conversación seleccionada</span>
+              </div>
+              <div style="margin-top: 10px; display: flex; gap: 8px; align-items: center; flex-wrap: wrap;">
+                <label for="transfer-collection-select" class="filter-label" style="font-size: 11.5px;">Cargar desde:</label>
+                <select id="transfer-collection-select" class="select-input" style="font-size: 11.5px; padding: 4px 8px; min-width: 180px;">
+                  <option value="">Selección manual actual</option>
+                </select>
+                <button id="btn-transfer-select-all" class="btn btn-secondary btn-xs" type="button">Seleccionar todas</button>
+                <button id="btn-transfer-clear" class="btn btn-ghost btn-xs" type="button">Limpiar</button>
+              </div>
+            </div>
+          </div>
+
+          <div class="step-card">
+            <div class="step-num">2</div>
+            <div class="step-content">
+              <h3>Comprueba el contenido</h3>
+              <div id="transfer-readiness" class="readiness-box">
+                <p>Selecciona contexto para evaluar fidelidad.</p>
+              </div>
+            </div>
+          </div>
+
+          <div class="step-card">
+            <div class="step-num">3</div>
+            <div class="step-content">
+              <h3>Destino</h3>
+              <div class="target-options">
+                <label class="target-radio">
+                  <input type="radio" name="transfer-target" value="generic" checked>
+                  <div class="target-label">
+                    <strong>Paquete universal</strong>
+                    <span>Conversaciones, imágenes y un resumen para continuar en otro entorno.</span>
+                  </div>
+                </label>
+                <label class="target-radio">
+                  <input type="radio" name="transfer-target" value="claude">
+                  <div class="target-label">
+                    <strong>Anthropic Claude</strong>
+                    <span>Incluye instrucciones para continuar la conversación en Claude.</span>
+                  </div>
+                </label>
+                <label class="target-radio">
+                  <input type="radio" name="transfer-target" value="markdown">
+                  <div class="target-label">
+                    <strong>Proyecto Markdown</strong>
+                    <span>Documentos de texto con imágenes y un índice de conversaciones.</span>
+                  </div>
+                </label>
+              </div>
+            </div>
+          </div>
+
+          <div class="step-card">
+            <div class="step-num">4</div>
+            <div class="step-content">
+              <h3>Descarga el paquete</h3>
+              <button id="btn-execute-transfer" class="btn btn-primary" type="button" disabled>Generar y descargar paquete</button>
+              <div id="transfer-output" class="transfer-output hidden"></div>
+            </div>
+          </div>
+        </div>
+        </div>
+      </section>
+
+      <!-- VIEW 4: Diagnostics -->
+      <section id="view-diagnostics" class="view-panel hidden">
+        <div class="panel-header settings-header">
+          <div>
+            <span class="eyebrow">DIAGNÓSTICO</span>
+            <h2>Estado local</h2>
+            <p class="panel-sub">Qué detecta Lossy y qué ha ocurrido en este navegador. Los datos sensibles se eliminan al exportar.</p>
+          </div>
+          <button id="btn-export-diagnostics" class="btn btn-secondary btn-sm" type="button">Exportar diagnóstico (.json)</button>
+        </div>
+
+        <div class="diagnostics-grid">
+          <div class="diag-card">
+            <h3>Capacidades detectadas en ChatGPT</h3>
+            <div id="diag-capabilities-list" class="capabilities-list">
+              <div class="cap-item"><span>Cargando capacidades...</span></div>
+            </div>
+          </div>
+
+          <div class="diag-card">
+            <h3>Sucesos y advertencias</h3>
+            <div id="diag-events-log" class="events-log">
+              <p class="text-muted">Sin advertencias críticas registradas.</p>
+            </div>
+          </div>
+
+          <div class="diag-card" style="grid-column: 1 / -1;">
+            <h3>Trabajos en segundo plano</h3>
+            <div id="diag-jobs-log" class="events-log">
+              <p class="text-muted">Sin trabajos ejecutados recientemente.</p>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <!-- VIEW 5: Settings -->
+      <section id="view-settings" class="view-panel hidden">
+        <div class="panel-header settings-header">
+          <div>
+            <span class="eyebrow">AJUSTES</span>
+            <h2>Configuración</h2>
+            <p class="panel-sub">Apariencia, importación y datos guardados en este navegador.</p>
+          </div>
+        </div>
+
+        <div class="settings-stack">
+          <div class="setting-card">
+            <div class="setting-copy">
+              <h3>Apariencia</h3>
+              <p>«Sistema» sigue el tema de tu equipo. La elección se recuerda en este navegador.</p>
+            </div>
+            <div class="theme-buttons" role="group" aria-label="Tema del espacio de trabajo">
+              <button class="btn btn-secondary btn-sm" type="button" data-theme="system" aria-pressed="false">Sistema</button>
+              <button class="btn btn-secondary btn-sm" type="button" data-theme="theme-dark" aria-pressed="false">Oscuro</button>
+              <button class="btn btn-secondary btn-sm" type="button" data-theme="theme-light" aria-pressed="false">Claro</button>
+            </div>
+          </div>
+
+          <div class="setting-card">
+            <div class="setting-copy">
+              <h3>Importar exportación de ChatGPT</h3>
+              <p>Añade el ZIP oficial o su archivo <code>conversations.json</code> para incorporar tu historial sin abrir cada conversación.</p>
+            </div>
+            <label class="file-picker">
+              <input type="file" id="file-import-export" accept=".json,.zip" class="file-input">
+              <span class="btn btn-secondary btn-sm">Elegir archivo</span>
+            </label>
+            <div id="import-status" class="import-status"></div>
+          </div>
+
+          <div class="setting-card">
+            <div class="setting-copy">
+              <h3>Captura bajo demanda</h3>
+              <p>Lossy solo lee una conversación cuando pulsas «Capturar contexto» en el popup. Al abrirlo reconoce la pestaña y lo que ya tienes guardado, sin desplazar ni modificar ChatGPT.</p>
+            </div>
+          </div>
+
+          <div class="setting-card">
+            <div class="setting-copy">
+              <h3>Mantenimiento y Diagnóstico del Índice</h3>
+              <p>Actualiza la lista de conversaciones desde una pestaña abierta de ChatGPT.</p>
+            </div>
+            <button id="btn-header-refresh" class="btn btn-secondary btn-sm" type="button" title="Sincroniza el índice de conversaciones desde la pestaña de ChatGPT">
+              <svg class="btn-icon" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.8">
+                <path d="M2.5 8a5.5 5.5 0 1 0 1.6-3.9L2 6"/>
+                <path d="M2 2v4h4"/>
+              </svg>
+              <span>Sincronizar índice</span>
+            </button>
+          </div>
+
+          <div class="setting-card danger-zone">
+            <div class="setting-copy">
+              <h3>Borrar datos locales</h3>
+              <p>Elimina conversaciones, clips, proyectos y transferencias guardados en este navegador. Tu historial de ChatGPT no se modifica.</p>
+            </div>
+            <button id="btn-clear-db" class="btn btn-danger btn-sm" type="button">Borrar datos locales</button>
+          </div>
+        </div>
+      </section>
+
+      <!-- Persistent Global Job Tray (Visible a través de todas las vistas) -->
+      <div id="global-job-tray" class="global-job-tray hidden" role="region" aria-label="Trabajos en ejecución">
+        <div class="job-tray-status">
+          <div id="job-tray-dot" class="status-dot detecting"></div>
+          <div class="job-tray-meta">
+            <span id="job-tray-title" class="job-tray-title">Trabajo en curso</span>
+            <span id="job-tray-item" class="job-tray-item">Preparando...</span>
+          </div>
+        </div>
+        <div class="job-tray-progress-box">
+          <div class="job-tray-bar">
+            <div id="job-tray-fill" class="job-tray-fill" style="width: 0%;"></div>
+          </div>
+          <span id="job-tray-count" class="job-tray-count">0 / 0</span>
+        </div>
+        <div class="job-tray-controls">
+          <button id="btn-job-pause" class="btn btn-secondary btn-xs" type="button">Pausar</button>
+          <button id="btn-job-resume" class="btn btn-secondary btn-xs hidden" type="button">Reanudar</button>
+          <button id="btn-job-cancel" class="btn btn-danger btn-xs" type="button">Cancelar</button>
+          <button id="btn-job-dismiss" class="btn btn-ghost btn-xs" type="button" aria-label="Cerrar">&times;</button>
+        </div>
+      </div>
+    </main>
+
+    <!-- Side Inspector Drawer -->
+    <aside id="inspector-drawer" class="inspector-drawer hidden" aria-label="Inspector de conversación">
+      <div class="inspector-header">
+        <h3 id="inspector-title">Detalles de contexto</h3>
+        <button id="btn-open-full-reader" class="btn btn-secondary btn-xs" type="button" title="Abrir mesa de lectura amplia" style="margin-left: auto; margin-right: 8px;">⤢ Vista completa</button>
+        <button id="btn-close-inspector" class="btn-close" type="button" aria-label="Cerrar inspector">&times;</button>
+      </div>
+      <div id="inspector-body" class="inspector-body">
+        <!-- Renderizado dinámico -->
+      </div>
+    </aside>
+  </div>
+
+  <!-- Vista Ampliada / Full Reader Overlay (P1) -->
+  <div id="full-reader-overlay" class="full-reader-overlay hidden" role="dialog" aria-modal="true" aria-label="Vista completa de lectura">
+    <div class="full-reader-window">
+      <!-- Header -->
+      <header class="full-reader-header">
+        <div class="full-reader-title-area">
+          <div class="full-reader-brand-badge">Lossy Reader</div>
+          <h2 id="full-reader-title" class="full-reader-title">Título de la conversación</h2>
+          <div class="full-reader-tags">
+            <span id="full-reader-platform" class="badge-tag">ChatGPT</span>
+            <span id="full-reader-model" class="badge-tag">GPT-4o</span>
+            <span id="full-reader-msg-count" class="badge-tag">0 mensajes</span>
+          </div>
+        </div>
+
+        <div class="full-reader-controls">
+          <div class="full-reader-search-box">
+            <svg class="search-icon" viewBox="0 0 16 16" width="13" height="13" fill="none" stroke="currentColor" stroke-width="1.8">
+              <circle cx="7" cy="7" r="4.5"/>
+              <path d="m10.5 10.5 3 3"/>
+            </svg>
+            <input type="search" id="full-reader-search" placeholder="Buscar en conversación..." aria-label="Buscar en conversación">
+            <span id="full-reader-search-count" class="full-reader-search-count hidden">0</span>
+          </div>
+
+          <label class="full-reader-toggle-label" title="Alternar visualización de llamadas a herramientas, sistema y eventos técnicos">
+            <input type="checkbox" id="full-reader-toggle-tech">
+            <span>Eventos técnicos</span>
+          </label>
+
+          <button id="btn-full-reader-clip" class="btn btn-secondary btn-sm" type="button" title="Guardar turnos seleccionados como Clip">
+            <svg viewBox="0 0 16 16" width="13" height="13" fill="none" stroke="currentColor" stroke-width="1.8"><rect x="2" y="2" width="12" height="12" rx="2.5"/><path d="M5 8h6M5 11h4M5 5h3"/></svg>
+            <span id="full-reader-clip-btn-text">Guardar como Clip</span>
+          </button>
+
+          <button id="btn-full-reader-export" class="btn btn-secondary btn-sm" type="button" title="Abrir Centro de Exportación">
+            <svg viewBox="0 0 16 16" width="13" height="13" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M8 2v8M4 7l4 4 4-4M2 13h12"/></svg>
+            <span>Exportar</span>
+          </button>
+
+          <button id="btn-full-reader-collection" class="btn btn-secondary btn-sm" type="button" title="Añadir a proyecto">
+            <span>Proyecto</span>
+          </button>
+
+          <button id="btn-full-reader-close" class="btn btn-ghost btn-sm full-reader-close-btn" type="button" title="Cerrar vista completa (Esc)">
+            <svg viewBox="0 0 16 16" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2"><line x1="3" y1="3" x2="13" y2="13"/><line x1="13" y1="3" x2="3" y2="13"/></svg>
+          </button>
+        </div>
+      </header>
+
+      <!-- Reader Main Body -->
+      <div class="full-reader-body">
+        <!-- Sidebar: Conversation Switcher -->
+        <aside class="full-reader-sidebar">
+          <div class="full-reader-sidebar-header">
+            <span>Conversaciones</span>
+            <span id="full-reader-sidebar-count" class="badge-tag">0</span>
+          </div>
+          <div id="full-reader-conv-list" class="full-reader-conv-list">
+            <!-- Lista de conversaciones para cambio instantáneo -->
+          </div>
+        </aside>
+
+        <!-- Main Stream: Message Cards -->
+        <main class="full-reader-main">
+          <div class="full-reader-selection-bar" id="full-reader-selection-bar">
+            <div style="display: flex; align-items: center; gap: 8px;">
+              <button id="btn-full-reader-select-all" class="btn btn-ghost btn-xs" type="button">Seleccionar todos</button>
+              <button id="btn-full-reader-clear-select" class="btn btn-ghost btn-xs" type="button">Limpiar selección</button>
+              <span id="full-reader-selected-count" style="font-size: 11.5px; color: var(--text-tertiary);">0 turnos seleccionados</span>
+            </div>
+            <div id="full-reader-meta-notice" style="font-size: 11.5px; color: var(--text-tertiary);">Shift+clic para seleccionar rango continuo</div>
+          </div>
+          <div id="full-reader-stream" class="full-reader-stream">
+            <!-- Renderizado de turnos del lector -->
+          </div>
+        </main>
+      </div>
+    </div>
+  </div>
+
+  <!-- Modal Reutilizable Accesible -->
+  <div id="app-modal-backdrop" class="modal-backdrop hidden" role="dialog" aria-modal="true" aria-hidden="true">
+    <div id="app-modal-container" class="modal-dialog">
+      <div class="modal-header">
+        <h3 id="app-modal-title">Título</h3>
+        <button id="app-modal-close" class="btn-close" type="button" aria-label="Cerrar modal">&times;</button>
+      </div>
+      <div id="app-modal-body" class="modal-body">
+        <!-- Contenido dinámico -->
+      </div>
+      <div id="app-modal-footer" class="modal-footer">
+        <button id="app-modal-cancel" class="btn btn-secondary btn-sm" type="button">Cancelar</button>
+        <button id="app-modal-confirm" class="btn btn-primary btn-sm" type="button">Aceptar</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Menú Contextual Flotante -->
+  <div id="app-context-menu" class="context-menu hidden" role="menu" aria-hidden="true">
+    <!-- Renderizado dinámico -->
+  </div>
+
+  <!-- Contenedor Flotante de Notificaciones (Toasts) con Soporte de Deshacer -->
+  <div id="toast-container" class="toast-container" role="status" aria-live="polite"></div>
+
+  <!-- Liner v1.3 Universal Dual Modules -->
+  <script src="../../vendor/markdown-it.min.js"></script>
+  <script src="../../vendor/katex.min.js"></script>
+  <script src="../core/crypto_util.js"></script>
+  <script src="../core/canonical/canonical_schema.js"></script>
+  <script src="../core/canonical_model.js"></script>
+  <script src="../core/markdown_serializer.js"></script>
+  <script src="../core/diagnostics/diagnostics_center.js"></script>
+  <script src="../core/portability/manifest_builder.js"></script>
+  <script src="../core/portability/zip_builder.js"></script>
+  <script src="../core/portability/pdf_builder.js"></script>
+  <script src="../core/portability/docx_builder.js"></script>
+  <script src="../core/portability/export_center.js"></script>
+  <script src="../core/portability/transfer_bundle.js"></script>
+  <script src="../core/portability/project_bundle.js"></script>
+  <script src="../core/portability/document_model.js"></script>
+  <script src="../targets/generic_target_adapter.js"></script>
+  <script src="../targets/claude_target_adapter.js"></script>
+  <script src="../targets/markdown_bundle_adapter.js"></script>
+  <script src="../core/storage/liner_db.js"></script>
+  <script src="../core/jobs/job_engine.js"></script>
+  <script src="../platforms/chatgpt/capabilities/chatgpt_capabilities.js"></script>
+  <script src="../platforms/chatgpt/chatgpt_assets.js"></script>
+  <script src="../platforms/chatgpt/structured/chatgpt_structured_acquisition.js"></script>
+  <script src="../platforms/chatgpt/acquisition_manager.js"></script>
+  <script src="../core/portability/chatgpt_archive.js"></script>
+  <script src="../core/portability/migration_package.js"></script>
+  <script src="migration_panel.js"></script>
+  <script src="workspace.js"></script>
+</body>
+</html>

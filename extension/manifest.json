@@ -1,0 +1,71 @@
+{
+  "manifest_version": 3,
+  "name": "Lossy — AI Context Portability",
+  "short_name": "Lossy",
+  "version": "1.6.1",
+  "description": "Capa local-first de portabilidad de contexto y conversaciones entre ChatGPT, Claude y otros entornos. Sin backend.",
+  "icons": {
+    "16": "icons/icon16.png",
+    "32": "icons/icon32.png",
+    "48": "icons/icon48.png",
+    "128": "icons/icon128.png"
+  },
+  "action": {
+    "default_popup": "src/popup/popup.html",
+    "default_title": "Lossy — AI Context Portability",
+    "default_icon": {
+      "16": "icons/icon16.png",
+      "32": "icons/icon32.png",
+      "48": "icons/icon48.png",
+      "128": "icons/icon128.png"
+    }
+  },
+  "background": {
+    "service_worker": "src/background/service_worker.js"
+  },
+  "content_scripts": [
+    {
+      "matches": [
+        "https://chatgpt.com/*",
+        "https://chat.openai.com/*"
+      ],
+      "js": [
+        "src/core/canonical/canonical_schema.js",
+        "src/core/canonical_model.js",
+        "src/core/portability/zip_builder.js",
+        "src/core/portability/pdf_builder.js",
+        "src/core/portability/docx_builder.js",
+        "src/core/portability/export_center.js",
+        "src/platforms/chatgpt/chatgpt_assets.js",
+        "src/platforms/chatgpt/structured/chatgpt_structured_acquisition.js",
+        "src/content/content_script.js"
+      ],
+      "run_at": "document_idle"
+    }
+  ],
+  "permissions": [
+    "activeTab",
+    "storage",
+    "scripting",
+    "unlimitedStorage"
+  ],
+  "host_permissions": [
+    "https://chatgpt.com/*",
+    "https://chat.openai.com/*",
+    "https://*.oaiusercontent.com/*",
+    "https://files.oaiusercontent.com/*"
+  ],
+  "web_accessible_resources": [
+    {
+      "resources": [
+        "src/workspace/workspace.html",
+        "src/workspace/workspace.css",
+        "src/workspace/workspace.js"
+      ],
+      "matches": [
+        "https://chatgpt.com/*",
+        "https://chat.openai.com/*"
+      ]
+    }
+  ]
+}

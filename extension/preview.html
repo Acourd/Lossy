@@ -1,0 +1,243 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Lossy v1.2.1 Preview — Comparativa de Integridad y Tránsito</title>
+  <link rel="stylesheet" href="src/popup/popup.css">
+  <style>
+    /* Backdrop de prueba para simular el menú de extensiones de Chrome */
+    html, body {
+      background-color: #121314;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: flex-start;
+      min-height: 100vh;
+      padding: 40px 20px;
+      font-family: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+      overflow-y: auto;
+    }
+
+    .preview-container {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 32px;
+      justify-content: center;
+      align-items: flex-start;
+      max-width: 820px;
+      width: 100%;
+    }
+
+    .preview-column {
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      gap: 12px;
+    }
+
+    .preview-badge {
+      font-size: 11px;
+      font-weight: 600;
+      color: #9aa0a6;
+      letter-spacing: 0.05em;
+      text-transform: uppercase;
+    }
+
+    .preview-wrapper {
+      box-shadow: 0 12px 36px rgba(0, 0, 0, 0.65), 0 0 0 1px rgba(255, 255, 255, 0.08);
+      border-radius: 14px;
+      overflow: hidden;
+      width: 360px;
+    }
+
+    .preview-legend {
+      margin-top: 28px;
+      text-align: center;
+      color: #9aa0a6;
+      font-size: 12px;
+      max-width: 600px;
+      line-height: 1.6;
+    }
+
+    .preview-legend code {
+      font-family: ui-monospace, monospace;
+      color: #e8eaed;
+      background: rgba(255, 255, 255, 0.08);
+      padding: 2px 6px;
+      border-radius: 4px;
+    }
+  </style>
+<link rel="icon" type="image/png" sizes="32x32" href="icons/icon32.png">
+</head>
+<body>
+
+  <div class="preview-container">
+    <!-- Panel 1: Estado Completo (Historial Verificado) -->
+    <div class="preview-column">
+      <span class="preview-badge">Estado 1: Conversación Completa</span>
+      <div class="preview-wrapper">
+        <div class="chrome-panel">
+          <header class="chrome-header">
+            <div class="brand-group">
+              <div class="brand-glyph-box" aria-hidden="true">
+                <img src="icons/icon128.png" alt="Lossy" class="brand-glyph-img" width="36" height="36">
+              </div>
+              <div class="brand-meta">
+                <h1 class="brand-title">Lossy</h1>
+                <span class="brand-subtitle">Portabilidad de Conversaciones</span>
+              </div>
+            </div>
+            <div class="header-badges">
+              <span class="version-capsule">v1.2.1</span>
+            </div>
+          </header>
+
+          <main class="chrome-body">
+            <section class="status-card">
+              <div class="status-indicator-box">
+                <div class="status-dot ready"></div>
+              </div>
+              <div class="status-text-block">
+                <p class="status-title">Conversación capturada</p>
+                <p class="status-sub">18 turnos capturados</p>
+              </div>
+            </section>
+
+            <section class="transit-card">
+              <h2 class="conv-title">Evaluación arquitectónica inicial</h2>
+              <div class="transit-conduit">
+                <div class="transit-endpoint left">
+                  <span class="endpoint-name">CHATGPT</span>
+                  <span class="endpoint-meta">18 turnos</span>
+                </div>
+                <div class="transit-rail" aria-hidden="true">
+                  <div class="rail-line"></div>
+                  <div class="rail-node"></div>
+                </div>
+                <div class="transit-endpoint right">
+                  <span class="endpoint-name">PORTABLE</span>
+                  <span class="endpoint-meta">Capturado</span>
+                </div>
+              </div>
+            </section>
+
+            <div class="section-divider-label">Acciones disponibles</div>
+            <div class="actions-stack">
+              <button class="action-row" type="button">
+                <div class="action-glyph-box" aria-hidden="true">
+                  <svg class="action-glyph" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+                    <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/>
+                    <path d="M14 2v6h6"/>
+                    <path d="M8 13v4"/>
+                    <path d="M12 13v4"/>
+                    <path d="M8 13l2 2.5 2-2.5"/>
+                    <path d="M15 15l1.5 2 1.5-2"/>
+                  </svg>
+                </div>
+                <div class="action-details">
+                  <span class="action-title">Exportar Markdown</span>
+                  <span class="action-subtitle">Frontmatter YAML y bloques de código</span>
+                </div>
+                <div class="action-meta">
+                  <span class="action-pill">.md</span>
+                </div>
+              </button>
+            </div>
+          </main>
+        </div>
+      </div>
+    </div>
+
+    <!-- Panel 2: Estado Parcial (Contrato de Integridad Honesto) -->
+    <div class="preview-column">
+      <span class="preview-badge">Estado 2: Captura Parcial (DOM Virtualizado)</span>
+      <div class="preview-wrapper">
+        <div class="chrome-panel">
+          <header class="chrome-header">
+            <div class="brand-group">
+              <div class="brand-glyph-box" aria-hidden="true">
+                <img src="icons/icon128.png" alt="Lossy" class="brand-glyph-img" width="36" height="36">
+              </div>
+              <div class="brand-meta">
+                <h1 class="brand-title">Lossy</h1>
+                <span class="brand-subtitle">Portabilidad de Conversaciones</span>
+              </div>
+            </div>
+            <div class="header-badges">
+              <span class="version-capsule">v1.2.1</span>
+            </div>
+          </header>
+
+          <main class="chrome-body">
+            <section class="status-card">
+              <div class="status-indicator-box">
+                <div class="status-dot"></div>
+              </div>
+              <div class="status-text-block">
+                <p class="status-title">Captura parcial</p>
+                <p class="status-sub">8 turnos visibles en pantalla</p>
+              </div>
+              <div class="status-action-box">
+                <button class="status-action-btn" type="button">
+                  <svg class="status-action-glyph" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+                    <path d="M2.5 8a5.5 5.5 0 1 0 1.6-3.9L2 6"/>
+                    <path d="M2 2v4h4"/>
+                  </svg>
+                  <span class="status-action-label">Escanear</span>
+                </button>
+              </div>
+            </section>
+
+            <section class="transit-card">
+              <h2 class="conv-title">Evaluación arquitectónica inicial</h2>
+              <div class="transit-conduit">
+                <div class="transit-endpoint left">
+                  <span class="endpoint-name">CHATGPT</span>
+                  <span class="endpoint-meta">8 turnos</span>
+                </div>
+                <div class="transit-rail" aria-hidden="true">
+                  <div class="rail-line"></div>
+                  <div class="rail-node partial"></div>
+                </div>
+                <div class="transit-endpoint right">
+                  <span class="endpoint-name">PORTABLE</span>
+                  <span class="endpoint-meta">Parcial</span>
+                </div>
+              </div>
+            </section>
+
+            <div class="section-divider-label">Acciones disponibles</div>
+            <div class="actions-stack">
+              <button class="action-row" type="button">
+                <div class="action-glyph-box" aria-hidden="true">
+                  <svg class="action-glyph" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+                    <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/>
+                    <path d="M14 2v6h6"/>
+                    <path d="M8 13v4"/>
+                    <path d="M12 13v4"/>
+                    <path d="M8 13l2 2.5 2-2.5"/>
+                    <path d="M15 15l1.5 2 1.5-2"/>
+                  </svg>
+                </div>
+                <div class="action-details">
+                  <span class="action-title">Exportar Markdown</span>
+                  <span class="action-subtitle">Frontmatter con aviso de captura parcial</span>
+                </div>
+                <div class="action-meta">
+                  <span class="action-pill">.md</span>
+                </div>
+              </button>
+            </div>
+          </main>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <footer class="preview-legend">
+    <strong>Lossy v1.2.1</strong> — Comparativa del <em>Contrato de Integridad</em>: a la izquierda, la conversación capturada (18 turnos ensamblados mediante alineación por solapamiento de ventanas); a la derecha, la representación honesta de una captura parcial cuando el DOM sólo expone los turnos inferiores. Cero inferencias falsas de <code>gpt-4o</code>.
+  </footer>
+
+</body>
+</html>

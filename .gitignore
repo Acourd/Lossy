@@ -1,0 +1,20 @@
+# Dependencias y salidas de pruebas
+node_modules/
+scratch/
+
+# Estado local de herramientas
+.axion/
+.claude/settings.local.json
+
+# Sistema operativo y editores
+Thumbs.db
+desktop.ini
+.DS_Store
+.vscode/
+.idea/
+
+# Secretos, logs y archivos generados
+.env
+.env.*
+*.log
+*.zip

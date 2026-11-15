@@ -1,0 +1,16 @@
+{
+  "name": "lossy",
+  "version": "1.6.1",
+  "private": true,
+  "license": "MIT",
+  "description": "Lossy: capa local-first de portabilidad de contexto y conversaciones de IA. Extensión de Chrome sin backend.",
+  "scripts": {
+    "test": "npm run test:extension",
+    "test:extension": "node tests/run_all.js",
+    "test:extension:documents": "node tests/extension/document_restore_e2e.cjs",
+    "test:extension:projects": "node tests/extension/project_e2e.cjs",
+    "test:extension:e2e": "node tests/extension/extension_e2e.cjs",
+    "test:extension:visual": "node tests/extension/visual_review.cjs",
+    "test:extension:popup": "node tests/extension/native_popup_e2e.cjs"
+  }
+}
