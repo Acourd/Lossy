@@ -969,7 +969,7 @@
         if (fcStack.some(c => c.type === 'bq')) return { ok: false, rest: line, lineCol: 0 };
         return { ok: true, rest: line, lineCol: 0 };
       }
-      const res = stepContainerPrefixMd(line, fcStack, false);
+      const res = stepContainerPrefixMd(line, fcStack, true);
       return { ok: res.matched === fcStack.length, rest: res.rest, lineCol: res.lineCol };
     };
 

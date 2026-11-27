@@ -24,7 +24,11 @@ test('R27/R28 P2: alineación prevBsCol+t y tabAdj tras citas anidadas y listas 
     ['list_bq_sp_tab', `- > \t${payloadKeep}`],
     ['bq_bq_tab_bq_sp_tab', `> >\t> \t${payloadKeep}`],
     ['bq_bq_list_tab_fence_exit_to_indented', `>  > -\t~~~\n>  > \t ${payloadKeep}`],
-    ['bq_overindent_tab_fence_keep', `> > ~~~\n>\t  > ${payloadKeep}\n>\t  > ~~~`]
+    ['bq_overindent_tab_fence_keep', `> > ~~~\n>\t  > ${payloadKeep}\n>\t  > ~~~`],
+    ['bq_list_fence_blank_bq_overindent_sp4', `> - ~~~\n>\n    > \t${payloadKeep}`],
+    ['bq_list_fence_blank_bq_overindent_tab', `> - ~~~\n>\n\t> \t${payloadKeep}`],
+    ['bq_list_fence_blank_bq_spaces_tab', `> - ~~~\n>   \n>  \t${payloadKeep}`],
+    ['bq_list_fence_blank_bq_close_later', `> - ~~~\n>\n    > \t${payloadKeep}\n    > ~~~`]
   ];
 
   const proseCases = [
@@ -35,7 +39,10 @@ test('R27/R28 P2: alineación prevBsCol+t y tabAdj tras citas anidadas y listas 
     ['bq_bq_sp2_bq_tab', `> >  > \t${payloadDrop}`],
     ['list_tab_bq_sp_tab', `-\t> \t${payloadDrop}`],
     ['bq_bq_tab_bq_tab', `> >\t>\t${payloadDrop}`],
-    ['bq_bq_list_tab_fence_exit_to_prose', `>  > -\t~~~\n>  > \t${payloadDrop}`]
+    ['bq_bq_list_tab_fence_exit_to_prose', `>  > -\t~~~\n>  > \t${payloadDrop}`],
+    ['bq_list_fence_blank_bq_exit_underindent', `> - ~~~\n> \n>  ${payloadDrop}`],
+    ['bq_list_bq_fence_blank_bq_exits', `> - > ~~~\n>\n>   > ${payloadDrop}`],
+    ['list_bq_fence_blank_list_exits', `- > ~~~\n  \n  > ${payloadDrop}`]
   ];
 
   const center = new ExportCenter();
