@@ -1,4 +1,6 @@
 importScripts('../core/storage/liner_db.js');
+const clipDb = new LinerDB();
+clipDb.open().catch(() => {});
 let clipWriteQueue=Promise.resolve();
 /**
  * AI Conversation Portability (AICP / Liner) — Background Service Worker (Manifest V3)
@@ -14,7 +16,14 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
   if (!request || typeof request !== 'object') return false;
   if(request.action==='SAVE_CLIP'){
     if(typeof request.clip?.canonicalId !== 'string' || !request.clip.canonicalId.startsWith('clip_')){sendResponse({success:false,error:'Clip inválido'});return false;}
-    const write=()=>new LinerDB().saveClip(request.clip);
+    const enqueuedWipeEpoch = clipDb.getWipeEpoch();
+    const syncIdbEpoch = clipDb.db ? clipDb._resolveBaselineIdbEpoch() : null;
+    const snapPromise = syncIdbEpoch !== null ? null : clipDb.captureWipeSnapshot().catch(() => null);
+    const write = async () => {
+      const snap = snapPromise ? await snapPromise : null;
+      const expectedIdbWipeEpoch = syncIdbEpoch !== null ? syncIdbEpoch : (snap ? snap.idbWipeEpoch : clipDb._resolveBaselineIdbEpoch());
+      return clipDb.saveClip(request.clip, { expectedWipeEpoch: enqueuedWipeEpoch, expectedIdbWipeEpoch });
+    };
     const job=clipWriteQueue.then(write,write);clipWriteQueue=job;
     job.then(id=>sendResponse({success:true,id})).catch(error=>sendResponse({success:false,error:error.message}));
     return true;

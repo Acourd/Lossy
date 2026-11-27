@@ -127,7 +127,9 @@
       }
 
       // Referencias / Citas
-      const citations = msg.references || msg.content?.citations || [];
+      const citations = Array.isArray(msg.references)
+        ? msg.references
+        : (Array.isArray(msg.content?.citations) ? msg.content.citations : (Array.isArray(msg.citations) ? msg.citations : []));
       if (citations.length > 0) {
         const citMd = citations.map((c, i) => `[${i + 1}] [${c.title || c.url}](${c.url})`).join('\n');
         contentText += `\n\n**Fuentes y Referencias:**\n${citMd}`;

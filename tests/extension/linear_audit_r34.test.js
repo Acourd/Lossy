@@ -1119,3 +1119,120 @@ test('R42: LinerDB._runGuardedTx devuelve resultVal en IndexedDB real cuando res
   assert.equal(col.name, 'Proyecto Real IDB');
   assert.equal(stored.get(col.collectionId).name, 'Proyecto Real IDB');
 });
+
+test('R43 P1: solicitudes SAVE_CLIP en cola antes de clearAll() se abortan y no reaparecen tras el borrado', async () => {
+  const vm = require('node:vm');
+  const fs = require('node:fs');
+  const path = require('node:path');
+
+  let epoch = 0;
+  let releaseFirstSave;
+  let firstStartedResolve;
+  const firstStarted = new Promise(r => { firstStartedResolve = r; });
+  const savedClips = new Map();
+
+  class FakeLinerDB {
+    async open() { return this; }
+    getWipeEpoch() { return epoch; }
+    _resolveBaselineIdbEpoch(opts) { return opts && Number.isInteger(opts.expectedIdbWipeEpoch) ? opts.expectedIdbWipeEpoch : epoch; }
+    async captureWipeSnapshot() { return { wipeEpoch: epoch, idbWipeEpoch: epoch }; }
+    async saveClip(clip, opts = {}) {
+      if (opts.expectedWipeEpoch !== epoch || opts.expectedIdbWipeEpoch < epoch) {
+        throw new Error('WRITE_ABORTED_BY_CLEAR_ALL');
+      }
+      if (clip.canonicalId === 'clip_1') {
+        firstStartedResolve();
+        await new Promise(r => { releaseFirstSave = r; });
+      }
+      if (opts.expectedWipeEpoch !== epoch || opts.expectedIdbWipeEpoch < epoch) {
+        throw new Error('WRITE_ABORTED_BY_CLEAR_ALL');
+      }
+      savedClips.set(clip.canonicalId, clip);
+      return clip.canonicalId;
+    }
+    async clearAll() {
+      epoch++;
+      savedClips.clear();
+      return true;
+    }
+  }
+
+  let onMessageHandler = null;
+  const sandbox = {
+    console,
+    Promise,
+    importScripts: () => {},
+    LinerDB: FakeLinerDB,
+    chrome: {
+      runtime: {
+        id: 'test-ext-id',
+        onInstalled: { addListener: () => {} },
+        onMessage: { addListener: fn => { onMessageHandler = fn; } },
+        getURL: p => p
+      },
+      tabs: { create: () => {} }
+    }
+  };
+  const swCode = fs.readFileSync(path.resolve(__dirname, '../../extension/src/background/service_worker.js'), 'utf8');
+  vm.runInNewContext(swCode, sandbox);
+  assert.ok(onMessageHandler);
+
+  const sendSaveClip = id => new Promise(resolve => {
+    onMessageHandler(
+      { action: 'SAVE_CLIP', clip: { canonicalId: id, title: id, selectedMessages: [{ id: 'm1', role: 'user', content: { text: 'hola' } }] } },
+      { id: 'test-ext-id' },
+      resolve
+    );
+  });
+
+  const pending = [];
+  for (let i = 1; i <= 20; i++) pending.push(sendSaveClip(`clip_${i}`));
+  await firstStarted;
+  await new FakeLinerDB().clearAll();
+  releaseFirstSave();
+  const results = await Promise.all(pending);
+
+  assert.equal(savedClips.size, 0, 'ningún clip encolado antes de clearAll() debe persistir después del borrado');
+  assert.ok(results.every(r => r.success === false && /WRITE_ABORTED_BY_CLEAR_ALL/.test(r.error)));
+
+  const afterWipe = await sendSaveClip('clip_after_wipe');
+  assert.equal(afterWipe.success, true);
+  assert.equal(savedClips.size, 1);
+});
+
+test('R43 P2: project_bundle rechaza content.citations no-array en importación y HtmlBuilder/MarkdownSerializer toleran citas malformadas', async () => {
+  const ProjectBundle = require('../../extension/src/core/portability/project_bundle.js');
+  const { createZip } = require('../../extension/src/core/portability/zip_builder.js');
+  const cryptoUtil = require('../../extension/src/core/crypto_util.js');
+  const HtmlBuilder = require('../../extension/src/core/portability/html_builder.js');
+  const MarkdownSerializer = require('../../extension/src/core/markdown_serializer.js');
+
+  const badConv = {
+    canonicalId: 'conv_bad_cit',
+    title: 'Citas inválidas',
+    source: { platform: 'chatgpt' },
+    messages: [{ id: 'm1', role: 'assistant', content: { text: 'Hola', citations: { url: 'https://example.com' } } }]
+  };
+  const projectJson = JSON.stringify({ version: '1.1', name: 'Proyecto Citas', sourceIds: ['conv_bad_cit'], sources: [{ canonicalId: 'conv_bad_cit', path: 'conversations/conv_bad_cit.json' }] });
+  const convJson = JSON.stringify(badConv);
+  const files = {
+    'project.json': new TextEncoder().encode(projectJson),
+    'conversations/conv_bad_cit.json': new TextEncoder().encode(convJson)
+  };
+  files['receipt.json'] = new TextEncoder().encode(JSON.stringify({
+    fileHashes: {
+      'project.json': cryptoUtil.sha256(files['project.json']),
+      'conversations/conv_bad_cit.json': cryptoUtil.sha256(files['conversations/conv_bad_cit.json'])
+    }
+  }));
+
+  await assert.rejects(
+    () => ProjectBundle.readProjectPackage(createZip(files)),
+    /citas inválida/i
+  );
+
+  const html = HtmlBuilder.buildStandaloneHtml(badConv);
+  assert.match(html, /Citas inválidas/);
+  const md = MarkdownSerializer.serializeToMarkdown(badConv);
+  assert.match(md, /Citas inválidas/);
+});

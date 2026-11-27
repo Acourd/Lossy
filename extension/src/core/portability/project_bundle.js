@@ -96,6 +96,16 @@
    }
   }
  }
+ function validateCitations(list){
+  if(list===undefined||list===null)return;
+  if(!Array.isArray(list)||list.length>5000)throw Error('Lista de citas inválida');
+  for(const c of list){
+   if(!c||typeof c!=='object'||Array.isArray(c))throw Error('Cita inválida');
+   for(const k of ['url','title','snippet','source']){
+    if(c[k]!==undefined&&c[k]!==null&&typeof c[k]!=='string')throw Error('Campo de cita inválido: '+k);
+   }
+  }
+ }
  function validateEntity(entity){
   if(!entity||typeof entity!=='object'||typeof entity.canonicalId!=='string'||!entity.canonicalId||entity.canonicalId.length>300)throw Error('Una fuente del proyecto no tiene un identificador válido');
   if(entity.title!==undefined&&entity.title!==null&&(typeof entity.title!=='string'||entity.title.length>2000))throw Error('Título de fuente inválido');
@@ -105,7 +115,7 @@
    if(plat!==undefined&&plat!==null&&(typeof plat!=='string'||!ALLOWED_PLATFORMS.has(plat.toLowerCase())))throw Error('Plataforma de fuente inválida');
   }
   validateAttachments(entity.attachments);
-  for(const m of messages){validateAttachments(m.attachments);validateAttachments(m.content?.attachments);validateCodeBlocks(m.codeBlocks);validateCodeBlocks(m.content?.codeBlocks);validateParts(m.content?.parts);}
+  for(const m of messages){validateAttachments(m.attachments);validateAttachments(m.content?.attachments);validateCodeBlocks(m.codeBlocks);validateCodeBlocks(m.content?.codeBlocks);validateParts(m.content?.parts);validateCitations(m.content?.citations);validateCitations(m.citations);validateCitations(m.references);}
   for(const k of ['conversationMessageCount','visibleMessageCount','sourceNodeCount'])if(!isSafeCount(entity[k]))throw Error('Métrica numérica inválida: '+k);
   if(entity.nodeMetrics!==undefined&&entity.nodeMetrics!==null){
    if(typeof entity.nodeMetrics!=='object'||Array.isArray(entity.nodeMetrics))throw Error('Métricas de nodo inválidas');

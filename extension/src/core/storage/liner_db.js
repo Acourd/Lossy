@@ -802,13 +802,13 @@
       };
 
       if (this.useMemoryFallback) {
-        this._assertWriteEpoch(writeEpoch);
+        this._assertWriteEpoch(writeEpoch, options);
         this.memoryStores.conversations.set(canonicalId, JSON.parse(JSON.stringify(clip)));
         this.memoryStores.metadata_index.set(canonicalId, metaRecord);
         return canonicalId;
       }
 
-      const baselineIdbEpoch = this._resolveBaselineIdbEpoch();
+      const baselineIdbEpoch = this._resolveBaselineIdbEpoch(options);
       return this._runGuardedTx(
         ['conversations', 'metadata_index'],
         writeEpoch,
@@ -1273,12 +1273,12 @@
       };
 
       if (this.useMemoryFallback) {
-        this._assertWriteEpoch(writeEpoch);
+        this._assertWriteEpoch(writeEpoch, options);
         this.memoryStores.collections.set(collectionId, collection);
         return collection;
       }
 
-      const baselineIdbEpoch = this._resolveBaselineIdbEpoch();
+      const baselineIdbEpoch = this._resolveBaselineIdbEpoch(options);
       return this._runGuardedTx(
         ['collections'],
         writeEpoch,
@@ -1304,12 +1304,12 @@
         return record;
       };
       if (this.useMemoryFallback) {
-        this._assertWriteEpoch(writeEpoch);
+        this._assertWriteEpoch(writeEpoch, options);
         const record = apply(this.memoryStores.collections.get(collectionId));
         this.memoryStores.collections.set(collectionId, record);
         return structuredClone(record);
       }
-      const baselineIdbEpoch = this._resolveBaselineIdbEpoch();
+      const baselineIdbEpoch = this._resolveBaselineIdbEpoch(options);
       return this._runGuardedTx(
         ['collections'],
         writeEpoch,
@@ -1484,12 +1484,12 @@
       if (!job || !job.jobId) throw new Error('Trabajo inválido');
 
       if (this.useMemoryFallback) {
-        this._assertWriteEpoch(writeEpoch);
+        this._assertWriteEpoch(writeEpoch, options);
         this.memoryStores.jobs.set(job.jobId, JSON.parse(JSON.stringify(job)));
         return job.jobId;
       }
 
-      const baselineIdbEpoch = this._resolveBaselineIdbEpoch();
+      const baselineIdbEpoch = this._resolveBaselineIdbEpoch(options);
       return this._runGuardedTx(
         ['jobs'],
         writeEpoch,
@@ -1543,12 +1543,12 @@
       if (!transfer || !transfer.transferId) throw new Error('Transferencia inválida');
 
       if (this.useMemoryFallback) {
-        this._assertWriteEpoch(writeEpoch);
+        this._assertWriteEpoch(writeEpoch, options);
         this.memoryStores.transfers.set(transfer.transferId, JSON.parse(JSON.stringify(transfer)));
         return transfer.transferId;
       }
 
-      const baselineIdbEpoch = this._resolveBaselineIdbEpoch();
+      const baselineIdbEpoch = this._resolveBaselineIdbEpoch(options);
       return this._runGuardedTx(
         ['transfers'],
         writeEpoch,

@@ -479,7 +479,8 @@
 
       // Embedded images for this turn (prefer options.assets, fall back to msg.attachments)
       const fromOptions = allAssets.filter(a => (a.sourceMessageId === msg.id || a.messageIndex === idx) && (a.mimeType?.startsWith('image/') || a.kind === 'image'));
-      const msgAssets = fromOptions.length ? fromOptions : (msg.attachments || msg.content?.attachments || []).filter(a => a && (a.mimeType?.startsWith('image/') || a.kind === 'image'));
+      const rawAtts = Array.isArray(msg.attachments) ? msg.attachments : (Array.isArray(msg.content?.attachments) ? msg.content.attachments : []);
+      const msgAssets = fromOptions.length ? fromOptions : rawAtts.filter(a => a && (a.mimeType?.startsWith('image/') || a.kind === 'image'));
       if (options.imageStrategy !== 'omit' && msgAssets.length) {
         const imgs = msgAssets.map(a => {
           const uri = resolveSafeImageDataUri(a, assetBinaryMap);
@@ -492,7 +493,10 @@
       }
 
       // Clickable citations
-      const cits = (msg.content?.citations || msg.references || []).filter(c => c && /^https?:\/\//i.test(c.url || ''));
+      const rawCits = Array.isArray(msg.content?.citations)
+        ? msg.content.citations
+        : (Array.isArray(msg.citations) ? msg.citations : (Array.isArray(msg.references) ? msg.references : []));
+      const cits = rawCits.filter(c => c && typeof c === 'object' && typeof c.url === 'string' && /^https?:\/\//i.test(c.url));
       if (cits.length) {
         const seen = new Set();
         const links = cits.filter(c => { if (seen.has(c.url)) return false; seen.add(c.url); return true; })
