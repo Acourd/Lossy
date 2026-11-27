@@ -541,6 +541,7 @@
             diagReq.onsuccess = () => {
               const persisted = Number(diagReq.result?.epoch || 0);
               if (persisted > baselineIdbEpoch) {
+                if (persisted > this._knownIdbWipeEpoch) this._knownIdbWipeEpoch = persisted;
                 failAbort(new Error('WRITE_ABORTED_BY_CLEAR_ALL'));
                 return;
               }

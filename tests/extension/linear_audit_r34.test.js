@@ -1390,3 +1390,54 @@ test('R46: borrado histórico antes de arranque frío no rechaza SAVE_CLIP envia
   assert.equal(retry.success, true);
   assert.equal(savedClips.size, 1);
 });
+
+test('R48: tras abortar en _runGuardedTx por borrado sin notificación, _knownIdbWipeEpoch se actualiza y la siguiente escritura recupera', async () => {
+  const { LinerDB } = require('../../extension/src/core/storage/liner_db.js');
+  const db = new LinerDB();
+  db.useMemoryFallback = false;
+  let persisted = 1;
+  const stored = new Map();
+  db.db = {
+    objectStoreNames: { contains: name => name === 'diagnostics' },
+    transaction() {
+      const tx = {
+        oncomplete: null,
+        onerror: null,
+        onabort: null,
+        abort() { queueMicrotask(() => tx.onabort && tx.onabort()); },
+        objectStore(name) {
+          return {
+            get() {
+              const req = { result: name === 'diagnostics' ? { id: '__lossy_wipe_epoch__', epoch: persisted } : null, onsuccess: null, onerror: null };
+              queueMicrotask(() => req.onsuccess && req.onsuccess());
+              return req;
+            },
+            put(val) {
+              stored.set(val.canonicalId || val.id, val);
+              queueMicrotask(() => tx.oncomplete && tx.oncomplete());
+              return {};
+            }
+          };
+        }
+      };
+      return tx;
+    }
+  };
+
+  await assert.rejects(
+    () => db.saveClip(
+      { canonicalId: 'clip_pre', title: 'Pre', selectedMessages: [{ id: 'm1', role: 'user', content: { text: 'a' } }] },
+      { expectedIdbWipeEpoch: 0 }
+    ),
+    /WRITE_ABORTED_BY_CLEAR_ALL/
+  );
+  assert.equal(db._resolveBaselineIdbEpoch(), 1);
+
+  const okId = await db.saveClip({
+    canonicalId: 'clip_post',
+    title: 'Post',
+    selectedMessages: [{ id: 'm2', role: 'user', content: { text: 'b' } }]
+  });
+  assert.equal(okId, 'clip_post');
+  assert.equal(stored.has('clip_post'), true);
+});
