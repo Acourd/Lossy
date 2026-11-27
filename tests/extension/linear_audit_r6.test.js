@@ -143,6 +143,8 @@ test('R6 P2 CommonMark: list fences, indented code blocks, and inline code spans
       '  <Cite href="LIST_LITERAL"/>',
       '  ```',
       '',
+      'Parrafo fuera de lista.',
+      '',
       '    ![indented](https://evil.test/indented.png)',
       '    <Cite href="INDENT_LITERAL"/>',
       '',

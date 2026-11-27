@@ -204,6 +204,10 @@
     const result = a.slice();
     const matchedOld = new Set();
     const matchedNew = new Set();
+    const enrichLang = (picked, prev, next) => {
+      const bestLang = String(picked?.language || '') || String(next?.language || '') || String(prev?.language || '');
+      return bestLang && picked?.language !== bestLang ? { ...picked, language: bestLang } : picked;
+    };
     for (let j = 0; j < b.length; j++) {
       const nextCode = String(b[j]?.code || '');
       const nextLang = String(b[j]?.language || '');
@@ -217,6 +221,7 @@
       if (exactIdx !== -1) {
         matchedOld.add(exactIdx);
         matchedNew.add(j);
+        result[exactIdx] = enrichLang(a[exactIdx], a[exactIdx], b[j]);
       }
     }
     const edgesByNew = new Map();
@@ -249,7 +254,7 @@
         matchedOld.add(idx);
         matchedNew.add(j);
         const prevCode = String(a[idx]?.code || '');
-        result[idx] = nextCode.length >= prevCode.length ? b[j] : a[idx];
+        result[idx] = enrichLang(nextCode.length >= prevCode.length ? b[j] : a[idx], a[idx], b[j]);
       } else if (cands.length > 0 && cands.every(i => String(a[i]?.code || '').length > nextCode.length)) {
         continue;
       } else {

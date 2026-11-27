@@ -227,7 +227,13 @@
           let existing = resolvedFileId ? index.fileIds.get(resolvedFileId) : index.assetIds.get(rawAssetId);
           if (!existing && isBareHydrationStub && index.fileIds.has(rawAssetId)) {
             const candidate = index.fileIds.get(rawAssetId);
-            if (candidate && !candidate.dataURI && !candidate.data) {
+            const candMime = String(candidate?.mimeType || '').split(';')[0].trim().toLowerCase();
+            const attMime = String(att.mimeType || '').split(';')[0].trim().toLowerCase();
+            const uriMime = (typeof dataURI === 'string' && dataURI.startsWith('data:'))
+              ? dataURI.slice(5).split(';')[0].trim().toLowerCase()
+              : '';
+            const mimeCompatible = (!attMime || !candMime || attMime === candMime) && (!uriMime || !candMime || uriMime === candMime);
+            if (candidate && !candidate.dataURI && !candidate.data && mimeCompatible) {
               existing = candidate;
             }
           }
@@ -320,7 +326,8 @@
         while ((match = mdImgRegex.exec(nonCodeText)) !== null) {
           if (isEscapedBackslash(nonCodeText, match.index) || isEscapedBackslash(match[1], match[1].length)) continue;
           const imgUrl = match[2].replace(/^<|>$/g, '');
-          if (index.locations.has(imgUrl)) continue;
+          if (!imgUrl || imgUrl.includes('\u0000') || index.locations.has(imgUrl)) continue;
+          const cleanAlt = match[1].replace(/\u0000CODE\u0000/g, '');
           const isInlineData = imgUrl.startsWith('data:');
           const rawMdId = `md_img_${mIdx}_${imgIdx++}`;
           const scopedKey = `md::${msgId}::${imgIdx}`;
@@ -330,7 +337,7 @@
 
           const mimeType = isInlineData ? (imgUrl.split(';')[0].replace('data:', '') || 'image/png') : 'image/png';
           const ext = mimeType.includes('jpeg') || mimeType.includes('jpg') ? 'jpg' : 'png';
-          const filename = match[1] ? `${match[1].replace(/[^a-zA-Z0-9_\-]/g, '_').slice(0, 24)}.${ext}` : `inline_img_${mIdx}_${imgIdx}.${ext}`;
+          const filename = cleanAlt ? `${cleanAlt.replace(/[^a-zA-Z0-9_\-]/g, '_').slice(0, 24)}.${ext}` : `inline_img_${mIdx}_${imgIdx}.${ext}`;
 
           addAsset({
             assetId,
@@ -382,6 +389,20 @@
           return true;
         };
 
+        const toBytes = (rawData, uri) => {
+          if (rawData instanceof Uint8Array) return rawData;
+          if (ArrayBuffer.isView(rawData)) return new Uint8Array(rawData.buffer, rawData.byteOffset, rawData.byteLength);
+          if (rawData instanceof ArrayBuffer) return new Uint8Array(rawData);
+          if (Array.isArray(rawData) || (rawData && typeof rawData.length === 'number' && typeof rawData !== 'string')) return new Uint8Array(rawData);
+          if (typeof uri === 'string' && uri.startsWith('data:')) return dataUriToUint8Array(uri);
+          return null;
+        };
+        const bytesEqual = (aBytes, bBytes) => {
+          if (!aBytes || !bBytes || aBytes.length !== bBytes.length) return false;
+          for (let i = 0; i < aBytes.length; i++) if (aBytes[i] !== bBytes[i]) return false;
+          return true;
+        };
+
         const exactMirror = (topFileId && emittedByLocation.fid.get(topFileId)) ||
           (safePtr && emittedByLocation.ptr.get(safePtr)) ||
           (dataURI && emittedByLocation.uri.get(dataURI)) ||
@@ -390,12 +411,23 @@
           null;
 
         if (exactMirror) {
-          const mirrorHasBinary = Boolean(exactMirror.data || exactMirror.dataURI);
-          const topHasDistinctBinary = mirrorHasBinary && (
-            (dataURI && exactMirror.dataURI && dataURI !== exactMirror.dataURI) ||
-            (localBlob && !dataURI)
+          const mirrorBytes = toBytes(exactMirror.data, exactMirror.dataURI);
+          const topBytes = toBytes(localBlob, dataURI);
+          const mirrorHasBinary = Boolean(mirrorBytes || exactMirror.data || exactMirror.dataURI);
+          const topHasBinary = Boolean(topBytes || localBlob || dataURI);
+          const topHasOwnExplicitId = Boolean(
+            (att.assetId || att.id) &&
+            rawTopId !== exactMirror.id &&
+            rawTopId !== exactMirror.assetId &&
+            (!topFileId || topFileId !== exactMirror.fileId)
           );
-          if (!topHasDistinctBinary) {
+          let topIsDistinct = false;
+          if (mirrorHasBinary && topHasBinary) {
+            if (topHasOwnExplicitId) topIsDistinct = true;
+            else if (mirrorBytes && topBytes) topIsDistinct = !bytesEqual(mirrorBytes, topBytes);
+            else topIsDistinct = true;
+          }
+          if (!topIsDistinct) {
             hydrateMirror(exactMirror);
             return;
           }
@@ -604,6 +636,7 @@
     let fenceLen = 0;
     let fenceBqDepth = 0;
     let fenceListIndent = 0;
+    let activeListIndent = 0;
     let prevLineBlank = true;
 
     const flush = isCode => {
@@ -683,8 +716,23 @@
       const { bqDepth, hadList, listIndent, rest } = stripContainers(line);
       const isBlank = rest.trim().length === 0;
 
+      let effectiveListIndent = 0;
+      if (hadList) {
+        activeListIndent = listIndent;
+        effectiveListIndent = listIndent;
+      } else if (!isBlank && activeListIndent > 0) {
+        const leadSpaces = (rest.match(/^ */) || [''])[0].length;
+        if (leadSpaces >= activeListIndent) {
+          effectiveListIndent = activeListIndent;
+        } else {
+          activeListIndent = 0;
+        }
+      }
+
       if (inIndented) {
-        if (/^(?: {4}|\t)/.test(rest) || isBlank) {
+        const contCheck = (!hadList && activeListIndent > 0) ? rest.slice(Math.min(activeListIndent, (rest.match(/^ */) || [''])[0].length)) : rest;
+        const stillIndented = activeListIndent > 0 ? /^(?: {4}|\t)/.test(contCheck) : /^(?: {4}|\t)/.test(rest);
+        if (stillIndented || isBlank) {
           buf.push(line);
           prevLineBlank = isBlank;
           continue;
@@ -693,22 +741,21 @@
         inIndented = false;
       }
 
-      const openM = hadList
-        ? rest.match(/^ {0,3}(`{3,}|~{3,})(.*)$/)
-        : rest.match(/^ {0,3}(`{3,}|~{3,})(.*)$/);
+      const openCheckRest = (!hadList && effectiveListIndent > 0) ? rest.slice(effectiveListIndent) : rest;
+      const openM = openCheckRest.match(/^ {0,3}(`{3,}|~{3,})(.*)$/);
       if (openM && !(openM[1][0] === '`' && openM[2].includes('`'))) {
         flush(false);
         inFence = true;
         fenceChar = openM[1][0];
         fenceLen = openM[1].length;
         fenceBqDepth = bqDepth;
-        fenceListIndent = listIndent;
+        fenceListIndent = effectiveListIndent;
         buf.push(line);
         prevLineBlank = false;
         continue;
       }
 
-      if (!hadList && prevLineBlank && /^(?: {4}|\t)/.test(rest) && !isBlank) {
+      if (!hadList && prevLineBlank && /^(?: {4}|\t)/.test(openCheckRest) && !isBlank) {
         flush(false);
         inIndented = true;
         buf.push(line);

@@ -1137,6 +1137,7 @@
     let fenceLen = 0;
     let fenceBqDepth = 0;
     let fenceListIndent = 0;
+    let activeListIndent = 0;
 
     const flush = isCode => {
       if (buf.length) {
@@ -1147,6 +1148,7 @@
     const stripContainers = line => {
       let rest = line;
       let bqDepth = 0;
+      let hadList = false;
       let listIndent = 0;
       while (true) {
         const bq = rest.match(/^ {0,3}>[ \t]?/);
@@ -1157,13 +1159,14 @@
         }
         const lst = rest.match(/^ {0,3}(?:[-*+]|\d{1,9}[.)])[ \t]+/);
         if (lst) {
+          hadList = true;
           listIndent += lst[0].length;
           rest = rest.slice(lst[0].length);
           continue;
         }
         break;
       }
-      return { bqDepth, listIndent, rest };
+      return { bqDepth, hadList, listIndent, rest };
     };
     const stripExactBq = (line, targetDepth) => {
       let rest = line;
@@ -1205,15 +1208,29 @@
         }
       }
 
-      const { bqDepth, listIndent, rest } = stripContainers(line);
-      const openM = rest.match(/^ {0,3}(`{3,}|~{3,})(.*)$/);
+      const { bqDepth, hadList, listIndent, rest } = stripContainers(line);
+      const isBlank = rest.trim().length === 0;
+      let effectiveListIndent = 0;
+      if (hadList) {
+        activeListIndent = listIndent;
+        effectiveListIndent = listIndent;
+      } else if (!isBlank && activeListIndent > 0) {
+        const leadSpaces = (rest.match(/^ */) || [''])[0].length;
+        if (leadSpaces >= activeListIndent) {
+          effectiveListIndent = activeListIndent;
+        } else {
+          activeListIndent = 0;
+        }
+      }
+      const openCheckRest = (!hadList && effectiveListIndent > 0) ? rest.slice(effectiveListIndent) : rest;
+      const openM = openCheckRest.match(/^ {0,3}(`{3,}|~{3,})(.*)$/);
       if (openM && !(openM[1][0] === '`' && openM[2].includes('`'))) {
         flush(false);
         inFence = true;
         fenceChar = openM[1][0];
         fenceLen = openM[1].length;
         fenceBqDepth = bqDepth;
-        fenceListIndent = listIndent;
+        fenceListIndent = effectiveListIndent;
         buf.push(line);
         continue;
       }

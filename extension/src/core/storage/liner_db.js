@@ -101,6 +101,13 @@
       const result = a.slice();
       const matchedOld = new Set();
       const matchedNew = new Set();
+      const enrichLang = (picked, prev, next) => {
+        const bestLang = (typeof picked?.language === 'string' && picked.language)
+          || (typeof next?.language === 'string' && next.language)
+          || (typeof prev?.language === 'string' && prev.language)
+          || '';
+        return bestLang && picked?.language !== bestLang ? { ...picked, language: bestLang } : picked;
+      };
       // Pass 1: exact matches across the entire array first (preferring matching language)
       for (let j = 0; j < b.length; j++) {
         const nextCode = typeof b[j]?.code === 'string' ? b[j].code : '';
@@ -117,6 +124,7 @@
         if (exactIdx !== -1) {
           matchedOld.add(exactIdx);
           matchedNew.add(j);
+          result[exactIdx] = enrichLang(a[exactIdx], a[exactIdx], b[j]);
         }
       }
       // Pass 2: strictly 1-to-1 unambiguous containment/prefix matches
@@ -150,7 +158,7 @@
           matchedOld.add(idx);
           matchedNew.add(j);
           const prevCode = typeof a[idx]?.code === 'string' ? a[idx].code : '';
-          result[idx] = prevCode.length >= nextCode.length ? a[idx] : b[j];
+          result[idx] = enrichLang(prevCode.length >= nextCode.length ? a[idx] : b[j], a[idx], b[j]);
         } else if (cands.length > 0 && cands.every(i => (typeof a[i]?.code === 'string' ? a[i].code : '').length > nextCode.length)) {
           // Shorter ambiguous fragment already contained in multiple fuller persisted blocks: keep fuller blocks without duplicating stub
           continue;
