@@ -727,17 +727,29 @@ test('R34 P1-3: primera captura tras navegación SPA A->B en Claude y Gemini rec
     const legitReuse = await callMsg({ action: 'ACQUIRE_CONVERSATION' });
     assert.equal(legitReuse.success, true, `${spec.platform}: pregunta y respuesta textual nuevas que reutilizan la imagen deben aceptarse`);
 
-    // P1 R39: CORS impide leer DataURI pre-hidratación y URL muta ?w=512 -> ?w=1024; la validación post-hidratación compara bytes descargados y rechaza
-    const redPngBytes = Buffer.from(redDataUri.split(',')[1], 'base64');
+    // P1/P2 R40: URL mutable (C sirve verde, luego cambia a amarillo) + CORS bloqueado (?w=512 -> ?w=1024) sin fetch histórico ni caché obsoleta
+    const greenDataUri = makeSolidPngDataUri(0, 255, 0);
+    const yellowDataUri = makeSolidPngDataUri(255, 255, 0);
+    const greenPngBytes = Buffer.from(greenDataUri.split(',')[1], 'base64');
+    const yellowPngBytes = Buffer.from(yellowDataUri.split(',')[1], 'base64');
+    let mutablePixelMode = 'green';
+    let corsBlockActive = false;
+    let fetchCalls = 0;
     sandbox.fetch = async (reqUrl) => {
-      if (String(reqUrl).includes('cors_pixel.png')) {
+      fetchCalls++;
+      if (corsBlockActive) return { ok: false, status: 403 };
+      if (String(reqUrl).includes('mutable_pixel.png')) {
+        const bytes = mutablePixelMode === 'green' ? greenPngBytes : yellowPngBytes;
         return {
           ok: true,
-          headers: { get: () => String(redPngBytes.length) },
-          blob: async () => new Blob([redPngBytes], { type: 'image/png' })
+          headers: { get: () => String(bytes.length) },
+          blob: async () => new Blob([bytes], { type: 'image/png' })
         };
       }
-      return { ok: false };
+      if (String(reqUrl).includes('unreachable_')) {
+        throw new Error('Network unreachable');
+      }
+      return { ok: false, status: 404 };
     };
     sandbox.FileReader = class {
       readAsDataURL(blob) {
@@ -748,20 +760,72 @@ test('R34 P1-3: primera captura tras navegación SPA A->B en Claude y Gemini rec
       }
     };
 
+    // 1. Capturar C cuando mutable_pixel.png?w=512 sirve VERDE
     historyObj.pushState({}, '', makeCustomUrl('deadbeef0004'));
+    mutablePixelMode = 'green';
     multiTurns = [
-      { id: 'u_cors_c', role: 'user', text: 'Primera captura CORS', attachments: [] },
-      { id: 'a_cors_c', role: 'assistant', text: '', attachments: [{ kind: 'image', sourceURL: 'https://cdn.test/cors_pixel.png?w=512' }] }
+      { id: 'u_mut_c', role: 'user', text: 'Imagen mutable C', attachments: [] },
+      { id: 'a_mut_c', role: 'assistant', text: '', attachments: [{ kind: 'image', sourceURL: 'https://cdn.test/mutable_pixel.png?w=512' }] }
     ];
-    // Navega C -> D sin captura previa en C, y en D cambia solo ?w=512 -> ?w=1024 (sin dataURI pre-hidratación)
+    const capMutC = await callMsg({ action: 'ACQUIRE_CONVERSATION' });
+    assert.equal(capMutC.success, true);
+
+    // 2. En D el servidor ahora devuelve AMARILLO en la MISMA URL (?w=512): no debe rechazarse por caché previa y debe conservar C=VERDE
     historyObj.pushState({}, '', makeCustomUrl('deadbeef0005'));
+    mutablePixelMode = 'yellow';
     multiTurns = [
-      { id: 'u_cors_d', role: 'user', text: 'Nueva pregunta con CORS', attachments: [] },
-      { id: 'a_cors_d', role: 'assistant', text: '', attachments: [{ kind: 'image', sourceURL: 'https://cdn.test/cors_pixel.png?w=1024' }] }
+      { id: 'u_mut_d', role: 'user', text: 'Imagen mutable D nueva', attachments: [] },
+      { id: 'a_mut_d', role: 'assistant', text: '', attachments: [{ kind: 'image', sourceURL: 'https://cdn.test/mutable_pixel.png?w=512' }] }
     ];
-    const staleCorsRehosted = await callMsg({ action: 'ACQUIRE_CONVERSATION' });
-    assert.equal(staleCorsRehosted.success, false, `${spec.platform}: imagen bloqueada por CORS con query ?w mutado debe rechazarse tras hidratar bytes`);
-    assert.match(staleCorsRehosted.error, /STALE_DOM/);
+    const capMutD = await callMsg({ action: 'ACQUIRE_CONVERSATION' });
+    assert.equal(capMutD.success, true, `${spec.platform}: URL mutable con bytes nuevos (amarillo) debe descargarse y aceptarse`);
+    assert.equal(capMutD.data.messages[1].attachments[0].dataURI, yellowDataUri);
+
+    // 3. En E reaparece VERDE residual con ?w=1024 -> sigue detectando C=VERDE intacto (no sobreescrito por D=AMARILLO) y RECHAZA STALE
+    historyObj.pushState({}, '', makeCustomUrl('deadbeef0006'));
+    mutablePixelMode = 'green';
+    multiTurns = [
+      { id: 'u_mut_e', role: 'user', text: 'Pregunta E distinta', attachments: [] },
+      { id: 'a_mut_e_stale', role: 'assistant', text: '', attachments: [{ kind: 'image', sourceURL: 'https://cdn.test/mutable_pixel.png?w=1024' }] }
+    ];
+    const staleMutE = await callMsg({ action: 'ACQUIRE_CONVERSATION' });
+    assert.equal(staleMutE.success, false, `${spec.platform}: imagen verde residual histórica debe seguir rechazándose sin contaminarse por D`);
+    assert.match(staleMutE.error, /STALE_DOM/);
+
+    // 4. Si CORS/403 impide descargar ?w=512 en F y en G solo muta ?w=1024 bajo 403, falla en cerrado (STALE_DOM) sin re-descargar URLs antiguas
+    corsBlockActive = true;
+    historyObj.pushState({}, '', makeCustomUrl('deadbeef0007'));
+    multiTurns = [
+      { id: 'u_cors_f', role: 'user', text: 'Pregunta F', attachments: [] },
+      { id: 'a_cors_f', role: 'assistant', text: '', attachments: [{ kind: 'image', sourceURL: 'https://cdn.test/cors_403.png?w=512' }] }
+    ];
+    historyObj.pushState({}, '', makeCustomUrl('deadbeef0008'));
+    multiTurns = [
+      { id: 'u_cors_g', role: 'user', text: 'Pregunta G', attachments: [] },
+      { id: 'a_cors_g', role: 'assistant', text: '', attachments: [{ kind: 'image', sourceURL: 'https://cdn.test/cors_403.png?w=1024' }] }
+    ];
+    const staleCors403 = await callMsg({ action: 'ACQUIRE_CONVERSATION' });
+    assert.equal(staleCors403.success, false, `${spec.platform}: adjunto bajo CORS/403 con query ?w mutada debe rechazarse en cerrado`);
+    assert.match(staleCors403.error, /STALE_DOM/);
+
+    // 5. No debe re-intentar descargas de URLs históricas inaccesibles de conversaciones anteriores al capturar otra válida
+    corsBlockActive = false;
+    fetchCalls = 0;
+    const tBeforeUnreach = Date.now();
+    historyObj.pushState({}, '', makeCustomUrl('deadbeef0009'));
+    multiTurns = [
+      { id: 'u_h_dead', role: 'user', text: 'Cinco URLs muertas', attachments: [] },
+      { id: 'a_h_dead', role: 'assistant', text: '', attachments: [1, 2, 3, 4, 5].map(k => ({ kind: 'image', sourceURL: `https://cdn.test/unreachable_${k}.png` })) }
+    ];
+    historyObj.pushState({}, '', makeCustomUrl('deadbeef0010'));
+    multiTurns = [
+      { id: 'u_h_fresh', role: 'user', text: 'Nueva conversación rápida', attachments: [] },
+      { id: 'a_h_fresh', role: 'assistant', text: '', attachments: [{ kind: 'image', sourceURL: 'https://cdn.test/pixel.png?w=999', dataURI: makeSolidPngDataUri(0, 255, 255) }] }
+    ];
+    const fastFresh = await callMsg({ action: 'ACQUIRE_CONVERSATION' });
+    assert.equal(fastFresh.success, true);
+    assert.equal(fetchCalls, 0, 'No debe lanzar fetches hacia URLs históricas de conversaciones pasadas');
+    assert.ok(Date.now() - tBeforeUnreach < 2000);
   }
 });
 

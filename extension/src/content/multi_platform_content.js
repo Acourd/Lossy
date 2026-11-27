@@ -29,13 +29,16 @@
   let domObserverInitialized = false;
   const foreignSignaturesByConv = new Map(); // convId -> Set<string>
   const foreignTurnsByConv = new Map();      // convId -> Set<string>
-  const hydratedUrlHashCache = new Map();    // url -> 'd:...'
 
-  function cacheHydratedUrlHash(url, dataUri) {
-    if (!url || !dataUri || /^data:/i.test(url)) return;
-    hydratedUrlHashCache.set(url, `d:${hashFullString64(dataUri)}`);
-    if (hydratedUrlHashCache.size > 100) {
-      hydratedUrlHashCache.delete(hydratedUrlHashCache.keys().next().value);
+  function canonicalizeImageUrl(rawUrl) {
+    try {
+      const u = new URL(rawUrl);
+      const dropParams = ['w', 'h', 'width', 'height', 'sz', 'size', 'dpr', 'q', 'quality', 'format', 'fm', 'fit'];
+      for (const p of dropParams) u.searchParams.delete(p);
+      u.searchParams.sort();
+      return `${u.origin}${u.pathname}${u.search}`;
+    } catch (_) {
+      return String(rawUrl || '').split('?')[0];
     }
   }
 
@@ -59,25 +62,24 @@
     const rawData = typeof att.dataURI === 'string' && att.dataURI.trim()
       ? att.dataURI.trim()
       : (/^data:/i.test(rawUrl) ? rawUrl : '');
-    let d = rawData ? `d:${hashFullString64(rawData)}` : '';
-    if (rawUrl && d) {
-      cacheHydratedUrlHash(rawUrl, rawData);
-    } else if (!d && rawUrl && hydratedUrlHashCache.has(rawUrl)) {
-      d = hydratedUrlHashCache.get(rawUrl);
-    }
+    const d = rawData ? `d:${hashFullString64(rawData)}` : '';
     const u = (!/^data:/i.test(rawUrl) && rawUrl) ? `u:${rawUrl}` : '';
+    const uc = (!/^data:/i.test(rawUrl) && rawUrl) ? `uc:${canonicalizeImageUrl(rawUrl)}` : '';
     const fallback = String(att.assetId || att.id || att.filename || att.name || '').trim();
     const f = (!d && !u && fallback) ? `f:${fallback}` : '';
     if (!d && !u && !f) return null;
-    return { d, u, f };
+    return { d, u, uc, f };
   }
 
-  function isSameAttachmentDescriptor(ca, pa) {
+  function isSameAttachmentDescriptor(ca, pa, ignoreUnhydratedRemote = false) {
     if (!ca || !pa) return false;
     if (typeof ca === 'string' || typeof pa === 'string') return ca === pa;
     if (ca.d && pa.d) return ca.d === pa.d;
-    if (ca.u && pa.u) return ca.u === pa.u;
-    if (ca.f && pa.f) return ca.f === pa.f;
+    // Durante pre-hidratación, un adjunto remoto sin DataURI aún debe descargarse antes de juzgarlo por URL
+    if (ignoreUnhydratedRemote && !ca.d && ca.u) return false;
+    if (ca.u && pa.u && ca.u === pa.u) return true;
+    if (ca.uc && pa.uc && ca.uc === pa.uc) return true;
+    if (ca.f && pa.f && ca.f === pa.f) return true;
     return false;
   }
 
@@ -145,16 +147,19 @@
     return val ? String(val).trim() : null;
   }
 
-  function matchesAnyForeignDom(targetConvId, sig, turns) {
+  function matchesAnyForeignDom(targetConvId, sig, turns, opts = {}) {
+    const ignoreUnhydratedRemote = Boolean(opts.ignoreUnhydratedRemote);
     const domCid = detectDomDeclaredConversationId();
     if (domCid && targetConvId && domCid === targetConvId) {
       return false;
     }
-    for (const [cid, sigSet] of foreignSignaturesByConv.entries()) {
-      if (targetConvId && cid === targetConvId) continue;
-      if (sig && sigSet.has(sig)) return true;
+    if (!turns || turns.length === 0) {
+      for (const [cid, sigSet] of foreignSignaturesByConv.entries()) {
+        if (targetConvId && cid === targetConvId) continue;
+        if (sig && sigSet.has(sig)) return true;
+      }
+      return false;
     }
-    if (!turns || turns.length === 0) return false;
     const parseEntry = (entry) => {
       if (typeof entry === 'string' && entry.startsWith('{')) {
         try {
@@ -178,7 +183,7 @@
         const prevParsed = parseEntry(prevRaw);
         if (curParsed.r && prevParsed.r && curParsed.r !== prevParsed.r) continue;
         if (!attMatch && curParsed.a.length > 0 && prevParsed.a.length > 0 &&
-            curParsed.a.some(ca => prevParsed.a.some(pa => isSameAttachmentDescriptor(ca, pa)))) {
+            curParsed.a.some(ca => prevParsed.a.some(pa => isSameAttachmentDescriptor(ca, pa, ignoreUnhydratedRemote)))) {
           attMatch = true;
         }
         if (!textMatch && curParsed.b && prevParsed.b) {
@@ -193,13 +198,18 @@
       return { textMatch, attMatch };
     };
     const parsedTurns = turns.map(parseEntry);
+    const hasUnhydratedRemote = ignoreUnhydratedRemote && parsedTurns.some(pt => pt.a.some(ca => ca && !ca.d && ca.u));
+    if (!hasUnhydratedRemote) {
+      for (const [cid, sigSet] of foreignSignaturesByConv.entries()) {
+        if (targetConvId && cid === targetConvId) continue;
+        if (sig && sigSet.has(sig)) return true;
+      }
+    }
     for (const [cid, tSet] of foreignTurnsByConv.entries()) {
       if (targetConvId && cid === targetConvId) continue;
       if (!tSet || tSet.size === 0) continue;
       const matches = parsedTurns.map(pt => classifyTurnAgainst(pt, tSet));
       if (!matches.some(m => m.textMatch || m.attMatch)) continue;
-      // Texto AI coincidente OR respuesta AI exclusivamente de imagen con bytes idénticos -> obsoleto.
-      // Texto AI distinto acompañado de imagen reutilizada -> contenido legítimo nuevo.
       const hasStaleAiContent = parsedTurns.some((pt, i) => {
         if (pt.r === 'user') return false;
         return matches[i].textMatch || (!pt.b && matches[i].attMatch);
@@ -216,59 +226,6 @@
       }
     }
     return false;
-  }
-
-  async function resolveMissingForeignAttachmentHashes(targetConvId, turns, signal) {
-    if (!Array.isArray(turns) || turns.length === 0) return;
-    const hasHydratedImageOnlyAi = turns.some(entry => {
-      try {
-        const p = typeof entry === 'string' && entry.startsWith('{') ? JSON.parse(entry) : null;
-        return p && p.r !== 'user' && !p.b && Array.isArray(p.a) && p.a.some(att => att?.d);
-      } catch (_) {
-        return false;
-      }
-    });
-    if (!hasHydratedImageOnlyAi) return;
-
-    for (const [cid, tSet] of foreignTurnsByConv.entries()) {
-      if (targetConvId && cid === targetConvId) continue;
-      const updatedEntries = [];
-      let changedSet = false;
-      for (const prevRaw of tSet) {
-        let p = null;
-        try { if (typeof prevRaw === 'string' && prevRaw.startsWith('{')) p = JSON.parse(prevRaw); } catch (_) {}
-        if (!p || !Array.isArray(p.a) || p.a.length === 0) {
-          updatedEntries.push(prevRaw);
-          continue;
-        }
-        let entryUpdated = false;
-        for (const pa of p.a) {
-          if (pa && !pa.d && pa.u && pa.u.startsWith('u:')) {
-            const rawUrl = pa.u.slice(2);
-            if (hydratedUrlHashCache.has(rawUrl)) {
-              pa.d = hydratedUrlHashCache.get(rawUrl);
-              entryUpdated = true;
-            } else {
-              const res = await fetchAsDataUri(rawUrl, signal);
-              if (res && res.dataURI) {
-                cacheHydratedUrlHash(rawUrl, res.dataURI);
-                pa.d = hydratedUrlHashCache.get(rawUrl) || `d:${hashFullString64(res.dataURI)}`;
-                entryUpdated = true;
-              }
-            }
-          }
-        }
-        if (entryUpdated) {
-          changedSet = true;
-          updatedEntries.push(JSON.stringify(p));
-        } else {
-          updatedEntries.push(prevRaw);
-        }
-      }
-      if (changedSet) {
-        foreignTurnsByConv.set(cid, new Set(updatedEntries));
-      }
-    }
   }
 
   function recordCurrentDomBaseline() {
@@ -510,17 +467,17 @@
               const domCid = detectDomDeclaredConversationId();
               return Boolean(domCid && startConvId && domCid !== startConvId);
             };
-            const isStaleFromOtherConv = () => {
+            const isStaleFromOtherConv = (ignoreUnhydratedRemote = false) => {
               if (domDeclMismatch()) return true;
-              if (lastDomState && startConvId && lastDomState.convId && lastDomState.convId !== startConvId) {
+              if (!ignoreUnhydratedRemote && lastDomState && startConvId && lastDomState.convId && lastDomState.convId !== startConvId) {
                 if (lastDomState.signature && sig && sig === lastDomState.signature) return true;
               }
-              if (matchesAnyForeignDom(startConvId, sig, turns)) return true;
+              if (matchesAnyForeignDom(startConvId, sig, turns, { ignoreUnhydratedRemote })) return true;
               return false;
             };
             const needsPostNavRenderWait = () => pendingNavTransition && !sig;
 
-            if (isStaleFromOtherConv() || needsPostNavRenderWait()) {
+            if (isStaleFromOtherConv(false) || needsPostNavRenderWait()) {
               for (let waitStep = 0; waitStep < 8; waitStep++) {
                 await new Promise(r => setTimeout(r, 80));
                 if (controller?.signal?.aborted || checkRouteChanged() || navGeneration !== startNavGen || (window.location?.href || '') !== startHref) {
@@ -530,9 +487,9 @@
                 data = extractNow(startHref, infoAtStart.platform);
                 turns = extractTurnEntries(data);
                 sig = turns.join('\n---\n');
-                if (!isStaleFromOtherConv() && !needsPostNavRenderWait()) break;
+                if (!isStaleFromOtherConv(false) && !needsPostNavRenderWait()) break;
               }
-              if (isStaleFromOtherConv()) {
+              if (isStaleFromOtherConv(true)) {
                 sendResponse({
                   success: false,
                   error: 'SOURCE_IDENTITY_STALE_DOM: El DOM aún refleja una conversación anterior tras navegación SPA.'
@@ -548,16 +505,8 @@
 
             await hydrateConversationImages(data, controller?.signal);
 
-            for (const m of (data.messages || [])) {
-              for (const att of (m.attachments || [])) {
-                if (att && att.sourceURL && att.dataURI) {
-                  cacheHydratedUrlHash(att.sourceURL, att.dataURI);
-                }
-              }
-            }
             turns = extractTurnEntries(data);
             sig = turns.join('\n---\n');
-            await resolveMissingForeignAttachmentHashes(startConvId, turns, controller?.signal);
 
             const afterHref = window.location?.href || '';
             const afterInfo = adapter.detectPlatform(afterHref);
@@ -576,7 +525,7 @@
               return;
             }
 
-            if (isStaleFromOtherConv()) {
+            if (isStaleFromOtherConv(false)) {
               sendResponse({
                 success: false,
                 error: 'SOURCE_IDENTITY_STALE_DOM: Los recursos hidratados aún pertenecen a una conversación anterior tras navegación SPA.'
