@@ -348,7 +348,7 @@
       const isUser = msg.role === 'user';
       const isAssistant = msg.role === 'assistant';
       const isTool = msg.role === 'tool';
-      const roleLabel = isUser ? 'USUARIO' : (isAssistant ? 'CHATGPT' : (isTool ? 'HERRAMIENTA' : (msg.role || 'SISTEMA').toUpperCase()));
+      const roleLabel = isUser ? 'USUARIO' : (isAssistant ? platform : (isTool ? 'HERRAMIENTA' : (msg.role || 'SISTEMA').toUpperCase()));
 
       const originalText = typeof msg.text === 'string' ? msg.text : (msg.content?.text || '');
       const text = originalText.replace(/\uE200[\s\S]*?\uE201/g, '').replace(/!\[[^\]]*\]\(<?[^)>]+>?\)/g, '').replace(/\x60\x60\x60[^\n]*\n[\s\S]*?\x60\x60\x60/g, '');
@@ -560,7 +560,7 @@
           currentStreams.push(`${MARGIN_LEFT + 14} ${currentY - 14} Td (${sanitizePdfText(`[Recurso visual no disponible en la exportacion: ${fallbackName}]`)}) Tj ET`);
           currentStreams.push('0.5 0.5 0.55 rg');
           currentStreams.push('BT /F1 7.5 Tf');
-          currentStreams.push(`${MARGIN_LEFT + 14} ${currentY - 24} Td (${sanitizePdfText('Actualiza la captura con ChatGPT abierto para recuperar esta imagen.')}) Tj ET`);
+          currentStreams.push(`${MARGIN_LEFT + 14} ${currentY - 24} Td (${sanitizePdfText(`Actualiza la captura con ${platform} abierto para recuperar esta imagen.`)}) Tj ET`);
           currentStreams.push('Q');
           currentY -= 36;
         }

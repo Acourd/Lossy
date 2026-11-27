@@ -10,6 +10,8 @@ chrome.runtime.onInstalled.addListener(() => {
 });
 
 chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
+  if (sender?.id && sender.id !== chrome.runtime.id) return false;
+  if (!request || typeof request !== 'object') return false;
   if(request.action==='SAVE_CLIP'){
     if(!request.clip?.canonicalId?.startsWith('clip_')){sendResponse({success:false,error:'Clip inválido'});return false;}
     const write=()=>new LinerDB().saveClip(request.clip);

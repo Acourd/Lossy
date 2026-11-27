@@ -105,6 +105,23 @@
       return `\n\n\`\`\`${lang}\n${rawCode.trim()}\n\`\`\`\n\n`;
     }
 
+    if (tag === 'ol') {
+      let itemNum = 1;
+      const items = Array.from(node.childNodes || []).map(child => {
+        if (child && child.nodeType === 1 && (child.tagName || '').toLowerCase() === 'li') {
+          const item = Array.from(child.childNodes || []).map(serializeDomToMarkdown).join('').trim();
+          return item ? `\n${itemNum++}. ${item}` : '';
+        }
+        return serializeDomToMarkdown(child);
+      }).join('');
+      return `\n${items}\n`;
+    }
+    if (tag === 'blockquote') {
+      const q = Array.from(node.childNodes || []).map(serializeDomToMarkdown).join('').trim();
+      if (!q) return '';
+      return '\n\n' + q.split('\n').map(line => `> ${line}`).join('\n') + '\n\n';
+    }
+
     const inner = Array.from(node.childNodes || []).map(serializeDomToMarkdown).join('');
     if (tag === 'code') {
       const cleanCode = inner.trim();
@@ -123,19 +140,19 @@
     }
     if (tag === 'strong' || tag === 'b') {
       const bold = inner.trim();
-      return bold ? ` **${bold}** ` : '';
+      return bold ? `**${bold}**` : '';
     }
     if (tag === 'em' || tag === 'i') {
       const ital = inner.trim();
-      return ital ? ` *${ital}* ` : '';
+      return ital ? `*${ital}*` : '';
     }
     if (tag === 'a') {
-      const href = node.getAttribute ? (node.getAttribute('href') || '') : '';
-      const label = inner.trim() || href;
-      if (/^https?:\/\//i.test(href)) return `[${label}](${href})`;
+      const href = node.getAttribute ? (node.getAttribute('href') || '').trim() : '';
+      const label = (inner.trim() || href).replace(/[\[\]\r\n]/g, ' ').trim();
+      if (/^https?:\/\//i.test(href)) return `[${label}](<${href.replace(/>/g, '%3E')}>)`;
       return label;
     }
-    if (['p', 'div', 'ul', 'ol', 'blockquote', 'section', 'article'].includes(tag)) {
+    if (['p', 'div', 'ul', 'section', 'article'].includes(tag)) {
       return `\n${inner}\n`;
     }
     return inner;
@@ -273,6 +290,9 @@
 
   function extractClaudeDom(doc, url) {
     const detected = detectPlatform(url) || { platform: 'claude', label: 'Claude', conversationId: null };
+    if (!doc || typeof doc.querySelectorAll !== 'function') {
+      return buildCanonical('claude', 'Claude', detected.conversationId, url, 'Conversación Claude', []);
+    }
     const title = (doc.title || '').replace(/\s*[-–|]\s*Claude\s*$/i, '').trim() || 'Conversación Claude';
     const nodes = Array.from(doc.querySelectorAll(
       '[data-testid="user-message"], [data-testid="chat-message-content"], .font-user-message, .font-claude-message'
@@ -296,6 +316,9 @@
 
   function extractGeminiDom(doc, url) {
     const detected = detectPlatform(url) || { platform: 'gemini', label: 'Gemini', conversationId: null };
+    if (!doc || typeof doc.querySelectorAll !== 'function') {
+      return buildCanonical('gemini', 'Gemini', detected.conversationId, url, 'Conversación Gemini', []);
+    }
     const title = (doc.title || '').replace(/\s*[-–|]\s*(?:Google\s+)?Gemini\s*$/i, '').trim() || 'Conversación Gemini';
     const nodes = Array.from(doc.querySelectorAll(
       'user-query, model-response, .query-text, .model-response-text'

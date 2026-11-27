@@ -37,8 +37,9 @@
       for (const value of [asset.fileId, asset.assetPointer, asset.id, asset.assetId]) {
         if (typeof value !== 'string') continue;
         const clean = value.replace(/^(?:sediment|file-service):\/\//, '');
-        if (/^file[_-][\w-]+$/.test(clean)) return clean;
+        if (/^(?:file|att)[_-][\w-]+$/.test(clean)) return clean;
       }
+      if (typeof asset.sourceURL === 'string' && /^https?:\/\//i.test(asset.sourceURL)) return asset.sourceURL;
       return '';
     };
     const oldMessages = new Map((existing.messages || []).filter(m => m.id).map(m => [m.id, m]));
@@ -661,7 +662,7 @@
           if (item && (item.entityType === 'clip' || (typeof item.canonicalId === 'string' && item.canonicalId.startsWith('clip_')))) {
             const matchesSource = item.sourceConversationCanonicalId === conv.canonicalId ||
                                   (item.provenance && item.provenance.sourceConversationCanonicalId === conv.canonicalId) ||
-                                  (item.sourceConversationId && conv.canonicalId.replace(/^(conv_chatgpt_|conv_lossy_)/,'')===item.sourceConversationId);
+                                  (item.sourceConversationId && conv.canonicalId.replace(/^(conv_chatgpt_|conv_gemini_|conv_claude_|conv_lossy_)/,'')===item.sourceConversationId);
             if (matchesSource) {
               item.provenance = item.provenance || {};
               item.provenance.sourceStatus = 'source_available_locally';
@@ -686,7 +687,7 @@
               if (item && (item.entityType === 'clip' || (typeof item.canonicalId === 'string' && item.canonicalId.startsWith('clip_')))) {
                 const matchesSource = item.sourceConversationCanonicalId === conv.canonicalId ||
                                       (item.provenance && item.provenance.sourceConversationCanonicalId === conv.canonicalId) ||
-                                      (item.sourceConversationId && conv.canonicalId.replace(/^(conv_chatgpt_|conv_lossy_)/,'')===item.sourceConversationId);
+                                      (item.sourceConversationId && conv.canonicalId.replace(/^(conv_chatgpt_|conv_gemini_|conv_claude_|conv_lossy_)/,'')===item.sourceConversationId);
                 if (matchesSource) {
                   item.provenance = item.provenance || {};
                   item.provenance.sourceStatus = 'source_available_locally';

@@ -24,18 +24,39 @@
     }[ch]));
   }
 
+  const SAFE_RASTER_DATA_URI_RE = /^data:image\/(?:png|jpe?g|gif|webp|avif);base64,[A-Za-z0-9+/=\s]+$/i;
+
   function renderInline(raw) {
     let s = escapeHtml(raw);
     // Inline code
     s = s.replace(/`([^`]+)`/g, '<code>$1</code>');
-    // Images (data URI only for offline self-contained safety)
-    s = s.replace(/!\[([^\]]*)\]\((?:&lt;)?(data:image\/[^)\s&]+)(?:&gt;)?\)/g, '<figure class="l-fig"><img src="$2" alt="$1"><figcaption>$1</figcaption></figure>');
-    // Links
-    s = s.replace(/\[([^\]]+)\]\((?:&lt;)?(https?:\/\/[^)\s&]+)(?:&gt;)?\)/g, '<a href="$2" target="_blank" rel="noopener noreferrer">$1</a>');
+    // Images (strict raster data URI only; rejects svg+xml)
+    s = s.replace(/!\[([^\]]*)\]\((?:&lt;)?(data:image\/(?:png|jpe?g|gif|webp|avif);base64,[A-Za-z0-9+/=]+)(?:&gt;)?\)/gi, '<figure class="l-fig"><img src="$2" alt="$1"><figcaption>$1</figcaption></figure>');
+    // Links (preserves &amp; query parameters safely since escapeHtml already ran)
+    s = s.replace(/\[([^\]]+)\]\((?:&lt;)?(https?:\/\/(?:&amp;|[^)\s"'<>])+)(?:&gt;)?\)/g, '<a href="$2" target="_blank" rel="noopener noreferrer">$1</a>');
     // Bold & italic
     s = s.replace(/\*\*([^*]+)\*\*/g, '<strong>$1</strong>');
     s = s.replace(/\*([^*]+)\*/g, '<em>$1</em>');
     return s;
+  }
+
+  function splitMarkdownTableRow(row) {
+    const trimmed = String(row || '').trim().replace(/^\|/, '').replace(/\|$/, '');
+    const cells = [];
+    let cur = '';
+    for (let i = 0; i < trimmed.length; i++) {
+      if (trimmed[i] === '\\' && trimmed[i + 1] === '|') {
+        cur += '|';
+        i++;
+      } else if (trimmed[i] === '|') {
+        cells.push(cur.trim());
+        cur = '';
+      } else {
+        cur += trimmed[i];
+      }
+    }
+    cells.push(cur.trim());
+    return cells;
   }
 
   function renderSimpleMarkdownToHtml(text) {
@@ -99,12 +120,11 @@
 
       // Markdown table
       if (trimmed.startsWith('|') && i + 1 < lines.length && /^\|[\s:|-]+\|/.test(lines[i + 1].trim())) {
-        const parseRow = r => r.trim().replace(/^\||\|$/g, '').split('|').map(c => c.trim());
-        const headers = parseRow(trimmed);
+        const headers = splitMarkdownTableRow(trimmed);
         i += 2;
         const rows = [];
         while (i < lines.length && lines[i].trim().startsWith('|')) {
-          rows.push(parseRow(lines[i]));
+          rows.push(splitMarkdownTableRow(lines[i]));
           i++;
         }
         const thead = `<thead><tr>${headers.map(h => `<th>${renderInline(h)}</th>`).join('')}</tr></thead>`;
@@ -121,6 +141,17 @@
           i++;
         }
         blocks.push(`<ul>${items.join('')}</ul>`);
+        continue;
+      }
+
+      // Ordered list
+      if (/^\d+\.\s+/.test(trimmed)) {
+        const items = [];
+        while (i < lines.length && /^\d+\.\s+/.test(lines[i].trim())) {
+          items.push(`<li>${renderInline(lines[i].trim().replace(/^\d+\.\s+/, ''))}</li>`);
+          i++;
+        }
+        blocks.push(`<ol>${items.join('')}</ol>`);
         continue;
       }
 
@@ -151,7 +182,31 @@
     return blocks.join('\n');
   }
 
+  function bytesToBase64(bytes) {
+    if (!bytes || !bytes.length) return '';
+    if (typeof Buffer !== 'undefined') return Buffer.from(bytes).toString('base64');
+    let out = '';
+    for (let i = 0; i < bytes.length; i += 16384) {
+      out += String.fromCharCode(...bytes.subarray(i, i + 16384));
+    }
+    return btoa(out);
+  }
+
+  function resolveSafeImageDataUri(asset, assetBinaryMap) {
+    if (!asset) return null;
+    if (asset.dataURI && SAFE_RASTER_DATA_URI_RE.test(asset.dataURI)) return asset.dataURI;
+    const raw = (assetBinaryMap instanceof Map
+      ? (assetBinaryMap.get(asset.assetId) || assetBinaryMap.get(asset.id) || assetBinaryMap.get(asset.filename))
+      : null) || (asset.data instanceof Uint8Array ? asset.data : null);
+    if (raw && raw.length) {
+      const mime = /^image\/(?:png|jpe?g|gif|webp|avif)$/i.test(asset.mimeType || '') ? asset.mimeType : 'image/png';
+      return `data:${mime};base64,${bytesToBase64(raw)}`;
+    }
+    return null;
+  }
+
   function buildStandaloneHtml(entity, options = {}) {
+    entity = entity && typeof entity === 'object' ? entity : {};
     const title = entity.title || 'Conversación Lossy';
     const platform = (entity.source?.platform || entity.sourcePlatform || 'ChatGPT').toUpperCase();
     const model = entity.model || entity.sourceModel || '';
@@ -176,12 +231,13 @@
       const text = typeof msg.text === 'string' ? msg.text : (msg.content?.text || '');
       let bodyHtml = renderSimpleMarkdownToHtml(text);
 
-      // Embedded images for this turn
-      const msgAssets = allAssets.filter(a => (a.sourceMessageId === msg.id || a.messageIndex === idx) && (a.mimeType?.startsWith('image/') || a.kind === 'image'));
+      // Embedded images for this turn (prefer options.assets, fall back to msg.attachments)
+      const fromOptions = allAssets.filter(a => (a.sourceMessageId === msg.id || a.messageIndex === idx) && (a.mimeType?.startsWith('image/') || a.kind === 'image'));
+      const msgAssets = fromOptions.length ? fromOptions : (msg.attachments || msg.content?.attachments || []).filter(a => a && (a.mimeType?.startsWith('image/') || a.kind === 'image'));
       if (options.imageStrategy !== 'omit' && msgAssets.length) {
         const imgs = msgAssets.map(a => {
-          const uri = a.dataURI || null;
-          if (!uri || !uri.startsWith('data:image/')) return '';
+          const uri = resolveSafeImageDataUri(a, assetBinaryMap);
+          if (!uri) return '';
           return `<figure class="l-fig"><img src="${escapeHtml(uri)}" alt="${escapeHtml(a.filename || 'Imagen')}"><figcaption>${escapeHtml(a.filename || 'Imagen')}</figcaption></figure>`;
         }).filter(Boolean).join('');
         bodyHtml += imgs;

@@ -500,17 +500,17 @@ function initPopup() {
         if (storedTimeMeta) storedTimeMeta.classList.remove('hidden');
 
         if (visibleTurns !== null && visibleTurns > messageCount) {
-          setStatus('warning', 'ChatGPT', `Actualización disponible (~${visibleTurns} turnos en pantalla)`);
+          setStatus('warning', activePlatformLabel, `Actualización disponible (~${visibleTurns} turnos en pantalla)`);
           if (transitStatusSub) transitStatusSub.textContent = 'Actualizable';
           if (transitRailNode) transitRailNode.className = 'rail-node partial';
           if (btnCaptureLabel) btnCaptureLabel.textContent = 'Actualizar captura';
         } else if (integrity === 'partial') {
-          setStatus('warning', 'ChatGPT', `Captura parcial guardada (${messageCount} msgs guardados${visibleTurns !== null ? ` · ~${visibleTurns} visibles` : ''})`);
+          setStatus('warning', activePlatformLabel, `Captura parcial guardada (${messageCount} msgs guardados${visibleTurns !== null ? ` · ~${visibleTurns} visibles` : ''})`);
           if (transitStatusSub) transitStatusSub.textContent = 'Parcial';
           if (transitRailNode) transitRailNode.className = 'rail-node partial';
           if (btnCaptureLabel) btnCaptureLabel.textContent = 'Continuar / Actualizar captura';
         } else {
-          setStatus('ready', 'ChatGPT', `Conversación guardada (${messageCount} mensajes)`);
+          setStatus('ready', activePlatformLabel, `Conversación guardada (${messageCount} mensajes)`);
           if (transitStatusSub) transitStatusSub.textContent = 'Capturado';
           if (transitRailNode) transitRailNode.className = 'rail-node';
           if (btnCaptureLabel) btnCaptureLabel.textContent = 'Actualizar captura';
@@ -525,7 +525,7 @@ function initPopup() {
         updateMetricBand(visibleTurns !== null ? `~${visibleTurns}` : '—', '—', '—');
         if (storedTimeMeta) storedTimeMeta.classList.add('hidden');
 
-        setStatus('warning', 'ChatGPT', 'Conversación detectada (Captura requerida para exportar)');
+        setStatus('warning', activePlatformLabel, 'Conversación detectada (Captura requerida para exportar)');
         if (transitStatusSub) transitStatusSub.textContent = 'No guardada';
         if (transitRailNode) transitRailNode.className = 'rail-node';
         if (btnCaptureLabel) btnCaptureLabel.textContent = 'Capturar contexto';
@@ -557,7 +557,8 @@ function initPopup() {
     if (btnCaptureUpdate) btnCaptureUpdate.disabled = true;
     if (btnCancelCapture) btnCancelCapture.classList.remove('hidden');
 
-    setStatus('detecting', 'ChatGPT', 'Capturando contexto...');
+    const detectedActive = window.Lossy?.MultiPlatform?.detectPlatform?.(currentTab?.url) || { platform: 'chatgpt', label: 'ChatGPT' };
+    setStatus('detecting', detectedActive.label, 'Capturando contexto...');
     showFeedback('Iniciando captura de conversación...', false);
 
     const sendRequest = (isRetry = false) => {
@@ -565,19 +566,27 @@ function initPopup() {
         const lastError = chrome.runtime && chrome.runtime.lastError;
         if (lastError || !response) {
           if (!isRetry && chrome.scripting && chrome.scripting.executeScript) {
+            const injectFiles = detectedActive.platform === 'chatgpt'
+              ? [
+                  'src/core/canonical/canonical_schema.js',
+                  'src/core/canonical_model.js',
+                  'src/core/chatgpt_widgets.js',
+                  'src/core/portability/zip_builder.js',
+                  'src/core/portability/pdf_builder.js',
+                  'src/core/portability/docx_builder.js',
+                  'src/core/portability/html_builder.js',
+                  'src/core/portability/export_center.js',
+                  'src/platforms/chatgpt/chatgpt_assets.js',
+                  'src/platforms/chatgpt/structured/chatgpt_structured_acquisition.js',
+                  'src/content/content_script.js'
+                ]
+              : [
+                  'src/platforms/multi_platform_adapter.js',
+                  'src/content/multi_platform_content.js'
+                ];
             chrome.scripting.executeScript({
               target: { tabId: currentTab.id },
-              files: [
-                'src/core/canonical/canonical_schema.js',
-                'src/core/canonical_model.js',
-                'src/core/portability/zip_builder.js',
-                'src/core/portability/pdf_builder.js',
-                'src/core/portability/docx_builder.js',
-                'src/core/portability/export_center.js',
-                'src/platforms/chatgpt/chatgpt_assets.js',
-                'src/platforms/chatgpt/structured/chatgpt_structured_acquisition.js',
-                'src/content/content_script.js'
-              ]
+              files: injectFiles
             }).then(() => sendRequest(true)).catch(() => {
               setStatus('warning', 'Conexión requerida', 'Recarga la pestaña para activar la captura');
               showStatusAction('Recargar', () => {
@@ -676,7 +685,7 @@ function initPopup() {
             if (btnCaptureLabel) btnCaptureLabel.textContent = 'Continuar / Actualizar captura';
           }
 
-          convTitle.textContent = extractedData.title || meta.title || 'Conversación ChatGPT';
+          convTitle.textContent = extractedData.title || meta.title || `Conversación ${detectedActive.label}`;
           msgCount.textContent = `${totalMessages} ${totalMessages === 1 ? 'mensaje' : 'mensajes'}`;
 
           if (storedTimeText) storedTimeText.textContent = `Actualizado: hace unos instantes`;
@@ -797,6 +806,7 @@ function initPopup() {
     if (!entity || typeof entity !== 'object') return 0;
     const summaryTotal = window.Lossy?.ChatGPTAssets?.summary(entity)?.total || 0;
     let inlineCount = 0;
+    let attCount = 0;
     const messages = Array.isArray(entity.selectedMessages)
       ? entity.selectedMessages
       : (Array.isArray(entity.messages) ? entity.messages : []);
@@ -804,8 +814,13 @@ function initPopup() {
       const text = typeof msg?.text === 'string' ? msg.text : (msg?.content?.text || '');
       const matches = text.match(/!\[[^\]]*\]\([^)]+\)/g);
       if (matches) inlineCount += matches.length;
+      const atts = Array.isArray(msg?.attachments) ? msg.attachments : (Array.isArray(msg?.content?.attachments) ? msg.content.attachments : []);
+      attCount += atts.filter(a => a && (a.kind === 'image' || a.mimeType?.startsWith('image/'))).length;
     }
-    return Math.max(summaryTotal, inlineCount);
+    const topAttCount = Array.isArray(entity.attachments)
+      ? entity.attachments.filter(a => a && (a.kind === 'image' || a.mimeType?.startsWith('image/'))).length
+      : 0;
+    return Math.max(summaryTotal, inlineCount, attCount, topAttCount);
   }
 
   function formatCompactRelativeTime(isoString) {
@@ -1068,8 +1083,8 @@ function initPopup() {
     };
 
     container.innerHTML = '';
-    pinned.forEach(fmt => {
-      const meta = quickMeta[fmt] || { label: fmt.toUpperCase(), cls: `quick-chip-${fmt}`, icon: '' };
+    pinned.filter(fmt => Object.hasOwn(quickMeta, fmt)).forEach(fmt => {
+      const meta = quickMeta[fmt];
       const btn = document.createElement('button');
       btn.id = `btn-quick-${fmt}`;
       btn.className = `btn-quick-export ${meta.cls}`;

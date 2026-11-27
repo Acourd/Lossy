@@ -102,10 +102,11 @@
   // --- 1. EVALUADOR SEGURO DE EXPRESIONES DIL (ZERO-EVAL, CSP SAFE) ---
 
   function tokenizeExpr(src) {
+    const MAX_TOKENS = 2000;
     const tokens = [];
     let i = 0;
     const len = src.length;
-    while (i < len) {
+    while (i < len && tokens.length < MAX_TOKENS) {
       const ch = src[i];
       if (/\s/.test(ch)) { i++; continue; }
 
@@ -193,9 +194,12 @@
     return tokens;
   }
 
-  function safeEvalExpr(exprStr, env) {
+  function safeEvalExpr(exprStr, env, depth = 0) {
+    if (depth > 32) return undefined;
     const tokens = tokenizeExpr(String(exprStr || '').trim());
     let pos = 0;
+    let callDepth = depth;
+    const guardDepth = () => { if (++callDepth > 64) throw new Error('DEPTH'); };
 
     const peek = () => tokens[pos];
     const consume = () => tokens[pos++];
@@ -205,6 +209,7 @@
     };
 
     function parseTernary() {
+      guardDepth();
       const cond = parseOr();
       if (matchOp('?')) {
         const t = parseTernary();
@@ -314,8 +319,9 @@
         } else if (matchOp('[')) {
           const key = parseTernary();
           matchOp(']');
-          if (val && (Array.isArray(val) || typeof val === 'object') && key !== '__proto__' && key !== 'constructor') {
-            val = val[key];
+          const keyStr = String(key);
+          if (val && (Array.isArray(val) || typeof val === 'object') && keyStr !== '__proto__' && keyStr !== 'constructor' && keyStr !== 'prototype' && Object.hasOwn(val, keyStr)) {
+            val = val[keyStr];
           } else {
             val = undefined;
           }
@@ -335,7 +341,7 @@
 
       if (tok.type === 'tpl') {
         consume();
-        return tok.value.map(p => (p.kind === 'lit' ? p.value : String(safeEvalExpr(p.value, env) ?? ''))).join('');
+        return tok.value.map(p => (p.kind === 'lit' ? p.value : String(safeEvalExpr(p.value, env, callDepth + 1) ?? ''))).join('');
       }
 
       if (tok.type === 'id') {
@@ -425,21 +431,46 @@
     const env = Object.assign(Object.create(null), inheritedEnv || {});
     let text = String(source || '');
 
-    // 1. Extraer y evaluar {@body const ...}
-    text = text.replace(/\{@body\s+([^}]+)\}/g, (_, bodyStmt) => {
-      const stmt = bodyStmt.trim();
-      const stateMatch = stmt.match(/^const\s*\[\s*([a-zA-Z_$][\w$]*)\s*(?:,\s*[a-zA-Z_$][\w$]*)?\s*\]\s*=\s*DIL\.useState\(([\s\S]+)\)$/);
-      if (stateMatch) {
-        env[stateMatch[1]] = safeEvalExpr(stateMatch[2], env);
-        return '';
+    // 1. Extraer y evaluar {@body const ...} usando escáner de llaves balanceadas
+    {
+      let rebuilt = '';
+      let idx = 0;
+      while (idx < text.length) {
+        const start = text.indexOf('{@body', idx);
+        if (start === -1) { rebuilt += text.slice(idx); break; }
+        rebuilt += text.slice(idx, start);
+        let depth = 1;
+        let j = start + 6;
+        let inQuote = null;
+        while (j < text.length && depth > 0) {
+          const ch = text[j];
+          if (inQuote) {
+            if (ch === '\\') { j += 2; continue; }
+            if (ch === inQuote) inQuote = null;
+          } else {
+            if (ch === '"' || ch === "'" || ch === '`') inQuote = ch;
+            else if (ch === '{') depth++;
+            else if (ch === '}') depth--;
+          }
+          j++;
+        }
+        if (depth === 0) {
+          const stmt = text.slice(start + 6, j - 1).trim();
+          const stateMatch = stmt.match(/^const\s*\[\s*([a-zA-Z_$][\w$]*)\s*(?:,\s*[a-zA-Z_$][\w$]*)?\s*\]\s*=\s*DIL\.useState\(([\s\S]+)\)$/);
+          if (stateMatch) {
+            env[stateMatch[1]] = safeEvalExpr(stateMatch[2], env);
+          } else {
+            const constMatch = stmt.match(/^(?:const|let|var)\s+([a-zA-Z_$][\w$]*)\s*=\s*([\s\S]+)$/);
+            if (constMatch) env[constMatch[1]] = safeEvalExpr(constMatch[2], env);
+          }
+          idx = j;
+        } else {
+          rebuilt += text.slice(start, start + 6);
+          idx = start + 6;
+        }
       }
-      const constMatch = stmt.match(/^(?:const|let|var)\s+([a-zA-Z_$][\w$]*)\s*=\s*([\s\S]+)$/);
-      if (constMatch) {
-        env[constMatch[1]] = safeEvalExpr(constMatch[2], env);
-        return '';
-      }
-      return '';
-    });
+      text = rebuilt;
+    }
 
     // 2. Expandir bucles {#each expr as item[, idx]}...{/each}
     let guard = 0;
@@ -486,12 +517,16 @@
   }
 
   function parseWidgetAst(source, env) {
+    const MAX_AST_NODES = 2000;
+    const MAX_AST_DEPTH = 40;
     const root = { type: 'root', children: [] };
     const stack = [root];
     const tokenRe = /<(\/)?([a-zA-Z][a-zA-Z0-9-]*)(\s+(?:[^>"'{/]|\/(?!>)|\{(?:[^{}]|\{[^}]*\})*\}|"[^"]*"|'[^']*')*)?\s*(\/)?>|([^<]+)/g;
     let m;
+    let nodeCount = 0;
 
-    while ((m = tokenRe.exec(source)) !== null) {
+    while ((m = tokenRe.exec(source)) !== null && nodeCount < MAX_AST_NODES) {
+      nodeCount++;
       const [, isClosing, rawTag, rawAttrs, isSelfClosing, textChunk] = m;
       const current = stack[stack.length - 1];
 
@@ -523,7 +558,7 @@
       current.children.push(node);
 
       const voidTags = ['hr', 'br', 'divider', 'spacer', 'favicon', 'asyncimage', 'slider', 'cite', 'suggestautomation', 'displayautomation'];
-      if (!isSelfClosing && !voidTags.includes(tag)) {
+      if (!isSelfClosing && !voidTags.includes(tag) && stack.length < MAX_AST_DEPTH) {
         stack.push(node);
       }
     }
@@ -569,7 +604,7 @@
 
   function renderInlineMdToHtml(raw) {
     let safe = escapeHtml(raw);
-    safe = safe.replace(/\[([^\]]+)\]\((https?:\/\/[^)\s]+)\)/g, '<a href="$2" target="_blank" rel="noopener noreferrer">$1</a>');
+    safe = safe.replace(/\[([^\]]+)\]\((https?:\/\/(?:&amp;|[^)\s"'<>])+)\)/g, '<a href="$2" target="_blank" rel="noopener noreferrer">$1</a>');
     safe = safe.replace(/\*\*([^*]+)\*\*/g, '<strong>$1</strong>');
     safe = safe.replace(/\*([^*]+)\*/g, '<em>$1</em>');
     return safe;

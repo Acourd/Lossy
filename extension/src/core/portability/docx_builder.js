@@ -295,7 +295,7 @@
       const isAssistant = msg.role === 'assistant';
       const isTool = msg.role === 'tool';
       const styleId = isUser ? 'RoleHeaderUser' : (isAssistant ? 'RoleHeaderAssistant' : 'RoleHeaderTechnical');
-      const roleLabel = isUser ? 'USUARIO' : (isAssistant ? 'CHATGPT' : (isTool ? 'HERRAMIENTA' : (msg.role || 'SISTEMA').toUpperCase()));
+      const roleLabel = isUser ? 'USUARIO' : (isAssistant ? platform : (isTool ? 'HERRAMIENTA' : (msg.role || 'SISTEMA').toUpperCase()));
 
       const originalText = typeof msg.text === 'string' ? msg.text : (msg.content?.text || '');
       const text=originalText.replace(/\x60\x60\x60[^\n]*\n[\s\S]*?\x60\x60\x60/g,'').replace(/!\[[^\]]*\]\(<?[^)>]+>?\)/g,'');

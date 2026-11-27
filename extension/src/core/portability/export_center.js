@@ -379,7 +379,7 @@
         if (!downloads.has(address)) downloads.set(address, (async () => {
           const url = new URL(address);
           if (!['https:', 'http:', 'blob:'].includes(url.protocol)) throw new Error('URL de recurso no admitida');
-          const trusted = /(^|\.)(chatgpt\.com|openai\.com|oaiusercontent\.com)$/.test(url.hostname);
+          const trusted = /(^|\.)(chatgpt\.com|openai\.com|oaiusercontent\.com|googleusercontent\.com|claude\.ai)$/.test(url.hostname);
           const response = await fetchFn(address, { credentials: trusted ? 'include' : 'omit', signal: AbortSignal.timeout(12000) });
           if (!response?.ok) throw new Error('Fallo al descargar HTTP ' + (response?.status ?? 'desconocido'));
           const mimeType = response.headers?.get('content-type')?.split(';')[0];
@@ -623,7 +623,8 @@
     messages.forEach((msg, idx) => {
       const isUser = msg.role === 'user';
       const isAssistant = msg.role === 'assistant';
-      const author = msg.author || (isUser ? 'Usuario' : (isAssistant ? 'ChatGPT' : 'Herramienta'));
+      const aiLabel = platform === 'GEMINI' ? 'Gemini' : platform === 'CLAUDE' ? 'Claude' : 'ChatGPT';
+      const author = msg.author || (isUser ? 'Usuario' : (isAssistant ? aiLabel : 'Herramienta'));
       const text = (markdownResources(msg, idx, options) + formatCitationsMarkdown(msg)).trim();
       const timeStr = msg.timestamp ? ` · ${new Date(msg.timestamp).toLocaleTimeString()}` : '';
 
@@ -741,8 +742,9 @@
     }
     page();textLines(entity.title||'Conversación');line('LOSSY / ARCHIVO DE CONVERSACIÓN',11,'#62786f');y+=14;
     const messages=(entity.selectedMessages||entity.messages||[]).filter(m=>options.includeTechnicalEvents||(m.isConversational!==false&&['user','assistant'].includes(m.role)));
+    const pngPlatform = (entity.source?.platform || entity.sourcePlatform || 'CHATGPT').toUpperCase();
     for(const [index,msg] of messages.entries()){
-      space(80);line(msg.role==='user'?'USUARIO':msg.role==='assistant'?'CHATGPT':msg.role.toUpperCase(),12,'#25664f',true);y+=4;
+      space(80);line(msg.role==='user'?'USUARIO':msg.role==='assistant'?pngPlatform:msg.role.toUpperCase(),12,'#25664f',true);y+=4;
       const text=cleanExportText(typeof msg.text==='string'?msg.text:msg.content?.text).replace(/!\[[^\]]*\]\(<?[^)>]+>?\)/g,'');
       textLines(text);
       const code=msg.codeBlocks||msg.content?.codeBlocks||[];

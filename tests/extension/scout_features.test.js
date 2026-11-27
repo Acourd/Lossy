@@ -202,3 +202,95 @@ test('Gemini extraction preserves HTML tables as Markdown, strips thinking/sr-on
   assert.ok(prepared.html.includes('<table>') && prepared.html.includes("<td>A. can't</td>"), 'Table must render as real HTML table in PDF');
   assert.equal(prepared.imageCount, 1, 'Gemini image must be included in prepared PDF document');
 });
+
+test('Enterprise hardening: HtmlBuilder preserves query-param URLs, blocks SVG data URIs, handles escaped-pipe tables, ordered lists, and null entity', () => {
+  const safePng = 'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=';
+  const evilSvg = 'data:image/svg+xml;base64,PHN2ZyBvbmxvYWQ9YWxlcnQoMSk+PC9zdmc+';
+  const html = HtmlBuilder.buildStandaloneHtml({
+    title: 'Hardening Test',
+    source: { platform: 'gemini' },
+    messages: [{
+      id: 'm1',
+      role: 'assistant',
+      text: [
+        'Ver [Docs](https://example.com/search?q=lossy&lang=es)',
+        '',
+        '1. Primero',
+        '2. Segundo',
+        '',
+        '| Col A | Col B |',
+        '| --- | --- |',
+        '| a \\| b | ok |',
+        '',
+        `![evil](${evilSvg})`,
+        `![good](${safePng})`
+      ].join('\n'),
+      attachments: [{ id: 'a1', kind: 'image', mimeType: 'image/png', filename: 'att.png', dataURI: safePng }]
+    }]
+  });
+  assert.ok(html.includes('href="https://example.com/search?q=lossy&amp;lang=es"'), 'Query-param URLs must remain clickable links');
+  assert.ok(html.includes('<ol><li>Primero</li><li>Segundo</li></ol>'), 'Ordered lists must render as <ol>');
+  assert.ok(html.includes('<td>a | b</td><td>ok</td>'), 'Escaped pipes in tables must stay inside cell');
+  assert.ok(!html.includes('<img src="data:image/svg+xml'), 'SVG data URIs must never render as <img>');
+  assert.ok(html.includes('src="' + safePng + '"'), 'Safe raster PNG data URIs must render');
+  assert.ok(HtmlBuilder.buildStandaloneHtml(null).includes('<!doctype html>'), 'Null entity must not throw');
+});
+
+test('Enterprise hardening: ChatGPTWidgets blocks prototype chain lookups, handles object literals in @body, and survives deep nesting', () => {
+  const Widgets = require('../../extension/src/core/chatgpt_widgets.js');
+  const protoHtml = Widgets.renderWidgetBlockToHtml('<card>{@body const o = { ok: 42 }}<text>{o["toString"]}</text><text>{o["prototype"]}</text><text>{o["ok"]}</text></card>');
+  assert.ok(protoHtml.includes('42'), 'Balanced-brace object literal in @body must evaluate');
+  assert.ok(!protoHtml.includes('function toString'), 'Inherited prototype property must not be readable');
+
+  const deepNest = '<box>'.repeat(120) + '<text>Safe</text>' + '</box>'.repeat(120);
+  const deepHtml = Widgets.renderWidgetBlockToHtml(deepNest);
+  assert.ok(deepHtml.includes('Safe'), 'Deeply nested widget must not overflow stack');
+});
+
+test('Enterprise hardening: MultiPlatform null safety, PDF/DOCX/MD dynamic Gemini labels, LinerDB image retention, and icon PNG integrity', async () => {
+  const PdfBuilder = require('../../extension/src/core/portability/pdf_builder.js');
+  const DocxBuilder = require('../../extension/src/core/portability/docx_builder.js');
+  const ZipBuilder = require('../../extension/src/core/portability/zip_builder.js');
+  const { LinerDB } = require('../../extension/src/core/storage/liner_db.js');
+
+  assert.equal(MultiPlatform.extractClaudeDom(null, 'https://claude.ai/chat/x').messages.length, 0);
+  assert.equal(MultiPlatform.extractGeminiDom(null, 'https://gemini.google.com/app/x').messages.length, 0);
+
+  const geminiConv = {
+    canonicalId: 'conv_gemini_ent1',
+    title: 'Auditoría Gemini',
+    source: { platform: 'gemini', conversationId: 'ent1', url: 'https://gemini.google.com/app/ent1' },
+    messages: [
+      { id: 'm1', role: 'user', isConversational: true, text: 'Hola', attachments: [{ id: 'att_gemini_1_1', kind: 'image', mimeType: 'image/png', sourceURL: 'https://lh3.googleusercontent.com/test', dataURI: 'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=' }] },
+      { id: 'm2', role: 'assistant', isConversational: true, text: 'Respuesta de Gemini.' }
+    ]
+  };
+
+  const mdHuman = ExportCenterMod.formatAsMarkdown(geminiConv, 'human', { imageStrategy: 'omit' });
+  assert.ok(mdHuman.includes('### Gemini'), 'Human Markdown must label Gemini, not ChatGPT');
+
+  const docxBytes = DocxBuilder.buildDocx(geminiConv, {});
+  const docXml = Buffer.from(docxBytes).toString('utf8');
+  assert.ok(docXml.includes('>GEMINI<') && !docXml.includes('>CHATGPT<'), 'DOCX must label assistant as GEMINI');
+
+  const pdfBytes = PdfBuilder.buildPdf(geminiConv, {});
+  const pdfStr = Buffer.from(pdfBytes).toString('latin1');
+  assert.ok(pdfStr.includes('(GEMINI)'), 'PDF must label assistant as GEMINI');
+
+  const db = new LinerDB();
+  await db.saveConversation(geminiConv);
+  const recaptureWithoutDataUri = structuredClone(geminiConv);
+  recaptureWithoutDataUri.messages[0].attachments[0].dataURI = null;
+  await db.saveConversation(recaptureWithoutDataUri);
+  const stored = await db.getConversation('conv_gemini_ent1');
+  assert.ok(stored.messages[0].attachments[0].dataURI?.startsWith('data:image/png;base64,'), 'LinerDB must retain hydrated Gemini dataURI across re-captures');
+
+  const iconDir = path.join(__dirname, '..', '..', 'extension', 'icons');
+  const expectedDims = { 'icon16.png': 16, 'icon32.png': 32, 'icon48.png': 48, 'icon128.png': 128, 'logo-lossy.png': 512 };
+  for (const [file, dim] of Object.entries(expectedDims)) {
+    const buf = fs.readFileSync(path.join(iconDir, file));
+    assert.equal(buf.subarray(0, 8).toString('hex'), '89504e470d0a1a0a', `${file} must have valid PNG magic bytes`);
+    assert.equal(buf.readUInt32BE(16), dim, `${file} width must be ${dim}`);
+    assert.equal(buf.readUInt32BE(20), dim, `${file} height must be ${dim}`);
+  }
+});
