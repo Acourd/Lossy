@@ -735,7 +735,8 @@
       }
     }
     const nextBsCol = sCol + lead.cols + 1 + optCols;
-    return { ok: true, rest: pad + str.slice(i), col: nextBsCol, bsCol: nextBsCol, lineCol: colAfterGt };
+    const nextLineCol = bsCol + nextBsCol;
+    return { ok: true, rest: pad + str.slice(i), col: nextBsCol, bsCol: nextBsCol, lineCol: nextLineCol };
   }
 
   function matchListPrefixMd(str, startCol, canInterruptPara = true, allowEmptyInterrupt = false) {
@@ -782,7 +783,7 @@
           matched++;
           continue;
         }
-        const s = stripIndentColsMd(rest, bsCol + sCol, c.indent);
+        const s = stripIndentColsMd(rest, lineCol, c.indent);
         if (!s.ok) break;
         rest = s.rest;
         sCol += c.indent;

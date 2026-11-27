@@ -1027,7 +1027,8 @@
       }
     }
     const nextBsCol = sCol + lead.cols + 1 + optCols;
-    return { ok: true, rest: pad + str.slice(i), col: nextBsCol, bsCol: nextBsCol, lineCol: colAfterGt };
+    const nextLineCol = bsCol + nextBsCol;
+    return { ok: true, rest: pad + str.slice(i), col: nextBsCol, bsCol: nextBsCol, lineCol: nextLineCol };
   }
 
   function matchListPrefix(str, startCol, canInterruptPara = true, allowEmptyInterrupt = false) {
@@ -1071,14 +1072,14 @@
         sCol = 0;
         lineCol = m.lineCol;
         afterLastBqRest = rest;
-        afterLastBqCol = bsCol;
+        afterLastBqCol = lineCol;
         matched++;
       } else {
         if (allowBlankListSkip && rest.trim().length === 0) {
           matched++;
           continue;
         }
-        const s = stripIndentCols(rest, bsCol + sCol, c.indent);
+        const s = stripIndentCols(rest, lineCol, c.indent);
         if (!s.ok) break;
         rest = s.rest;
         sCol += c.indent;
