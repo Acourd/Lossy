@@ -1009,26 +1009,25 @@
     return { ok: true, rest, col: startCol + targetCols };
   }
 
-  function matchBqPrefix(str, bsCol, sCol = 0) {
-    const startCol = bsCol + sCol;
-    const lead = measureLeadCols(str, startCol);
+  function matchBqPrefix(str, bsCol, sCol = 0, lineCol = bsCol + sCol) {
+    const lead = measureLeadCols(str, lineCol);
     if (lead.cols > 3 || str[lead.idx] !== '>') return { ok: false };
     let i = lead.idx + 1;
-    let col = lead.endCol + 1;
+    let colAfterGt = lead.endCol + 1;
     let optCols = 0;
     let pad = '';
     if (i < str.length) {
-      if (str[i] === ' ') { i++; col += 1; optCols = 1; }
+      if (str[i] === ' ') { i++; colAfterGt += 1; optCols = 1; }
       else if (str[i] === '\t') {
-        const adv = 4 - (col % 4);
+        const adv = 4 - (colAfterGt % 4);
         i++;
-        col += 1;
+        colAfterGt += 1;
         optCols = 1;
         if (adv > 1) pad = ' '.repeat(adv - 1);
       }
     }
     const nextBsCol = sCol + lead.cols + 1 + optCols;
-    return { ok: true, rest: pad + str.slice(i), col: nextBsCol, bsCol: nextBsCol };
+    return { ok: true, rest: pad + str.slice(i), col: nextBsCol, bsCol: nextBsCol, lineCol: colAfterGt };
   }
 
   function matchListPrefix(str, startCol, canInterruptPara = true, allowEmptyInterrupt = false) {
@@ -1054,6 +1053,42 @@
     return { ok: true, indent: targetIndent, col: startCol + targetIndent, rest };
   }
 
+  function stepContainerPrefix(line, containerList, allowBlankListSkip = true) {
+    let rest = line;
+    let bsCol = 0;
+    let sCol = 0;
+    let lineCol = 0;
+    let matched = 0;
+    let afterLastBqRest = line;
+    let afterLastBqCol = 0;
+    while (matched < containerList.length) {
+      const c = containerList[matched];
+      if (c.type === 'bq') {
+        const m = matchBqPrefix(rest, bsCol, sCol, lineCol);
+        if (!m.ok) break;
+        rest = m.rest;
+        bsCol = m.bsCol;
+        sCol = 0;
+        lineCol = m.lineCol;
+        afterLastBqRest = rest;
+        afterLastBqCol = bsCol;
+        matched++;
+      } else {
+        if (allowBlankListSkip && rest.trim().length === 0) {
+          matched++;
+          continue;
+        }
+        const s = stripIndentCols(rest, bsCol + sCol, c.indent);
+        if (!s.ok) break;
+        rest = s.rest;
+        sCol += c.indent;
+        lineCol += c.indent;
+        matched++;
+      }
+    }
+    return { rest, bsCol, sCol, lineCol, matched, afterLastBqRest, afterLastBqCol };
+  }
+
   function createContainerStepper(initialContainers) {
     const containers = Array.isArray(initialContainers) ? initialContainers.map(c => ({ ...c })) : [];
     let inParagraph = false;
@@ -1062,45 +1097,16 @@
       get inParagraph() { return inParagraph; },
       set inParagraph(v) { inParagraph = Boolean(v); },
       step(line) {
-        let rest = line;
-        let bsCol = 0;
-        let sCol = 0;
-        let matched = 0;
-        let afterLastBqRest = line;
-        let afterLastBqCol = 0;
-        while (matched < containers.length) {
-          const c = containers[matched];
-          if (c.type === 'bq') {
-            const m = matchBqPrefix(rest, bsCol, sCol);
-            if (!m.ok) break;
-            rest = m.rest;
-            bsCol = m.bsCol;
-            sCol = 0;
-            afterLastBqRest = rest;
-            afterLastBqCol = bsCol;
-            matched++;
-          } else {
-            if (rest.trim().length === 0) {
-              matched++;
-              continue;
-            }
-            const s = stripIndentCols(rest, bsCol + sCol, c.indent);
-            if (!s.ok) break;
-            rest = s.rest;
-            sCol += c.indent;
-            matched++;
-          }
-        }
+        let { rest, bsCol, sCol, lineCol, matched, afterLastBqRest, afterLastBqCol } = stepContainerPrefix(line, containers, true);
         const exitedAnyContainer = matched < containers.length;
         const listExited = containers.slice(matched).some(c => c.type === 'list');
         let lazyKeep = false;
         if (exitedAnyContainer && inParagraph && rest.trim().length > 0) {
-          const curCol = bsCol + sCol;
-          const tailLead = measureLeadCols(rest, curCol);
+          const tailLead = measureLeadCols(rest, lineCol);
           const tailTrim = rest.slice(tailLead.idx);
           const tailInterrupts =
             isSingleLineNonParaBlock(tailLead.cols, tailTrim, false) ||
-            matchBqPrefix(rest, bsCol, sCol).ok ||
+            matchBqPrefix(rest, bsCol, sCol, lineCol).ok ||
             (tailLead.cols <= 3 && /^(`{3,}[^`]*|~{3,}.*)$/.test(tailTrim)) ||
             (tailLead.cols <= 3 && /^(?:[-+*]|\d{1,9}[.)])(?:[ \t]|$)/.test(tailTrim));
           if (!tailInterrupts) lazyKeep = true;
@@ -1108,32 +1114,36 @@
         if (!lazyKeep) containers.length = matched;
         let hadMarker = false;
         while (!lazyKeep && rest.trim().length > 0) {
-          const bq = matchBqPrefix(rest, bsCol, sCol);
+          const bq = matchBqPrefix(rest, bsCol, sCol, lineCol);
           if (bq.ok) {
             containers.push({ type: 'bq' });
             rest = bq.rest;
             bsCol = bq.bsCol;
             sCol = 0;
+            lineCol = bq.lineCol;
             hadMarker = true;
             continue;
           }
           const allowEmpty = !inParagraph || exitedAnyContainer || hadMarker;
+          const leadBeforeList = measureLeadCols(rest, lineCol);
+          if (leadBeforeList.cols > 3) break;
           const lst = matchListPrefix(rest, bsCol + sCol, !inParagraph || listExited || exitedAnyContainer || hadMarker, allowEmpty);
           if (lst.ok) {
             containers.push({ type: 'list', indent: lst.indent });
             rest = lst.rest;
             sCol += lst.indent;
+            lineCol += lst.indent;
             hadMarker = true;
             continue;
           }
           break;
         }
         const col = bsCol + sCol;
-        const lead = measureLeadCols(rest, col);
+        const lead = measureLeadCols(rest, lineCol);
         const curBqCount = containers.filter(c => c.type === 'bq').length;
         const isBlank = rest.trim().length === 0;
         const trimmedAfterLead = rest.slice(lead.idx);
-        return { rest, col, lead, curBqCount, hadMarker, isBlank, trimmedAfterLead, exitedAnyContainer, afterLastBqRest, afterLastBqCol };
+        return { rest, col, lineCol, lead, curBqCount, hadMarker, isBlank, trimmedAfterLead, exitedAnyContainer, afterLastBqRest, afterLastBqCol };
       }
     };
   }
@@ -1515,32 +1525,18 @@
       if (nextInit) bufInitContainers = nextInit.map(c => ({ ...c }));
     };
     const matchFenceContainers = (line, fcStack) => {
-      let rest = line;
-      let col = 0;
-      if (rest.trim().length === 0) {
-        if (fcStack.some(c => c.type === 'bq')) return { ok: false, rest, col };
-        return { ok: true, rest, col };
+      if (String(line || '').trim().length === 0) {
+        if (fcStack.some(c => c.type === 'bq')) return { ok: false, rest: line, lineCol: 0 };
+        return { ok: true, rest: line, lineCol: 0 };
       }
-      for (const c of fcStack) {
-        if (c.type === 'bq') {
-          const m = matchBqPrefix(rest, col);
-          if (!m.ok) return { ok: false, rest, col };
-          rest = m.rest;
-          col = m.col;
-        } else {
-          const s = stripIndentCols(rest, col, c.indent);
-          if (!s.ok) return { ok: false, rest, col };
-          rest = s.rest;
-          col = s.col;
-        }
-      }
-      return { ok: true, rest, col };
+      const res = stepContainerPrefix(line, fcStack, false);
+      return { ok: res.matched === fcStack.length, rest: res.rest, lineCol: res.lineCol };
     };
 
     for (const line of lines) {
       const beforeLineContainers = stepper.containers.map(c => ({ ...c }));
       if (inFence) {
-        const { ok, rest, col } = matchFenceContainers(line, fenceContainers);
+        const { ok, rest, lineCol } = matchFenceContainers(line, fenceContainers);
         if (!ok) {
           flush(true, beforeLineContainers);
           inFence = false;
@@ -1550,7 +1546,7 @@
           stepper.inParagraph = false;
         } else {
           buf.push(line);
-          const closeLead = measureLeadCols(rest, col);
+          const closeLead = measureLeadCols(rest, lineCol);
           const closeM = closeLead.cols <= 3 ? rest.slice(closeLead.idx).match(/^(`{3,}|~{3,})[ \t]*$/) : null;
           if (closeM && closeM[1][0] === fenceChar && closeM[1].length >= fenceLen) {
             flush(true, stepper.containers);
