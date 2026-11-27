@@ -1237,38 +1237,83 @@ test('R43 P2: project_bundle rechaza content.citations no-array en importación 
   assert.match(md, /Citas inválidas/);
 });
 
-test('R44 P1: _runGuardedTx aborta en arranque frío si enqueuedAt <= wipedAt aunque baselineIdbEpoch haya leído post-wipe', async () => {
-  const { LinerDB } = require('../../extension/src/core/storage/liner_db.js');
-  const db = new LinerDB();
-  db.useMemoryFallback = false;
-  const wipedAt = Date.now() + 50;
-  db.db = {
-    objectStoreNames: { contains: name => name === 'diagnostics' },
-    transaction() {
-      const tx = {
-        oncomplete: null,
-        onerror: null,
-        onabort: null,
-        abort() { queueMicrotask(() => tx.onabort && tx.onabort()); },
-        objectStore(name) {
-          return {
-            get() {
-              const req = { result: name === 'diagnostics' ? { id: '__lossy_wipe_epoch__', epoch: 1, wipedAt } : null, onsuccess: null, onerror: null };
-              queueMicrotask(() => req.onsuccess && req.onsuccess());
-              return req;
-            },
-            put() { return {}; }
-          };
-        }
-      };
-      return tx;
+test('R44 P1: arranque frío sin notificaciones ni reloj monotónico aborta SAVE_CLIP encolados antes de clearAll()', async () => {
+  const vm = require('node:vm');
+  const fs = require('node:fs');
+  const path = require('node:path');
+
+  let persistedEpoch = 0;
+  let clock = 100000;
+  const savedClips = new Map();
+
+  class ColdLinerDB {
+    constructor() {
+      this._wipeEpoch = 0;
+      this._knownIdbWipeEpoch = 0;
+      this.db = null;
+    }
+    async open() {
+      this.db = {};
+      if (persistedEpoch > this._knownIdbWipeEpoch) this._knownIdbWipeEpoch = persistedEpoch;
+      return this;
+    }
+    getWipeEpoch() { return this._wipeEpoch; }
+    _resolveBaselineIdbEpoch(opts) {
+      if (opts && Number.isInteger(opts.expectedIdbWipeEpoch)) return opts.expectedIdbWipeEpoch;
+      return this._knownIdbWipeEpoch;
+    }
+    async saveClip(clip, opts = {}) {
+      await this.open();
+      const base = this._resolveBaselineIdbEpoch(opts);
+      if (persistedEpoch > base) throw new Error('WRITE_ABORTED_BY_CLEAR_ALL');
+      savedClips.set(clip.canonicalId, clip);
+      return clip.canonicalId;
+    }
+    async clearAll() {
+      clock -= 60000; // retroceso de reloj de 60s
+      persistedEpoch++;
+      savedClips.clear();
+      return true;
+    }
+  }
+
+  let onMessageHandler = null;
+  const sandbox = {
+    console,
+    Promise,
+    Date: { now: () => clock },
+    importScripts: () => {},
+    LinerDB: ColdLinerDB,
+    chrome: {
+      runtime: {
+        id: 'test-ext-id',
+        onInstalled: { addListener: () => {} },
+        onMessage: { addListener: fn => { onMessageHandler = fn; } },
+        getURL: p => p
+      },
+      tabs: { create: () => {} }
     }
   };
-  await assert.rejects(
-    () => db.saveClip(
-      { canonicalId: 'clip_cold', title: 'Cold', selectedMessages: [{ id: 'm1', role: 'user', content: { text: 'x' } }] },
-      { expectedIdbWipeEpoch: 1, enqueuedAt: wipedAt - 10 }
-    ),
-    /WRITE_ABORTED_BY_CLEAR_ALL/
-  );
+  const swCode = fs.readFileSync(path.resolve(__dirname, '../../extension/src/background/service_worker.js'), 'utf8');
+  vm.runInNewContext(swCode, sandbox);
+
+  const sendSaveClip = id => new Promise(resolve => {
+    onMessageHandler(
+      { action: 'SAVE_CLIP', clip: { canonicalId: id, title: id, selectedMessages: [{ id: 'm1', role: 'user', content: { text: 'x' } }] } },
+      { id: 'test-ext-id' },
+      resolve
+    );
+  });
+
+  const pending = [];
+  for (let i = 1; i <= 20; i++) pending.push(sendSaveClip(`clip_cold_${i}`));
+  await new ColdLinerDB().clearAll();
+  const results = await Promise.all(pending);
+
+  assert.equal(savedClips.size, 0);
+  assert.ok(results.every(r => r.success === false && /WRITE_ABORTED_BY_CLEAR_ALL/.test(r.error)));
+
+  const after = await sendSaveClip('clip_after');
+  assert.equal(after.success, true);
+  assert.equal(savedClips.size, 1);
 });

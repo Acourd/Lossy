@@ -540,8 +540,7 @@
             const diagReq = tx.objectStore('diagnostics').get(WIPE_EPOCH_KEY);
             diagReq.onsuccess = () => {
               const persisted = Number(diagReq.result?.epoch || 0);
-              const wipedAt = Number(diagReq.result?.wipedAt || 0);
-              if (persisted > baselineIdbEpoch || (options?.enqueuedAt && wipedAt && options.enqueuedAt <= wipedAt)) {
+              if (persisted > baselineIdbEpoch) {
                 failAbort(new Error('WRITE_ABORTED_BY_CLEAR_ALL'));
                 return;
               }
@@ -1623,7 +1622,7 @@
             tx.objectStore('transfers').clear();
             tx.objectStore('jobs').clear();
             diagStore.clear();
-            diagStore.put({ id: WIPE_EPOCH_KEY, epoch: writtenEpoch, wipedAt: Date.now() });
+            diagStore.put({ id: WIPE_EPOCH_KEY, epoch: writtenEpoch });
           };
           const curReq = diagStore.get(WIPE_EPOCH_KEY);
           curReq.onsuccess = () => finishClear(Number(curReq.result?.epoch || 0));
