@@ -408,7 +408,10 @@
       const roleLabel = isUser ? 'USUARIO' : (isAssistant ? platform : (isTool ? 'HERRAMIENTA' : (msg.role || 'SISTEMA').toUpperCase()));
 
       const originalText = typeof msg.text === 'string' ? msg.text : (msg.content?.text || '');
-      const cleanSource = originalText.replace(/\uE200[\s\S]*?\uE201/g, '');
+      const stripControlCharsOutsideCode = str => String(str || '').replace(/\uE200[\s\S]*?\uE201/g, '');
+      const cleanSource = widgets && typeof widgets.splitFencedCodeSegments === 'function'
+        ? originalText
+        : stripControlCharsOutsideCode(originalText);
       const storedCode = Array.isArray(msg.codeBlocks) ? msg.codeBlocks : (Array.isArray(msg.content?.codeBlocks) ? msg.content.codeBlocks : []);
 
       ensureVerticalSpace(45);
@@ -440,7 +443,10 @@
       currentY -= 22;
 
       const renderProseChunk = (proseChunk, initialContainers) => {
-        const cleaned = stripNonCodeMarkdownImages(proseChunk, initialContainers);
+        const sanitizedChunk = widgets && typeof widgets.transformOutsideInlineCode === 'function'
+          ? widgets.transformOutsideInlineCode(proseChunk, stripControlCharsOutsideCode, initialContainers)
+          : stripControlCharsOutsideCode(proseChunk);
+        const cleaned = stripNonCodeMarkdownImages(sanitizedChunk, initialContainers);
         if (!cleaned.trim()) return;
         const bodyLines = wrapText(cleaned, CONTENT_WIDTH - 12, 10, false);
         for (const line of bodyLines) {

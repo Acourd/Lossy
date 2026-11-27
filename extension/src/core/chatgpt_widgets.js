@@ -199,7 +199,11 @@
     const tokens = tokenizeExpr(String(exprStr || '').trim());
     let pos = 0;
     let callDepth = depth;
-    const guardDepth = () => { if (++callDepth > 64) throw new Error('DEPTH'); };
+    let ops = 0;
+    const guardDepth = () => {
+      if (++ops > 4096 || ++callDepth > 64) throw new Error('DEPTH');
+    };
+    const leaveDepth = () => { if (callDepth > depth) callDepth--; };
 
     const peek = () => tokens[pos];
     const consume = () => tokens[pos++];
@@ -210,14 +214,18 @@
 
     function parseTernary() {
       guardDepth();
-      const cond = parseOr();
-      if (matchOp('?')) {
-        const t = parseTernary();
-        matchOp(':');
-        const f = parseTernary();
-        return cond ? t : f;
+      try {
+        const cond = parseOr();
+        if (matchOp('?')) {
+          const t = parseTernary();
+          matchOp(':');
+          const f = parseTernary();
+          return cond ? t : f;
+        }
+        return cond;
+      } finally {
+        leaveDepth();
       }
-      return cond;
     }
 
     function parseOr() {
@@ -976,12 +984,21 @@
     return (bs % 2) === 1;
   }
 
-  function isSingleLineNonParaBlock(cols, trimmed, canSetext = false) {
+  function isSingleLineNonParaBlock(cols, trimmed, canSetext = false, canRefDef = false) {
     if (cols > 3) return false;
     if (/^#{1,6}(?:[ \t]|$)/.test(trimmed)) return true;
     if (/^(?:(?:\*[ \t]*){3,}|(?:-[ \t]*){3,}|(?:_[ \t]*){3,})$/.test(trimmed)) return true;
     if (canSetext && /^(?:=+|-+)[ \t]*$/.test(trimmed)) return true;
+    if (canRefDef && /^\[(?:[^\[\]\\]|\\.)+\]:[ \t]*(?:<[^\r\n<>]*>|[^\s<>]+)(?:[ \t]+(?:"(?:[^"\\]|\\.)*"|'(?:[^'\\]|\\.)*'|\((?:[^()\\]|\\.)*\)))?[ \t]*$/.test(trimmed)) return true;
     return false;
+  }
+
+  function isRefDefLabelOnly(cols, trimmed) {
+    return cols <= 3 && /^\[(?:[^\[\]\\]|\\.)+\]:[ \t]*$/.test(trimmed);
+  }
+
+  function isRefDefUrlTail(cols, trimmed) {
+    return cols <= 3 && /^(?:<[^\r\n<>]*>|[^\s<>]+)(?:[ \t]+(?:"(?:[^"\\]|\\.)*"|'(?:[^'\\]|\\.)*'|\((?:[^()\\]|\\.)*\)))?[ \t]*$/.test(trimmed);
   }
 
   function measureLeadCols(str, startCol = 0) {
@@ -1134,6 +1151,7 @@
           const allowEmpty = !inParagraph || exitedAnyContainer || hadMarker;
           const leadBeforeList = measureLeadCols(rest, lineCol);
           if (leadBeforeList.cols > 3) break;
+          if (isSingleLineNonParaBlock(leadBeforeList.cols, rest.slice(leadBeforeList.idx), false, false)) break;
           const lst = matchListPrefix(rest, bsCol + sCol, !inParagraph || listExited || exitedAnyContainer || hadMarker, allowEmpty, lineCol);
           if (lst.ok) {
             containers.push({ type: 'list', indent: lst.indent });
@@ -1181,12 +1199,16 @@
     }
 
     const stepper = createContainerStepper(initialContainers);
+    let pendingRefDef = false;
     for (let li = 0; li <= closeLineIdx; li++) {
       const rawLine = lines[li].replace(/\r$/, '');
       const prevPara = stepper.inParagraph;
       const { lead, hadMarker, isBlank, trimmedAfterLead, exitedAnyContainer } = stepper.step(rawLine);
       const canSetext = prevPara && !exitedAnyContainer && !hadMarker;
-      const isNonPara = !isBlank && isSingleLineNonParaBlock(lead.cols, trimmedAfterLead, canSetext);
+      const canRefDef = !prevPara || exitedAnyContainer || hadMarker;
+      const isPendingRefUrl = pendingRefDef && !isBlank && !hadMarker && isRefDefUrlTail(lead.cols, trimmedAfterLead);
+      pendingRefDef = canRefDef && !isBlank && isRefDefLabelOnly(lead.cols, trimmedAfterLead);
+      const isNonPara = !isBlank && (isPendingRefUrl || pendingRefDef || isSingleLineNonParaBlock(lead.cols, trimmedAfterLead, canSetext, canRefDef));
       const isFenceOpen = !isBlank && lead.cols <= 3 && /^(`{3,}[^`]*|~{3,}.*)$/.test(trimmedAfterLead);
       const isIndented = !isBlank && (hadMarker || !stepper.inParagraph) && lead.cols >= 4;
 
@@ -1297,10 +1319,46 @@
    * Encuentra bloques DIL balanceados de nivel superior (incluyendo directivas {@body ...} precedentes),
    * ignorando código inline y etiquetas escapadas con '\'.
    */
+  function findBalancedBodyDirectiveEnd(str, startIdx) {
+    let depth = 1;
+    let j = startIdx + 6;
+    let inQuote = null;
+    while (j < str.length && depth > 0) {
+      const ch = str[j];
+      if (inQuote) {
+        if (ch === '\\') { j += 2; continue; }
+        if (ch === inQuote) inQuote = null;
+      } else {
+        if (ch === '"' || ch === "'" || ch === '`') inQuote = ch;
+        else if (ch === '{') depth++;
+        else if (ch === '}') depth--;
+      }
+      j++;
+    }
+    return depth === 0 ? j : -1;
+  }
+
+  function findPrecedingBodyDirectiveStart(str, tagIdx, minBound) {
+    let cursor = tagIdx;
+    let earliest = tagIdx;
+    while (cursor > minBound) {
+      let wsStart = cursor;
+      while (wsStart > minBound && /\s/.test(str[wsStart - 1])) wsStart--;
+      if (wsStart <= minBound || str[wsStart - 1] !== '}') break;
+      const bodyIdx = str.lastIndexOf('{@body', wsStart - 1);
+      if (bodyIdx === -1 || bodyIdx < minBound) break;
+      const endIdx = findBalancedBodyDirectiveEnd(str, bodyIdx);
+      if (endIdx !== wsStart) break;
+      earliest = bodyIdx;
+      cursor = bodyIdx;
+    }
+    return earliest;
+  }
+
   function findTopLevelWidgetRanges(segment, initialContainers) {
     const ranges = [];
     const scanSegment = sanitizeForWidgetScan(segment, initialContainers);
-    const openRe = /((?:(?:\{@body\s+[^}]+\}\s*)+)?)<(grid|card|stack|box|row|svg)(?=[\s/>])[^>]*>/gi;
+    const openRe = /<(grid|card|stack|box|row|svg)(?=[\s/>])[^>]*>/gi;
     let match;
     let searchFrom = 0;
 
@@ -1309,10 +1367,11 @@
       match = openRe.exec(scanSegment);
       if (!match) break;
 
-      const startIdx = match.index;
-      const tag = match[2].toLowerCase();
+      const tagStart = match.index;
+      const startIdx = findPrecedingBodyDirectiveStart(scanSegment, tagStart, searchFrom);
+      const tag = match[1].toLowerCase();
       const tagRe = new RegExp(`<(\\/)?${tag}(?=[\\s/>])[^>]*>`, 'gi');
-      tagRe.lastIndex = match.index + match[1].length;
+      tagRe.lastIndex = tagStart;
 
       let depth = 0;
       let endIdx = -1;
@@ -1407,6 +1466,7 @@
     let inlineOpenInList = false;
     let pendingInlineLines = [];
     let pendingSegCount = 0;
+    let pendingRefDef = false;
 
     const updateWidgetDepthPlain = (plain) => {
       const openRe = /<(grid|card|row|col|stack|box|flex|svg)\b[^>]*>/gi;
@@ -1597,7 +1657,10 @@
       }
 
       const canSetext = prevPara && !exitedAnyContainer && !hadMarker;
-      const lineIsNonParaBlock = !isBlank && isSingleLineNonParaBlock(lead.cols, trimmedAfterLead, canSetext);
+      const canRefDef = !prevPara || exitedAnyContainer || hadMarker;
+      const isPendingRefUrl = pendingRefDef && !isBlank && !hadMarker && isRefDefUrlTail(lead.cols, trimmedAfterLead);
+      pendingRefDef = canRefDef && !isBlank && isRefDefLabelOnly(lead.cols, trimmedAfterLead);
+      const lineIsNonParaBlock = !isBlank && (isPendingRefUrl || pendingRefDef || isSingleLineNonParaBlock(lead.cols, trimmedAfterLead, canSetext, canRefDef));
       if (inlineOpenTicks > 0 && (isBlank || hadMarker || segments.length !== pendingSegCount || isBlockInterruptLine(rest, inlineOpenInList, canSetext, prevPara))) {
         flushPendingInline();
       }

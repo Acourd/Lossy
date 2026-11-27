@@ -21,9 +21,13 @@ jobs:
         with:
           node-version: '22'
 
-      - name: Verify Zero External Dependencies
+      - name: Verify Zero External npm Dependencies & Vendored Assets
         run: |
-          node -e "const p=require('./package.json'); if(Object.keys(p.dependencies||{}).length||Object.keys(p.devDependencies||{}).length){console.error('External deps detected'); process.exit(1);} console.log('ZERO_DEPS_OK');"
+          node -e "const fs=require('fs'), p=require('./package.json'); if(Object.keys(p.dependencies||{}).length||Object.keys(p.devDependencies||{}).length){console.error('External npm deps detected'); process.exit(1);} for(const v of ['extension/vendor/markdown-it.min.js','extension/vendor/katex.min.js']){if(!fs.existsSync(v)) throw new Error('Missing vendored asset '+v);} console.log('ZERO_NPM_DEPS_AND_VENDORED_OK');"
+
+      - name: Verify E2E Harness Syntax (.cjs)
+        run: |
+          node -e "const fs=require('fs'), path=require('path'), cp=require('child_process'); for(const f of fs.readdirSync('tests/extension').filter(n=>n.endsWith('.cjs'))){const r=cp.spawnSync(process.execPath,['--check',path.join('tests/extension',f)],{stdio:'inherit'}); if(r.status!==0) process.exit(1);} console.log('E2E_CJS_SYNTAX_OK');"
 
       - name: Static MV3 CSP, Zero-Stub & PNG Integrity Gate
         run: |

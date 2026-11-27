@@ -298,6 +298,8 @@
       this.db = null;
       this.opening = null;
       this.useMemoryFallback = !this.indexedDB;
+      this._wipeEpoch = 0;
+      this._clearing = null;
 
       // Almacenes en memoria para entornos de test en Node
       this.memoryStores = {
@@ -308,6 +310,22 @@
         jobs: new Map(),
         diagnostics: []
       };
+    }
+
+    getWipeEpoch() {
+      return this._wipeEpoch;
+    }
+
+    _resolveWriteEpoch(options) {
+      return (options && Number.isInteger(options.expectedWipeEpoch)) ? options.expectedWipeEpoch : this._wipeEpoch;
+    }
+
+    _assertWriteEpoch(expectedEpoch) {
+      if (this._clearing || this._wipeEpoch !== expectedEpoch) {
+        const err = new Error('WRITE_ABORTED_BY_CLEAR_ALL');
+        err.code = 'WRITE_ABORTED_BY_CLEAR_ALL';
+        throw err;
+      }
     }
 
     async open() {
@@ -384,36 +402,46 @@
     /**
      * Guarda o actualiza una conversación canónica completa y actualiza el índice.
      */
-    async saveConversation(conv) {
+    async saveConversation(conv, options = {}) {
+      const writeEpoch = this._resolveWriteEpoch(options);
       await this.open();
+      this._assertWriteEpoch(writeEpoch);
       if (!conv || !conv.canonicalId) {
         throw new Error('Conversación inválida: canonicalId es requerido');
       }
 
       const prepare = existing => {
+        this._assertWriteEpoch(writeEpoch);
         const merged = retainLocalCapture(conv, existing);
         return this.conversationRecords(merged);
       };
       if (this.useMemoryFallback) {
+        this._assertWriteEpoch(writeEpoch);
         const { record, meta } = prepare(this.memoryStores.conversations.get(conv.canonicalId));
-        this.memoryStores.conversations.set(record.canonicalId, JSON.parse(JSON.stringify(record)));
+        this._assertWriteEpoch(writeEpoch);
+        this.memoryStores.conversations.set(record.canonicalId, structuredClone(record));
         this.memoryStores.metadata_index.set(record.canonicalId, meta);
         return record.canonicalId;
       }
       return new Promise((resolve, reject) => {
+        try { this._assertWriteEpoch(writeEpoch); } catch (e) { reject(e); return; }
         const tx = this.db.transaction(['conversations', 'metadata_index'], 'readwrite');
-        tx.oncomplete = () => resolve(conv.canonicalId);
+        tx.oncomplete = () => {
+          if (this._wipeEpoch !== writeEpoch) reject(new Error('WRITE_ABORTED_BY_CLEAR_ALL'));
+          else resolve(conv.canonicalId);
+        };
         tx.onerror = () => reject(tx.error || new Error('Error de almacenamiento'));
         tx.onabort = () => reject(tx.error || new Error('Transacción abortada'));
         const store = tx.objectStore('conversations');
         const request = store.get(conv.canonicalId);
         request.onsuccess = () => {
           try {
+            this._assertWriteEpoch(writeEpoch);
             const { record, meta } = prepare(request.result);
             store.put(record);
             tx.objectStore('metadata_index').put(meta);
           } catch (error) {
-            tx.abort();
+            try { tx.abort(); } catch (_) {}
             reject(error);
           }
         };
@@ -492,8 +520,10 @@
     /**
      * Guarda o actualiza un clip canónico y actualiza el índice de metadatos.
      */
-    async saveClip(clip) {
+    async saveClip(clip, options = {}) {
+      const writeEpoch = this._resolveWriteEpoch(options);
       await this.open();
+      this._assertWriteEpoch(writeEpoch);
       if (!clip || (!clip.canonicalId && !clip.id)) {
         throw new Error('Clip inválido: canonicalId o id es requerido');
       }
@@ -503,14 +533,14 @@
       clip.id = canonicalId;
       clip.entityType = 'clip';
 
-      const allText = (clip.selectedMessages || []).map(m => m.content?.text || '').join(' ');
+      const allText = (clip.selectedMessages || []).map(m => m.content?.text || m.text || '').join(' ');
       const msgCount = clip.selectedMessages?.length || 0;
       const metaRecord = {
         canonicalId,
         id: canonicalId,
         entityType: 'clip',
         title: clip.title || 'Clip sin Título',
-        platform: clip.sourcePlatform || 'unknown',
+        platform: clip.sourcePlatform || clip.source?.platform || 'unknown',
         model: clip.model || clip.sourceModel || null,
         messageCount: msgCount,
         conversationMessageCount: msgCount,
@@ -519,7 +549,7 @@
         createdAt: clip.createdAt || new Date().toISOString(),
         updatedAt: clip.updatedAt || new Date().toISOString(),
         integrityStatus: clip.integrity?.clipSelectionIntegrity || 'complete',
-        sourceStatus: clip.provenance?.sourceStatus || 'source_available_locally',
+        sourceStatus: clip.provenance?.sourceStatus || clip.sourceStatus || 'source_available_locally',
         sourceConversationCanonicalId: clip.sourceConversationCanonicalId || clip.provenance?.sourceConversationCanonicalId || null,
         sourceConversationTitle: clip.sourceConversationTitle || clip.provenance?.sourceConversation || 'Conversación Origen',
         selectionType: clip.selectionType || 'multi-message',
@@ -527,17 +557,22 @@
       };
 
       if (this.useMemoryFallback) {
+        this._assertWriteEpoch(writeEpoch);
         this.memoryStores.conversations.set(canonicalId, JSON.parse(JSON.stringify(clip)));
         this.memoryStores.metadata_index.set(canonicalId, metaRecord);
         return canonicalId;
       }
 
       return new Promise((resolve, reject) => {
+        try { this._assertWriteEpoch(writeEpoch); } catch (e) { reject(e); return; }
         const tx = this.db.transaction(['conversations', 'metadata_index'], 'readwrite');
         tx.objectStore('conversations').put(clip);
         tx.objectStore('metadata_index').put(metaRecord);
 
-        tx.oncomplete = () => resolve(canonicalId);
+        tx.oncomplete = () => {
+          if (this._wipeEpoch !== writeEpoch) reject(new Error('WRITE_ABORTED_BY_CLEAR_ALL'));
+          else resolve(canonicalId);
+        };
         tx.onerror = () => reject(tx.error||new Error('Error de almacenamiento'));
         tx.onabort = () => reject(tx.error||new Error('Transacción abortada'));
       });
@@ -872,13 +907,48 @@
     /**
      * Restaura una conversación previamente eliminada (deshacer / undo) y sus membresías en colecciones.
      */
-    async restoreConversation(conv, collectionIds = []) {
+    async restoreConversation(conv, collectionIds = [], folderMemberships = null, options = {}) {
       if (!conv || !conv.canonicalId) return null;
-      await this.saveConversation(conv);
+      const writeEpoch = this._resolveWriteEpoch(options);
+      this._assertWriteEpoch(writeEpoch);
+      const isClip = conv.entityType === 'clip' || (typeof conv.canonicalId === 'string' && conv.canonicalId.startsWith('clip_'));
+      if (isClip) {
+        await this.saveClip(conv, { expectedWipeEpoch: writeEpoch });
+      } else {
+        await this.saveConversation(conv, { expectedWipeEpoch: writeEpoch });
+      }
+      this._assertWriteEpoch(writeEpoch);
+
+      const folderMap = (folderMemberships && typeof folderMemberships === 'object') ? folderMemberships : {};
       if (Array.isArray(collectionIds) && collectionIds.length > 0) {
-        for (const colId of collectionIds) {
+        for (const entry of collectionIds) {
+          const colId = typeof entry === 'string' ? entry : entry?.collectionId;
+          if (!colId) continue;
+          const folderIds = Array.isArray(entry?.folderIds)
+            ? entry.folderIds
+            : (Array.isArray(folderMap[colId]) ? folderMap[colId] : []);
           try {
-            await this.addConversationsToCollection(colId, [conv.canonicalId]);
+            await this.mutateCollection(colId, col => {
+              col.conversationIds = Array.from(new Set([...(col.conversationIds || []), conv.canonicalId]));
+              if (col.organization?.folders && folderIds.length > 0) {
+                const folderById = new Map(col.organization.folders.map(f => [f.id, f]));
+                const toRestore = new Set();
+                for (const fid of folderIds) {
+                  let cur = folderById.get(fid);
+                  const guard = new Set();
+                  while (cur && !guard.has(cur.id)) {
+                    guard.add(cur.id);
+                    toRestore.add(cur.id);
+                    cur = cur.parentId ? folderById.get(cur.parentId) : null;
+                  }
+                }
+                for (const folder of col.organization.folders) {
+                  if (toRestore.has(folder.id) && !folder.conversationIds.includes(conv.canonicalId)) {
+                    folder.conversationIds = [...folder.conversationIds, conv.canonicalId];
+                  }
+                }
+              }
+            });
           } catch (_) {}
         }
       }
@@ -944,8 +1014,10 @@
 
     // --- GESTIÓN DE COLECCIONES ---
 
-    async createCollection(name, description = '', conversationIds = []) {
+    async createCollection(name, description = '', conversationIds = [], options = {}) {
+      const writeEpoch = this._resolveWriteEpoch(options);
       await this.open();
+      this._assertWriteEpoch(writeEpoch);
       const collectionId = `coll_${Date.now()}_${Math.random().toString(36).substring(2, 8)}`;
       const collection = {
         collectionId,
@@ -958,22 +1030,30 @@
       };
 
       if (this.useMemoryFallback) {
+        this._assertWriteEpoch(writeEpoch);
         this.memoryStores.collections.set(collectionId, collection);
         return collection;
       }
 
       return new Promise((resolve, reject) => {
+        try { this._assertWriteEpoch(writeEpoch); } catch (e) { reject(e); return; }
         const tx = this.db.transaction(['collections'], 'readwrite');
         tx.objectStore('collections').put(collection);
-        tx.oncomplete = () => resolve(collection);
+        tx.oncomplete = () => {
+          if (this._wipeEpoch !== writeEpoch) reject(new Error('WRITE_ABORTED_BY_CLEAR_ALL'));
+          else resolve(collection);
+        };
         tx.onerror = () => reject(tx.error||new Error('Error de almacenamiento'));
         tx.onabort = () => reject(tx.error||new Error('Transacción abortada'));
       });
     }
 
-    async mutateCollection(collectionId, transform) {
+    async mutateCollection(collectionId, transform, options = {}) {
+      const writeEpoch = this._resolveWriteEpoch(options);
       await this.open();
+      this._assertWriteEpoch(writeEpoch);
       const apply = existing => {
+        this._assertWriteEpoch(writeEpoch);
         if (!existing) throw new Error('Proyecto no encontrado');
         const record = structuredClone(existing);
         transform(record);
@@ -982,21 +1062,29 @@
         return record;
       };
       if (this.useMemoryFallback) {
+        this._assertWriteEpoch(writeEpoch);
         const record = apply(this.memoryStores.collections.get(collectionId));
         this.memoryStores.collections.set(collectionId, record);
         return structuredClone(record);
       }
       return new Promise((resolve, reject) => {
+        try { this._assertWriteEpoch(writeEpoch); } catch (e) { reject(e); return; }
         const tx = this.db.transaction(['collections'], 'readwrite');
         const store = tx.objectStore('collections');
         let record;
-        tx.oncomplete = () => resolve(record);
+        tx.oncomplete = () => {
+          if (this._wipeEpoch !== writeEpoch) reject(new Error('WRITE_ABORTED_BY_CLEAR_ALL'));
+          else resolve(record);
+        };
         tx.onerror = () => reject(tx.error || new Error('No se pudo guardar el proyecto'));
         tx.onabort = () => reject(tx.error || new Error('Guardado de proyecto cancelado'));
         const request = store.get(collectionId);
         request.onsuccess = () => {
-          try { record = apply(request.result); store.put(record); }
-          catch (error) { tx.abort(); reject(error); }
+          try {
+            this._assertWriteEpoch(writeEpoch);
+            record = apply(request.result);
+            store.put(record);
+          } catch (error) { try { tx.abort(); } catch (_) {} reject(error); }
         };
       });
     }
@@ -1147,19 +1235,26 @@
 
     // --- GESTIÓN DE TRABAJOS (JOBS) ---
 
-    async saveJob(job) {
+    async saveJob(job, options = {}) {
+      const writeEpoch = this._resolveWriteEpoch(options);
       await this.open();
+      this._assertWriteEpoch(writeEpoch);
       if (!job || !job.jobId) throw new Error('Trabajo inválido');
 
       if (this.useMemoryFallback) {
+        this._assertWriteEpoch(writeEpoch);
         this.memoryStores.jobs.set(job.jobId, JSON.parse(JSON.stringify(job)));
         return job.jobId;
       }
 
       return new Promise((resolve, reject) => {
+        try { this._assertWriteEpoch(writeEpoch); } catch (e) { reject(e); return; }
         const tx = this.db.transaction(['jobs'], 'readwrite');
         tx.objectStore('jobs').put(job);
-        tx.oncomplete = () => resolve(job.jobId);
+        tx.oncomplete = () => {
+          if (this._wipeEpoch !== writeEpoch) reject(new Error('WRITE_ABORTED_BY_CLEAR_ALL'));
+          else resolve(job.jobId);
+        };
         tx.onerror = () => reject(tx.error||new Error('Error de almacenamiento'));
         tx.onabort = () => reject(tx.error||new Error('Transacción abortada'));
       });
@@ -1200,19 +1295,26 @@
 
     // --- GESTIÓN DE TRANSFERENCIAS (TRANSFERS) ---
 
-    async saveTransfer(transfer) {
+    async saveTransfer(transfer, options = {}) {
+      const writeEpoch = this._resolveWriteEpoch(options);
       await this.open();
+      this._assertWriteEpoch(writeEpoch);
       if (!transfer || !transfer.transferId) throw new Error('Transferencia inválida');
 
       if (this.useMemoryFallback) {
+        this._assertWriteEpoch(writeEpoch);
         this.memoryStores.transfers.set(transfer.transferId, JSON.parse(JSON.stringify(transfer)));
         return transfer.transferId;
       }
 
       return new Promise((resolve, reject) => {
+        try { this._assertWriteEpoch(writeEpoch); } catch (e) { reject(e); return; }
         const tx = this.db.transaction(['transfers'], 'readwrite');
         tx.objectStore('transfers').put(transfer);
-        tx.oncomplete = () => resolve(transfer.transferId);
+        tx.oncomplete = () => {
+          if (this._wipeEpoch !== writeEpoch) reject(new Error('WRITE_ABORTED_BY_CLEAR_ALL'));
+          else resolve(transfer.transferId);
+        };
         tx.onerror = () => reject(tx.error||new Error('Error de almacenamiento'));
         tx.onabort = () => reject(tx.error||new Error('Transacción abortada'));
       });
@@ -1236,29 +1338,47 @@
      * Limpia completamente todos los almacenes de la base de datos local.
      */
     async clearAll() {
-      await this.open();
-      if (this.useMemoryFallback) {
-        this.memoryStores.conversations.clear();
-        this.memoryStores.metadata_index.clear();
-        this.memoryStores.collections.clear();
-        this.memoryStores.transfers.clear();
-        this.memoryStores.jobs.clear();
-        this.memoryStores.diagnostics = [];
-        return true;
-      }
+      this._wipeEpoch++;
+      this.memoryStores.conversations.clear();
+      this.memoryStores.metadata_index.clear();
+      this.memoryStores.collections.clear();
+      this.memoryStores.transfers.clear();
+      this.memoryStores.jobs.clear();
+      this.memoryStores.diagnostics = [];
 
-      return new Promise((resolve, reject) => {
-        const tx = this.db.transaction(['conversations', 'metadata_index', 'collections', 'transfers', 'jobs', 'diagnostics'], 'readwrite');
-        tx.objectStore('conversations').clear();
-        tx.objectStore('metadata_index').clear();
-        tx.objectStore('collections').clear();
-        tx.objectStore('transfers').clear();
-        tx.objectStore('jobs').clear();
-        tx.objectStore('diagnostics').clear();
-        tx.oncomplete = () => resolve(true);
-        tx.onerror = () => reject(tx.error||new Error('Error de almacenamiento'));
-        tx.onabort = () => reject(tx.error||new Error('Transacción abortada'));
-      });
+      const runClear = async () => {
+        await this.open();
+        if (this.useMemoryFallback) {
+          this.memoryStores.conversations.clear();
+          this.memoryStores.metadata_index.clear();
+          this.memoryStores.collections.clear();
+          this.memoryStores.transfers.clear();
+          this.memoryStores.jobs.clear();
+          this.memoryStores.diagnostics = [];
+          return true;
+        }
+
+        return new Promise((resolve, reject) => {
+          const tx = this.db.transaction(['conversations', 'metadata_index', 'collections', 'transfers', 'jobs', 'diagnostics'], 'readwrite');
+          tx.objectStore('conversations').clear();
+          tx.objectStore('metadata_index').clear();
+          tx.objectStore('collections').clear();
+          tx.objectStore('transfers').clear();
+          tx.objectStore('jobs').clear();
+          tx.objectStore('diagnostics').clear();
+          tx.oncomplete = () => resolve(true);
+          tx.onerror = () => reject(tx.error||new Error('Error de almacenamiento'));
+          tx.onabort = () => reject(tx.error||new Error('Transacción abortada'));
+        });
+      };
+
+      const p = (this._clearing || Promise.resolve()).catch(() => {}).then(runClear);
+      this._clearing = p;
+      try {
+        return await p;
+      } finally {
+        if (this._clearing === p) this._clearing = null;
+      }
     }
   }
 

@@ -394,6 +394,17 @@
       const roleLabel = isUser ? 'USUARIO' : (msg.author || platform);
       const text = typeof msg.text === 'string' ? msg.text : (msg.content?.text || '');
       let bodyHtml = renderSimpleMarkdownToHtml(text, { omitImages: options.imageStrategy === 'omit' });
+      const storedCode = Array.isArray(msg.codeBlocks) ? msg.codeBlocks : (Array.isArray(msg.content?.codeBlocks) ? msg.content.codeBlocks : []);
+      const hasInlineCodeBlock = widgets && typeof widgets.splitFencedCodeSegments === 'function'
+        ? widgets.splitFencedCodeSegments(text).some(seg => seg.isCode)
+        : /(?:^|\n) {0,3}(?:`{3,}|~{3,})/.test(text);
+      if (storedCode.length > 0 && !hasInlineCodeBlock) {
+        bodyHtml += storedCode.map(cb => {
+          const lang = String(cb?.language || '').trim() || 'text';
+          const codeStr = typeof cb?.code === 'string' ? cb.code : '';
+          return `<div class="l-code-wrap"><div class="l-code-head"><span>${escapeHtml(lang)}</span></div><pre><code>${escapeHtml(codeStr)}</code></pre></div>`;
+        }).join('');
+      }
 
       // Embedded images for this turn (prefer options.assets, fall back to msg.attachments)
       const fromOptions = allAssets.filter(a => (a.sourceMessageId === msg.id || a.messageIndex === idx) && (a.mimeType?.startsWith('image/') || a.kind === 'image'));

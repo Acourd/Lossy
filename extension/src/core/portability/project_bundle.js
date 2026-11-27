@@ -7,6 +7,58 @@
  const contextLimits={goal:6000,decisions:12000,openQuestions:12000,nextStep:6000};
  const digest=value=>crypto.sha256(typeof value==='string'?value:JSON.stringify(value));
  const text=bytes=>typeof bytes==='string'?bytes:new TextDecoder('utf-8',{fatal:true}).decode(bytes);
+ function rehydrateBinaryField(val){
+  if(!val)return val;
+  if(val instanceof Uint8Array)return val;
+  if(ArrayBuffer.isView(val))return new Uint8Array(val.buffer,val.byteOffset,val.byteLength);
+  if(val instanceof ArrayBuffer)return new Uint8Array(val);
+  if(Array.isArray(val)&&val.length>0&&val.every(v=>Number.isInteger(v)&&v>=0&&v<=255))return new Uint8Array(val);
+  if(typeof val==='object'&&val.type==='Buffer'&&Array.isArray(val.data)&&val.data.every(v=>Number.isInteger(v)&&v>=0&&v<=255))return new Uint8Array(val.data);
+  if(typeof val==='object'&&!Array.isArray(val)){
+   const keys=Object.keys(val);
+   if(keys.length>0&&keys.length<=67108864){
+    let ok=true;const out=new Uint8Array(keys.length);
+    for(let i=0;i<keys.length;i++){const v=val[String(i)];if(!Number.isInteger(v)||v<0||v>255){ok=false;break;}out[i]=v;}
+    if(ok)return out;
+   }
+  }
+  return val;
+ }
+ function rehydrateEntityBinaries(entity,zipFiles){
+  if(!entity||typeof entity!=='object')return entity;
+  const assetQueue=[];
+  if(zipFiles&&zipFiles['assets/manifest.json']){
+   try{
+    const am=JSON.parse(text(zipFiles['assets/manifest.json']));
+    const convId=entity.canonicalId||entity.id||null;
+    for(const it of (am?.items||[])){
+     if(it&&it.status==='included'&&it.filename&&zipFiles['assets/'+it.filename]&&(!convId||!it.conversationId||it.conversationId===convId)){
+      assetQueue.push({item:it,bytes:new Uint8Array(zipFiles['assets/'+it.filename])});
+     }
+    }
+   }catch(_){}
+  }
+  const fixAtt=(att,msgId)=>{
+   if(!att||typeof att!=='object')return;
+   if(att.data!==undefined&&att.data!==null)att.data=rehydrateBinaryField(att.data);
+   if(att.blob!==undefined&&att.blob!==null){
+    const b=rehydrateBinaryField(att.blob);
+    if(b instanceof Uint8Array&&!att.data){att.data=b;delete att.blob;}
+    else att.blob=b;
+   }
+   const hasBytes=att.data instanceof Uint8Array&&att.data.length>0;
+   if(!hasBytes&&!att.dataURI&&assetQueue.length){
+    const idx=assetQueue.findIndex(q=>(!msgId||!q.item.messageId||q.item.messageId===msgId)&&(!att.name&&!att.filename||q.item.filename.endsWith(att.filename||att.name)));
+    if(idx!==-1){att.data=assetQueue[idx].bytes;assetQueue.splice(idx,1);}
+   }
+  };
+  for(const att of (entity.attachments||[]))fixAtt(att,att?.sourceMessageId);
+  for(const msg of (entity.selectedMessages||entity.messages||[])){
+   for(const att of (msg?.attachments||[]))fixAtt(att,msg.id);
+   for(const att of (msg?.content?.attachments||[]))fixAtt(att,msg.id);
+  }
+  return entity;
+ }
  function cleanContext(context={}){
   if(!context||typeof context!=='object'||Array.isArray(context))throw Error('El contexto del proyecto no es válido');const result={};
   for(const[key,limit]of Object.entries(contextLimits)){const value=context[key]??'';if(typeof value!=='string'||value.length>limit)throw Error('Campo de proyecto inválido: '+key);result[key]=value;}
@@ -79,7 +131,7 @@
   if(new Set(raw.sourceIds).size!==raw.sourceIds.length)throw Error('El proyecto contiene identificadores de fuente repetidos');
   const sources=[],byId=new Map();
   const paths=Array.isArray(raw.sources)?raw.sources.map(item=>item?.path):Object.keys(files).filter(name=>/^(?:conversations|CONVERSATIONS)\/[^/]+\.json$/.test(name));
-  for(const name of paths){if(typeof name!=='string'||!files[name]||name==='project.json')throw Error('Falta una fuente del proyecto');const item=validateEntity(JSON.parse(text(files[name])));if(byId.has(item.canonicalId))throw Error('El proyecto contiene fuentes duplicadas');byId.set(item.canonicalId,item);}
+  for(const name of paths){if(typeof name!=='string'||!files[name]||name==='project.json')throw Error('Falta una fuente del proyecto');const item=rehydrateEntityBinaries(validateEntity(JSON.parse(text(files[name]))),files);if(byId.has(item.canonicalId))throw Error('El proyecto contiene fuentes duplicadas');byId.set(item.canonicalId,item);}
   for(const id of raw.sourceIds){if(!byId.has(id))throw Error('Este paquete no conserva la fuente completa '+id+'. Usa un ZIP de proyecto o un paquete con datos canónicos.');sources.push(byId.get(id));}
   if(byId.size!==sources.length)throw Error('Las fuentes no coinciden con el índice del proyecto');
   if(Array.isArray(raw.sources)&&raw.sources.some((entry,i)=>entry.canonicalId!==raw.sourceIds[i]||!byId.has(entry.canonicalId)))throw Error('Índice de fuentes de proyecto inválido');

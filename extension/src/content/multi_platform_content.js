@@ -21,6 +21,65 @@
   const MAX_CONCURRENCY = 4;
   const SAFE_RASTER_MIME = /^image\/(?:png|jpe?g|gif|webp|avif)$/i;
   let activeAbortController = null;
+  let navGeneration = 0;
+  let lastObservedHref = (typeof window !== 'undefined' && window.location) ? window.location.href : '';
+  let lastDomState = null;
+
+  function bumpNavigation() {
+    navGeneration++;
+    if (activeAbortController) {
+      try { activeAbortController.abort(); } catch (_) {}
+    }
+    if (typeof window !== 'undefined' && window.location) {
+      lastObservedHref = window.location.href || '';
+    }
+  }
+
+  function checkRouteChanged() {
+    if (typeof window === 'undefined' || !window.location) return false;
+    const href = window.location.href || '';
+    if (href !== lastObservedHref) {
+      bumpNavigation();
+      return true;
+    }
+    return false;
+  }
+
+  if (typeof window !== 'undefined') {
+    window.addEventListener('popstate', bumpNavigation);
+    window.addEventListener('hashchange', bumpNavigation);
+    if (window.navigation && typeof window.navigation.addEventListener === 'function') {
+      window.navigation.addEventListener('navigate', bumpNavigation);
+    }
+    if (typeof history !== 'undefined') {
+      for (const method of ['pushState', 'replaceState']) {
+        if (typeof history[method] === 'function') {
+          try {
+            const orig = history[method].bind(history);
+            history[method] = function (...args) {
+              const res = orig(...args);
+              checkRouteChanged();
+              return res;
+            };
+          } catch (_) {}
+        }
+      }
+    }
+  }
+
+  function computeDomTurnSignature(data) {
+    return (data?.messages || [])
+      .map(m => `${m.role || ''}:${String(m.content?.text || m.text || '').trim()}`)
+      .filter(Boolean)
+      .join('\n---\n');
+  }
+
+  function detectDomDeclaredConversationId() {
+    if (typeof document === 'undefined' || !document.querySelector) return null;
+    const el = document.querySelector('[data-conversation-id]');
+    const val = el?.getAttribute?.('data-conversation-id');
+    return val ? String(val).trim() : null;
+  }
 
   async function fetchAsDataUri(url, externalSignal) {
     if (!url) return null;
@@ -128,22 +187,89 @@
       }
 
       if (message.action === 'ACQUIRE_CONVERSATION') {
-        if (!adapter || !info) {
+        checkRouteChanged();
+        const startHref = window.location?.href || '';
+        const infoAtStart = adapter ? adapter.detectPlatform(startHref) : null;
+        if (!adapter || !infoAtStart) {
           sendResponse({ success: false, error: 'Plataforma no compatible' });
           return false;
         }
+        if (message.conversationId && infoAtStart.conversationId !== message.conversationId) {
+          sendResponse({
+            success: false,
+            error: `SOURCE_IDENTITY_MISMATCH: La conversación activa (${infoAtStart.conversationId || 'inicio'}) no coincide con la solicitada (${message.conversationId}).`
+          });
+          return false;
+        }
+        const startNavGen = navGeneration;
+        const startConvId = infoAtStart.conversationId;
         if (activeAbortController) activeAbortController.abort();
         const controller = typeof AbortController !== 'undefined' ? new AbortController() : null;
         activeAbortController = controller;
         (async () => {
           try {
-            const data = info.platform === 'claude'
-              ? adapter.extractClaudeDom(document, url)
-              : adapter.extractGeminiDom(document, url);
-            await hydrateConversationImages(data, controller?.signal);
-            if (controller?.signal?.aborted) {
-              sendResponse({ success: false, error: 'Captura cancelada' });
+            const extractNow = (curUrl, plat) => (plat === 'claude'
+              ? adapter.extractClaudeDom(document, curUrl)
+              : adapter.extractGeminiDom(document, curUrl));
+
+            let data = extractNow(startHref, infoAtStart.platform);
+            let sig = computeDomTurnSignature(data);
+            const domDeclMismatch = () => {
+              const domCid = detectDomDeclaredConversationId();
+              return Boolean(domCid && startConvId && domCid !== startConvId);
+            };
+            const isStaleFromOtherConv = () => Boolean(
+              domDeclMismatch() ||
+              (lastDomState && startConvId && lastDomState.convId && lastDomState.convId !== startConvId &&
+               lastDomState.signature && sig && sig === lastDomState.signature)
+            );
+
+            if (isStaleFromOtherConv()) {
+              for (let waitStep = 0; waitStep < 5; waitStep++) {
+                await new Promise(r => setTimeout(r, 80));
+                if (controller?.signal?.aborted || checkRouteChanged() || navGeneration !== startNavGen || (window.location?.href || '') !== startHref) {
+                  sendResponse({ success: false, error: 'NAVIGATION_ABORT: La conversación cambió durante la espera de convergencia DOM.' });
+                  return;
+                }
+                data = extractNow(startHref, infoAtStart.platform);
+                sig = computeDomTurnSignature(data);
+                if (!isStaleFromOtherConv()) break;
+              }
+              if (isStaleFromOtherConv()) {
+                sendResponse({
+                  success: false,
+                  error: 'SOURCE_IDENTITY_STALE_DOM: El DOM aún refleja una conversación anterior tras navegación SPA.'
+                });
+                return;
+              }
+            }
+
+            if (controller?.signal?.aborted || checkRouteChanged() || navGeneration !== startNavGen || (window.location?.href || '') !== startHref) {
+              sendResponse({ success: false, error: 'NAVIGATION_ABORT: La conversación cambió antes de hidratar recursos.' });
               return;
+            }
+
+            await hydrateConversationImages(data, controller?.signal);
+
+            const afterHref = window.location?.href || '';
+            const afterInfo = adapter.detectPlatform(afterHref);
+            if (
+              controller?.signal?.aborted ||
+              checkRouteChanged() ||
+              navGeneration !== startNavGen ||
+              afterHref !== startHref ||
+              !afterInfo ||
+              afterInfo.platform !== infoAtStart.platform ||
+              afterInfo.conversationId !== startConvId ||
+              (message.conversationId && afterInfo.conversationId !== message.conversationId) ||
+              domDeclMismatch()
+            ) {
+              sendResponse({ success: false, error: 'NAVIGATION_ABORT: La conversación cambió durante la captura.' });
+              return;
+            }
+
+            if (startConvId && sig) {
+              lastDomState = { url: startHref, convId: startConvId, signature: sig };
             }
             sendResponse({ success: true, data });
           } catch (err) {

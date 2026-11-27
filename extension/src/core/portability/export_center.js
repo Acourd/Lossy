@@ -117,7 +117,7 @@
   }
 
   function isGenericMimeType(m) {
-    return !m || m === 'application/octet-stream';
+    return !m || m === 'application/octet-stream' || m === 'image/*';
   }
 
   function isDataUriString(u) {
@@ -232,7 +232,23 @@
         if (rawData instanceof Uint8Array) return rawData;
         if (ArrayBuffer.isView(rawData)) return new Uint8Array(rawData.buffer, rawData.byteOffset, rawData.byteLength);
         if (rawData instanceof ArrayBuffer) return new Uint8Array(rawData);
-        if (Array.isArray(rawData) || (rawData && typeof rawData.length === 'number' && typeof rawData !== 'string')) return new Uint8Array(rawData);
+        if (rawData && typeof rawData === 'object' && rawData.type === 'Buffer' && Array.isArray(rawData.data) && rawData.data.every(v => Number.isInteger(v) && v >= 0 && v <= 255)) {
+          return new Uint8Array(rawData.data);
+        }
+        if (Array.isArray(rawData) && rawData.length > 0 && rawData.every(v => Number.isInteger(v) && v >= 0 && v <= 255)) return new Uint8Array(rawData);
+        if (rawData && typeof rawData === 'object' && !Array.isArray(rawData)) {
+          const keys = Object.keys(rawData);
+          if (keys.length > 0 && keys.length <= 67108864) {
+            const buf = new Uint8Array(keys.length);
+            let ok = true;
+            for (let k = 0; k < keys.length; k++) {
+              const val = rawData[String(k)];
+              if (!Number.isInteger(val) || val < 0 || val > 255) { ok = false; break; }
+              buf[k] = val;
+            }
+            if (ok) return buf;
+          }
+        }
         if (isDataUriStr(uri)) return dataUriToUint8Array(uri);
         return null;
       };
@@ -430,8 +446,10 @@
           seenKeys.add(scopedKey);
           const assetId = allocateUniqueAssetId(rawMdId, mIdx, imgIdx);
 
-          const mimeType = isInlineData ? (parseDataUriMime(imgUrl) || 'image/png') : 'image/png';
-          const ext = mimeType.includes('jpeg') || mimeType.includes('jpg') ? 'jpg' : 'png';
+          const urlExtMime = isInlineData ? '' : mimeFromFilename(imgUrl.split('?')[0].split('#')[0]);
+          const mimeType = isInlineData ? (parseDataUriMime(imgUrl) || 'image/png') : (urlExtMime || 'image/*');
+          const mimeInferred = !isInlineData && !urlExtMime;
+          const ext = mimeType.includes('jpeg') || mimeType.includes('jpg') ? 'jpg' : (mimeType.includes('webp') ? 'webp' : (mimeType.includes('gif') ? 'gif' : 'png'));
           const filename = cleanAlt ? `${cleanAlt.replace(/[^a-zA-Z0-9_\-]/g, '_').slice(0, 24)}.${ext}` : `inline_img_${mIdx}_${imgIdx}.${ext}`;
 
           addAsset({
@@ -441,6 +459,7 @@
             messageIndex: mIdx,
             sourceType: isInlineData ? 'data-uri' : 'markdown-image',
             mimeType,
+            mimeInferred,
             filename,
             availability: isInlineData ? ASSET_AVAILABILITY.EMBEDDED : ASSET_AVAILABILITY.REFERENCED,
             resolutionMethod: this.strategy,
@@ -620,6 +639,17 @@
           asset.availability = ASSET_AVAILABILITY.UNAVAILABLE;
           return;
         }
+        if (asset.mimeInferred) {
+          const magicMime = detectMagicMimeType(bytes);
+          if (magicMime && magicMime.startsWith('image/')) {
+            asset.mimeType = magicMime;
+            asset.mimeInferred = false;
+            const ext = magicMime === 'image/jpeg' ? 'jpg' : magicMime.replace('image/', '');
+            if (asset.filename && /\.png$/i.test(asset.filename) && ext !== 'png') {
+              asset.filename = asset.filename.replace(/\.png$/i, `.${ext}`);
+            }
+          }
+        }
         asset.data = bytes;
         asset.availability = availability;
         assetBinaryMap.set(asset.assetId, bytes);
@@ -627,11 +657,33 @@
           assetBinaryMap.set(asset.filename, bytes);
         }
       };
+      const coerceJsonBinary = val => {
+        if (!val || typeof val !== 'object') return null;
+        if (val instanceof Uint8Array) return val;
+        if (ArrayBuffer.isView(val)) return new Uint8Array(val.buffer, val.byteOffset, val.byteLength);
+        if (val instanceof ArrayBuffer) return new Uint8Array(val);
+        if (val.type === 'Buffer' && Array.isArray(val.data) && val.data.every(v => Number.isInteger(v) && v >= 0 && v <= 255)) return new Uint8Array(val.data);
+        if (Array.isArray(val) && val.length > 0 && val.every(v => Number.isInteger(v) && v >= 0 && v <= 255)) return new Uint8Array(val);
+        if (!Array.isArray(val)) {
+          const keys = Object.keys(val);
+          if (keys.length > 0 && keys.length <= 67108864) {
+            const buf = new Uint8Array(keys.length);
+            for (let k = 0; k < keys.length; k++) {
+              const n = val[String(k)];
+              if (!Number.isInteger(n) || n < 0 || n > 255) return null;
+              buf[k] = n;
+            }
+            return buf;
+          }
+        }
+        return null;
+      };
       const resolve = async asset => {
         if (asset.data && typeof asset.data.arrayBuffer === 'function') asset.data = new Uint8Array(await asset.data.arrayBuffer());
-        if (asset.data instanceof ArrayBuffer) asset.data = new Uint8Array(asset.data);
-        if (asset.data && (asset.data instanceof Uint8Array || asset.data.length > 0)) {
-          bind(asset, asset.data instanceof Uint8Array ? asset.data : new Uint8Array(asset.data), ASSET_AVAILABILITY.EMBEDDED);
+        const coerced = coerceJsonBinary(asset.data);
+        if (coerced && coerced.length > 0) {
+          asset.data = coerced;
+          bind(asset, coerced, ASSET_AVAILABILITY.EMBEDDED);
           return;
         }
         if (asset.dataURI && asset.dataURI.includes(',')) {
@@ -666,6 +718,8 @@
         while (cursor < assets.length) await resolve(assets[cursor++]);
       }));
 
+      disambiguateAssetFilenames(assets, assetBinaryMap);
+
       return {
         assets,
         assetBinaryMap,
@@ -684,12 +738,21 @@
     return /^\{[\s\S]*"path"\s*:\s*"\/Automations\//i.test(t);
   }
 
-  function isSingleLineNonParaBlockMd(cols, trimmed, canSetext = false) {
+  function isSingleLineNonParaBlockMd(cols, trimmed, canSetext = false, canRefDef = false) {
     if (cols > 3) return false;
     if (/^#{1,6}(?:[ \t]|$)/.test(trimmed)) return true;
     if (/^(?:(?:\*[ \t]*){3,}|(?:-[ \t]*){3,}|(?:_[ \t]*){3,})$/.test(trimmed)) return true;
     if (canSetext && /^(?:=+|-+)[ \t]*$/.test(trimmed)) return true;
+    if (canRefDef && /^\[(?:[^\[\]\\]|\\.)+\]:[ \t]*(?:<[^\r\n<>]*>|[^\s<>]+)(?:[ \t]+(?:"(?:[^"\\]|\\.)*"|'(?:[^'\\]|\\.)*'|\((?:[^()\\]|\\.)*\)))?[ \t]*$/.test(trimmed)) return true;
     return false;
+  }
+
+  function isRefDefLabelOnlyMd(cols, trimmed) {
+    return cols <= 3 && /^\[(?:[^\[\]\\]|\\.)+\]:[ \t]*$/.test(trimmed);
+  }
+
+  function isRefDefUrlTailMd(cols, trimmed) {
+    return cols <= 3 && /^(?:<[^\r\n<>]*>|[^\s<>]+)(?:[ \t]+(?:"(?:[^"\\]|\\.)*"|'(?:[^'\\]|\\.)*'|\((?:[^()\\]|\\.)*\)))?[ \t]*$/.test(trimmed);
   }
 
   function measureLeadColsMd(str, startCol = 0) {
@@ -838,6 +901,7 @@
           const allowEmpty = !inParagraph || exitedAnyContainer || hadMarker;
           const leadBeforeList = measureLeadColsMd(rest, lineCol);
           if (leadBeforeList.cols > 3) break;
+          if (isSingleLineNonParaBlockMd(leadBeforeList.cols, rest.slice(leadBeforeList.idx), false, false)) break;
           const lst = matchListPrefixMd(rest, bsCol + sCol, !inParagraph || listExited || exitedAnyContainer || hadMarker, allowEmpty, lineCol);
           if (lst.ok) {
             containers.push({ type: 'list', indent: lst.indent });
@@ -874,12 +938,16 @@
     }
 
     const stepper = createContainerStepperMd(initialContainers);
+    let pendingRefDef = false;
     for (let li = 0; li <= closeLineIdx; li++) {
       const rawLine = lines[li].replace(/\r$/, '');
       const prevPara = stepper.inParagraph;
       const { lead, hadMarker, isBlank, trimmedAfterLead, exitedAnyContainer } = stepper.step(rawLine);
       const canSetext = prevPara && !exitedAnyContainer && !hadMarker;
-      const isNonPara = !isBlank && isSingleLineNonParaBlockMd(lead.cols, trimmedAfterLead, canSetext);
+      const canRefDef = !prevPara || exitedAnyContainer || hadMarker;
+      const isPendingRefUrl = pendingRefDef && !isBlank && !hadMarker && isRefDefUrlTailMd(lead.cols, trimmedAfterLead);
+      pendingRefDef = canRefDef && !isBlank && isRefDefLabelOnlyMd(lead.cols, trimmedAfterLead);
+      const isNonPara = !isBlank && (isPendingRefUrl || pendingRefDef || isSingleLineNonParaBlockMd(lead.cols, trimmedAfterLead, canSetext, canRefDef));
       const isFenceOpen = !isBlank && lead.cols <= 3 && /^(`{3,}[^`]*|~{3,}.*)$/.test(trimmedAfterLead);
       const isIndented = !isBlank && (hadMarker || !stepper.inParagraph) && lead.cols >= 4;
 
@@ -956,6 +1024,7 @@
     let fenceContainers = [];
     const stepper = createContainerStepperMd(initialContainers);
     let bufInitContainers = stepper.containers.map(c => ({ ...c }));
+    let pendingRefDef = false;
 
     const flush = (isCode, nextInit) => {
       if (buf.length) {
@@ -1038,7 +1107,10 @@
       }
 
       const canSetext = prevPara && !exitedAnyContainer && !hadMarker;
-      const lineIsNonParaBlock = !isBlank && isSingleLineNonParaBlockMd(lead.cols, trimmedAfterLead, canSetext);
+      const canRefDef = !prevPara || exitedAnyContainer || hadMarker;
+      const isPendingRefUrl = pendingRefDef && !isBlank && !hadMarker && isRefDefUrlTailMd(lead.cols, trimmedAfterLead);
+      pendingRefDef = canRefDef && !isBlank && isRefDefLabelOnlyMd(lead.cols, trimmedAfterLead);
+      const lineIsNonParaBlock = !isBlank && (isPendingRefUrl || pendingRefDef || isSingleLineNonParaBlockMd(lead.cols, trimmedAfterLead, canSetext, canRefDef));
       buf.push(line);
       stepper.inParagraph = !isBlank && !lineIsNonParaBlock;
     }
@@ -1259,7 +1331,7 @@
 
   function validateBinaryForImageAsset(asset, bytes, isEmbedded) {
     const magicMime = detectMagicMimeType(bytes);
-    const extMime = mimeFromAssetFilename(asset?.filename);
+    const extMime = asset?.mimeInferred ? '' : mimeFromAssetFilename(asset?.filename);
     const expectedMimes = [
       normMimeType(asset?.mimeType),
       extMime,
@@ -1271,20 +1343,43 @@
     }
     const declaredImage = isDeclaredImageAsset(asset);
     const contentMime = magicMime ? null : detectMarkupMimeType(bytes);
-    if (contentMime && (isEmbedded || declaredImage) && expectedMimes.some(expected => !areContentMimesCompatible(expected, contentMime))) {
+    if (contentMime && (isEmbedded || declaredImage) && (expectedMimes.some(expected => !areContentMimesCompatible(expected, contentMime)) || asset?.mimeInferred)) {
       const expectedSummary = expectedMimes.find(m => !areContentMimesCompatible(m, contentMime)) || 'imagen';
       return `Contenido incompatible (${contentMime} != ${expectedSummary})`;
     }
-    if ((isEmbedded || declaredImage) && isGenericMimeType(normMimeType(asset?.mimeType)) && extMime && extMime.startsWith('image/') && extMime !== 'image/svg+xml' && !magicMime) {
-      return `Firma binaria no válida para imagen (${extMime})`;
+    if ((isEmbedded || declaredImage) && (isGenericMimeType(normMimeType(asset?.mimeType)) || asset?.mimeInferred) && (extMime.startsWith('image/') || asset?.mimeInferred) && extMime !== 'image/svg+xml' && !magicMime) {
+      return `Firma binaria no válida para imagen (${extMime || 'imagen'})`;
     }
     return null;
   }
 
+  function disambiguateAssetFilenames(assets, assetBinaryMap = null) {
+    if (!Array.isArray(assets) || assets.length <= 1) return;
+    const usedNames = new Set();
+    for (const a of assets) {
+      if (!a || !a.filename) continue;
+      const raw = String(a.filename);
+      let candidate = raw;
+      let suffix = 2;
+      while (usedNames.has(candidate.toLowerCase())) {
+        const dotIdx = raw.lastIndexOf('.');
+        candidate = dotIdx > 0 ? `${raw.slice(0, dotIdx)}_${suffix++}${raw.slice(dotIdx)}` : `${raw}_${suffix++}`;
+      }
+      usedNames.add(candidate.toLowerCase());
+      if (candidate !== raw) {
+        a.filename = candidate;
+        if (assetBinaryMap instanceof Map && a.assetId && assetBinaryMap.has(a.assetId)) {
+          assetBinaryMap.set(candidate, assetBinaryMap.get(a.assetId));
+        }
+      }
+    }
+  }
+
   function preparePackageZipAssets(assets, assetBinaryMap) {
+    disambiguateAssetFilenames(assets, assetBinaryMap);
     const zipAssets = {};
     for (const a of (assets || [])) {
-      const bytes = assetBinaryMap.get(a.assetId) || assetBinaryMap.get(a.id) || assetBinaryMap.get(a.filename) || assetBinaryMap.get(a.name);
+      const bytes = (a.assetId && assetBinaryMap.get(a.assetId)) || (a.id && assetBinaryMap.get(a.id)) || assetBinaryMap.get(a.filename) || assetBinaryMap.get(a.name);
       if (!bytes) continue;
       const extMime = mimeFromAssetFilename(a.filename);
       const mismatchReason = validateBinaryForImageAsset(a, bytes, Boolean(extMime && extMime.startsWith('image/')));
@@ -1544,7 +1639,7 @@
       ''
     ];
 
-    messages.forEach(msg => {
+    messages.forEach((msg, idx) => {
       const isUser = msg.role === 'user';
       const isAssistant = msg.role === 'assistant';
       const roleLabel = isUser ? 'USER' : (isAssistant ? 'ASSISTANT' : (msg.role || 'TOOL').toUpperCase());
@@ -1563,17 +1658,24 @@
         });
       }
 
-      // Recursos en TXT (Sin Base64)
-      const msgAtts = Array.isArray(msg.attachments) ? msg.attachments : (Array.isArray(msg.content?.attachments) ? msg.content.attachments : []);
+      // Recursos en TXT (Sin Base64; usa activos desambiguados por mensaje)
+      const resolvedMsgAssets = (options.assets || []).filter(a => a && (a.sourceMessageId === msg.id || a.messageIndex === idx));
+      const msgAtts = resolvedMsgAssets.length
+        ? resolvedMsgAssets
+        : (Array.isArray(msg.attachments) ? msg.attachments : (Array.isArray(msg.content?.attachments) ? msg.content.attachments : []));
+      const seenAttKeys = new Set();
       msgAtts.forEach(att => {
         if (att && (att.kind === 'image' || (att.mimeType && att.mimeType.startsWith('image/')) || (att.sourceType && att.sourceType.includes('image')))) {
-          const imgName = att.name || att.filename || 'imagen';
+          const attKey = att.assetId || att.id || att.sourceURL || att.url || att.filename || att.name;
+          if (seenAttKeys.has(attKey)) return;
+          seenAttKeys.add(attKey);
+          const imgName = att.filename || att.name || 'imagen';
           if (options.imageStrategy === 'package') {
-            lines.push(`[IMAGE: assets/${att.filename || att.name}]`);
+            lines.push(`[IMAGE: assets/${imgName}]`);
           } else if (options.imageStrategy === 'reference' && (att.sourceURL || att.url)) {
             lines.push(`[IMAGE: ${att.sourceURL || att.url}]`);
           } else {
-            lines.push(`[Recurso visual omitido: ${imgName}]`);
+            lines.push(`[Recurso visual omitido: ${att.name || imgName}]`);
           }
         }
       });
@@ -1584,8 +1686,40 @@
     return lines.join('\n');
   }
 
+  function normalizeJsonBinariesForExport(val) {
+    if (val === null || val === undefined || typeof val !== 'object') return val;
+    if (val instanceof Uint8Array) return Array.from(val);
+    if (ArrayBuffer.isView(val)) return Array.from(new Uint8Array(val.buffer, val.byteOffset, val.byteLength));
+    if (val instanceof ArrayBuffer) return Array.from(new Uint8Array(val));
+    if (val.type === 'Buffer' && Array.isArray(val.data)) return val.data;
+    if (Array.isArray(val)) return val.map(normalizeJsonBinariesForExport);
+    const out = {};
+    for (const [k, v] of Object.entries(val)) {
+      out[k] = normalizeJsonBinariesForExport(v);
+    }
+    return out;
+  }
+
+  async function materializeEntityBlobsForExport(val) {
+    if (val === null || val === undefined || typeof val !== 'object') return val;
+    if (typeof val.arrayBuffer === 'function' && (typeof Blob === 'undefined' || val instanceof Blob || typeof val.size === 'number')) {
+      return new Uint8Array(await val.arrayBuffer());
+    }
+    if (val instanceof Uint8Array || val instanceof ArrayBuffer || ArrayBuffer.isView(val)) return val;
+    if (Array.isArray(val)) {
+      const arr = [];
+      for (const item of val) arr.push(await materializeEntityBlobsForExport(item));
+      return arr;
+    }
+    const out = {};
+    for (const [k, v] of Object.entries(val)) {
+      out[k] = await materializeEntityBlobsForExport(v);
+    }
+    return out;
+  }
+
   function formatAsJson(entity) {
-    return JSON.stringify(entity, null, 2);
+    return JSON.stringify(normalizeJsonBinariesForExport(entity), null, 2);
   }
 
   // Generador de imagen PNG local con paginación
@@ -1681,7 +1815,9 @@
           return session.accessToken;
         }});
       }
-      if (format !== 'json') {
+      if (format === 'json') {
+        entity = await materializeEntityBlobsForExport(entity);
+      } else {
         const widgets = deps.chatgptWidgets || (typeof globalThis !== 'undefined' ? globalThis.Lossy?.ChatGPTWidgets : null);
         const transformText = raw => {
           const cleaned = cleanExportText(raw);

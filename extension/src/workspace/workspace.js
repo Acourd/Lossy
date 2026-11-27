@@ -1183,13 +1183,16 @@
   async function startSingleCapture(canonicalId) {
     const db = getLinerDb();
     if (!db) return;
+    const captureWipeEpoch = typeof db.getWipeEpoch === 'function' ? db.getWipeEpoch() : null;
     const conv = await db.getConversation(canonicalId);
     if (!conv) return;
 
     const item = {
       id: conv.canonicalId,
+      canonicalId: conv.canonicalId,
       title: conv.title,
       conversationId: conv.source?.conversationId,
+      platform: conv.source?.platform || 'chatgpt',
       url: conv.source?.url
     };
 
@@ -1220,6 +1223,9 @@
           const action = isStructuredOnly ? 'ACQUIRE_STRUCTURED_ONLY' : 'ACQUIRE_CONVERSATION';
 
           const res = await safeTabMessagingWithAutoInject(targetTab.id, { action, conversationId: conv.source.conversationId });
+          if (captureWipeEpoch !== null && typeof db.getWipeEpoch === 'function' && db.getWipeEpoch() !== captureWipeEpoch) {
+            return;
+          }
           if (res && res.success && res.data) {
             // SOURCE IDENTITY INVARIANT:
             if (!res.data.source?.conversationId || res.data.source.conversationId !== conv.source.conversationId) {
@@ -1227,7 +1233,7 @@
               showToast('Error de identidad: Se recibió una conversación distinta a la solicitada.');
               return;
             }
-            await db.saveConversation(res.data);
+            await db.saveConversation(res.data, captureWipeEpoch !== null ? { expectedWipeEpoch: captureWipeEpoch } : undefined);
             await loadLibraryData();
             showToast(`Captura de "${conv.title}" actualizada con éxito.`);
             if (currentActiveConversation && currentActiveConversation.canonicalId === canonicalId) {
@@ -2422,6 +2428,15 @@
     const isClip = conv.entityType === 'clip' || canonicalId.startsWith('clip_');
     const collections = await db.getCollectionsForConversation(canonicalId);
     const collectionIds = collections.map(c => c.collectionId);
+    const folderMemberships = {};
+    for (const col of collections) {
+      if (col.organization?.folders) {
+        const fids = col.organization.folders
+          .filter(f => Array.isArray(f.conversationIds) && f.conversationIds.includes(canonicalId))
+          .map(f => f.id);
+        if (fids.length > 0) folderMemberships[col.collectionId] = fids;
+      }
+    }
 
     const titleText = isClip ? 'Eliminar Clip de Lossy' : 'Eliminar de Lossy';
     const bodyNote = isClip
@@ -2450,7 +2465,8 @@
     lastDeletedContext = {
       type: 'SINGLE',
       conversation: conv,
-      collectionIds
+      collectionIds,
+      folderMemberships
     };
 
     if (isClip) {
@@ -2474,7 +2490,7 @@
       actionText: 'Deshacer',
       onAction: async () => {
         if (!lastDeletedContext || lastDeletedContext.type !== 'SINGLE') return;
-        const restoredId = await db.restoreConversation(lastDeletedContext.conversation, lastDeletedContext.collectionIds);
+        const restoredId = await db.restoreConversation(lastDeletedContext.conversation, lastDeletedContext.collectionIds, lastDeletedContext.folderMemberships);
         lastDeletedContext = null;
         if (restoredId) {
           await loadLibraryData();
@@ -2516,7 +2532,16 @@
       const c = await db.getConversation(id);
       if (c) {
         const cols = await db.getCollectionsForConversation(id);
-        snapshots.push({ conv: c, colIds: cols.map(x => x.collectionId) });
+        const folderMemberships = {};
+        for (const col of cols) {
+          if (col.organization?.folders) {
+            const fids = col.organization.folders
+              .filter(f => Array.isArray(f.conversationIds) && f.conversationIds.includes(id))
+              .map(f => f.id);
+            if (fids.length > 0) folderMemberships[col.collectionId] = fids;
+          }
+        }
+        snapshots.push({ conv: c, colIds: cols.map(x => x.collectionId), folderMemberships });
       }
     }
 
@@ -2535,7 +2560,7 @@
       onAction: async () => {
         if (!lastDeletedContext || lastDeletedContext.type !== 'BULK') return;
         for (const item of lastDeletedContext.snapshots) {
-          await db.restoreConversation(item.conv, item.colIds);
+          await db.restoreConversation(item.conv, item.colIds, item.folderMemberships);
         }
         lastDeletedContext = null;
         await loadLibraryData();
@@ -2849,13 +2874,21 @@
     const db = getLinerDb();
     if (!db) return;
 
+    const bulkWipeEpoch = typeof db.getWipeEpoch === 'function' ? db.getWipeEpoch() : null;
     const items = [];
     for (const id of selectedConversationIds) {
       const c = await db.getConversation(id);
       if (c) {
-        items.push({ id: c.canonicalId, title: c.title, conversationId: c.source?.conversationId, url: c.source?.url });
+        items.push({
+          id: c.canonicalId,
+          canonicalId: c.canonicalId,
+          title: c.title,
+          conversationId: c.source?.conversationId,
+          platform: c.source?.platform || 'chatgpt',
+          url: c.source?.url
+        });
       } else {
-        items.push({ id, title: id });
+        items.push({ id, canonicalId: id, title: id });
       }
     }
 
@@ -2874,52 +2907,79 @@
       updateGlobalJobTray(updatedJob);
     });
 
+    const deriveExpectedConvId = (item) => {
+      if (item.conversationId && typeof item.conversationId === 'string') return item.conversationId;
+      if (typeof item.id === 'string') {
+        const m = item.id.match(/^conv_(?:chatgpt|gemini|claude|lossy)_(.+)$/);
+        if (m && m[1]) return m[1];
+      }
+      return null;
+    };
+
     const workerFn = async (item) => {
+      if (bulkWipeEpoch !== null && typeof db.getWipeEpoch === 'function' && db.getWipeEpoch() !== bulkWipeEpoch) {
+        throw new Error('WRITE_ABORTED_BY_CLEAR_ALL');
+      }
       job.currentItemTitle = item.title;
       updateGlobalJobTray(job);
 
+      const expectedConvId = deriveExpectedConvId(item);
+
       if (typeof chrome !== 'undefined' && chrome.tabs && chrome.tabs.query) {
-        try {
-          const tabs = await chrome.tabs.query({ url: ['https://chatgpt.com/*', 'https://chat.openai.com/*'] });
-          if (tabs && tabs.length > 0) {
-            const exactTab = tabs.find(t => t.url && t.url.includes(`/c/${item.conversationId}`));
-            const tab = exactTab || tabs[0];
-            const isStructuredOnly = !exactTab;
-            const action = isStructuredOnly ? 'ACQUIRE_STRUCTURED_ONLY' : 'ACQUIRE_CONVERSATION';
-            const response = await safeTabMessagingWithAutoInject(tab.id, { action, conversationId: item.conversationId });
-
-            if (response && response.success && response.data) {
-              const ext = response.data;
-              // SOURCE IDENTITY INVARIANT:
-              if (item.conversationId && (!ext.source?.conversationId || ext.source.conversationId !== item.conversationId)) {
-                console.error('[Liner Workspace] Violación de invariante en captura masiva: ID no coincide.');
-                return null;
-              }
-
-              const updated = {
-                canonicalId: item.id,
-                title: ext.title || item.title,
-                source: ext.source || { platform: 'chatgpt', conversationId: item.conversationId, url: item.url, acquisitionMethod: isStructuredOnly ? 'structured-session' : 'dom-harvest' },
-                model: ext.model || null,
-                createdAt: ext.createdAt || new Date().toISOString(),
-                updatedAt: new Date().toISOString(),
-                messages: ext.messages || [],
-                integrity: typeof ext.integrity === 'object' ? ext.integrity : { status: ext.integrity || 'captured' },
-                attachments: ext.attachments || [],
-                references: ext.references || []
-              };
-              await db.saveConversation(updated);
-              return updated;
-            }
+        const tabs = await chrome.tabs.query({ url: ['https://chatgpt.com/*', 'https://chat.openai.com/*'] });
+        if (tabs && tabs.length > 0) {
+          if (!expectedConvId) {
+            throw new Error('Identidad de conversación ausente en elemento de captura masiva.');
           }
-        } catch (_) {}
+          const exactTab = tabs.find(t => t.url && t.url.includes(`/c/${expectedConvId}`));
+          const tab = exactTab || tabs[0];
+          const isStructuredOnly = !exactTab;
+          const action = isStructuredOnly ? 'ACQUIRE_STRUCTURED_ONLY' : 'ACQUIRE_CONVERSATION';
+          const response = await safeTabMessagingWithAutoInject(tab.id, { action, conversationId: expectedConvId });
+
+          if (bulkWipeEpoch !== null && typeof db.getWipeEpoch === 'function' && db.getWipeEpoch() !== bulkWipeEpoch) {
+            throw new Error('WRITE_ABORTED_BY_CLEAR_ALL');
+          }
+
+          if (!response || !response.success || !response.data) {
+            throw new Error(response?.error || `No se pudo adquirir ${expectedConvId} sin mezclar identidades.`);
+          }
+
+          const ext = response.data;
+          // SOURCE IDENTITY INVARIANT (fail-closed):
+          const receivedConvId = ext.source?.conversationId;
+          if (!receivedConvId || receivedConvId !== expectedConvId) {
+            throw new Error(`SOURCE_IDENTITY_MISMATCH: Se esperaba ${expectedConvId} pero se recibió ${receivedConvId || 'desconocido'}.`);
+          }
+          if (item.canonicalId && ext.canonicalId && ext.canonicalId !== item.canonicalId && ext.canonicalId !== `conv_chatgpt_${expectedConvId}`) {
+            throw new Error(`SOURCE_IDENTITY_MISMATCH: CanonicalId incompatible (${ext.canonicalId} != ${item.canonicalId}).`);
+          }
+
+          const updated = {
+            canonicalId: item.id,
+            title: ext.title || item.title,
+            source: ext.source || { platform: 'chatgpt', conversationId: expectedConvId, url: item.url, acquisitionMethod: isStructuredOnly ? 'structured-session' : 'dom-harvest' },
+            model: ext.model || null,
+            createdAt: ext.createdAt || new Date().toISOString(),
+            updatedAt: new Date().toISOString(),
+            messages: ext.messages || [],
+            integrity: typeof ext.integrity === 'object' ? ext.integrity : { status: ext.integrity || 'captured' },
+            attachments: ext.attachments || [],
+            references: ext.references || []
+          };
+          await db.saveConversation(updated, bulkWipeEpoch !== null ? { expectedWipeEpoch: bulkWipeEpoch } : undefined);
+          return updated;
+        }
       }
 
       // Si no hay pestaña abierta, actualizar marca local sin duplicar
+      if (bulkWipeEpoch !== null && typeof db.getWipeEpoch === 'function' && db.getWipeEpoch() !== bulkWipeEpoch) {
+        throw new Error('WRITE_ABORTED_BY_CLEAR_ALL');
+      }
       const existing = await db.getConversation(item.id);
       if (existing) {
         existing.updatedAt = new Date().toISOString();
-        await db.saveConversation(existing);
+        await db.saveConversation(existing, bulkWipeEpoch !== null ? { expectedWipeEpoch: bulkWipeEpoch } : undefined);
         return existing;
       }
 
@@ -3254,12 +3314,15 @@
       }
 
       const project = await getTransferProject();
-      const pkg = adapter.generatePackage(conversations, {
+      const pkgOpts = {
         projectDescription:project?.description, projectCreatedAt:project?.createdAt, projectOrganization:project?.organization, projectMigration:project?.migration,
         projectTitle: project?.name || `Lossy Transfer (${conversations.length} context items)`,
         summaryGoal: document.getElementById('transfer-goal')?.value.trim() || undefined,
         ...(project?.projectContext ? { projectId:project.collectionId, projectContext:project.projectContext } : {})
-      });
+      };
+      const pkg = typeof adapter.generatePackageAsync === 'function'
+        ? await adapter.generatePackageAsync(conversations, pkgOpts)
+        : adapter.generatePackage(conversations, pkgOpts);
 
       if (db) {
         await db.saveTransfer({
@@ -3339,7 +3402,10 @@
     for (const id of project.conversationIds) { const item = await db.getConversation(id); if (item) items.push(item); }
     if (items.length !== project.conversationIds.length) { showToast('Faltan fuentes de este proyecto en la biblioteca. Revisa sus elementos antes de exportarlo.'); return; }
     const adapter = new window.Lossy.GenericTargetAdapter();
-    const pkg = adapter.generatePackage(items, { projectTitle:project.name, projectDescription:project.description, projectCreatedAt:project.createdAt, projectOrganization:project.organization, projectMigration:project.migration, summaryGoal:project.projectContext?.goal || project.description, projectId:project.collectionId, projectContext:project.projectContext || {} });
+    const pkgOpts = { projectTitle:project.name, projectDescription:project.description, projectCreatedAt:project.createdAt, projectOrganization:project.organization, projectMigration:project.migration, summaryGoal:project.projectContext?.goal || project.description, projectId:project.collectionId, projectContext:project.projectContext || {} };
+    const pkg = typeof adapter.generatePackageAsync === 'function'
+      ? await adapter.generatePackageAsync(items, pkgOpts)
+      : adapter.generatePackage(items, pkgOpts);
     const safeName = project.name.replace(/[^a-zA-Z0-9_-]/g, '_').toLowerCase();
     downloadBlob(window.Lossy.ZipBuilder.createZip(pkg.files), 'proyecto_' + safeName + '.zip', 'application/zip');
   }
@@ -4012,7 +4078,9 @@
     const mdAdapterClass = (window.Lossy && window.Lossy.MarkdownBundleAdapter) || (window.Liner && window.Liner.MarkdownBundleAdapter);
     if (mdAdapterClass) {
       const adapter = new mdAdapterClass();
-      const pkg = adapter.generatePackage(convs);
+      const pkg = typeof adapter.generatePackageAsync === 'function'
+        ? await adapter.generatePackageAsync(convs)
+        : adapter.generatePackage(convs);
 
       const zipBuilder = (window.Lossy && window.Lossy.ZipBuilder) || (window.Liner && window.Liner.ZipBuilder) || null;
       if (zipBuilder && typeof zipBuilder.createZip === 'function') {
@@ -4719,6 +4787,22 @@
 
         if (confirmed) {
           const db = getLinerDb();
+          if (projectSaveTimer) {
+            clearTimeout(projectSaveTimer);
+            projectSaveTimer = null;
+          }
+          lastDeletedContext = null;
+          if (currentActiveEngine && typeof currentActiveEngine.cancel === 'function') {
+            try { currentActiveEngine.cancel(); } catch (_) {}
+          }
+          if (typeof chrome !== 'undefined' && chrome.tabs && chrome.tabs.query) {
+            try {
+              const activeTabs = await chrome.tabs.query({ url: ['https://chatgpt.com/*', 'https://chat.openai.com/*', 'https://claude.ai/*', 'https://gemini.google.com/*'] });
+              for (const t of (activeTabs || [])) {
+                try { chrome.tabs.sendMessage(t.id, { action: 'CANCEL_ACQUISITION' }).catch(() => {}); } catch (_) {}
+              }
+            } catch (_) {}
+          }
           if (db) {
             await db.clearAll();
             selectedConversationIds.clear();

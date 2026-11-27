@@ -41,17 +41,35 @@
   function serializeTableDom(tableNode) {
     const trNodes = tableNode.querySelectorAll ? Array.from(tableNode.querySelectorAll('tr')) : [];
     if (!trNodes.length) return '';
-    const rows = [];
-    for (const tr of trNodes) {
-      const cells = Array.from(tr.querySelectorAll('th, td')).map(c =>
-        messageDomText(c).replace(/\r?\n+/g, ' ').replace(/\s+/g, ' ').replace(/\|/g, '\\|').trim()
-      );
-      if (cells.length) rows.push(cells);
+    const grid = [];
+    for (let rIdx = 0; rIdx < trNodes.length; rIdx++) {
+      const tr = trNodes[rIdx];
+      const cellNodes = Array.from(tr.querySelectorAll('th, td'));
+      if (!cellNodes.length) continue;
+      if (!grid[rIdx]) grid[rIdx] = [];
+      let colCursor = 0;
+      for (const cell of cellNodes) {
+        while (grid[rIdx][colCursor] !== undefined) colCursor++;
+        const raw = messageDomText(cell).replace(/\r?\n+/g, ' ').replace(/\s+/g, ' ').replace(/\|/g, '\\|').trim();
+        const colspan = Math.max(1, Math.min(20, parseInt(cell.getAttribute?.('colspan') || '1', 10) || 1));
+        const rowspan = Math.max(1, Math.min(50, parseInt(cell.getAttribute?.('rowspan') || '1', 10) || 1));
+        for (let dr = 0; dr < rowspan; dr++) {
+          if (!grid[rIdx + dr]) grid[rIdx + dr] = [];
+          for (let dc = 0; dc < colspan; dc++) {
+            grid[rIdx + dr][colCursor + dc] = (dr === 0 && dc === 0) ? raw : '';
+          }
+        }
+        colCursor += colspan;
+      }
     }
+    const rows = grid.filter(r => Array.isArray(r) && r.length > 0);
     if (!rows.length) return '';
     let cols = 0;
     for (const r of rows) if (r.length > cols) cols = r.length;
-    const fmt = r => `| ${r.concat(Array(Math.max(0, cols - r.length)).fill('')).join(' | ')} |`;
+    const fmt = r => {
+      const out = Array.from({ length: cols }, (_, idx) => r[idx] ?? '');
+      return `| ${out.join(' | ')} |`;
+    };
     return `\n\n${fmt(rows[0])}\n| ${Array(cols).fill('---').join(' | ')} |\n${rows.slice(1).map(fmt).join('\n')}\n\n`;
   }
   function maxBacktickRun(str) {
@@ -87,11 +105,13 @@
     }
     return acc;
   }
-  function messageDomText(node) {
+  function messageDomText(node, listDepth = 0) {
+    if (!node) return '';
     if (node.nodeType === 3) return node.textContent || '';
     const tag = (node.tagName || '').toLowerCase();
     if (tag === 'img') return '';
     if (tag === 'br') return '\n';
+    if (tag === 'hr') return '\n\n---\n\n';
     if (tag === 'table') return serializeTableDom(node);
     if (tag === 'pre') {
       const code=node.querySelector('code');
@@ -100,13 +120,32 @@
       const fence = buildSafeCodeFence(rawCode);
       return '\n\n' + fence + lang + '\n' + rawCode + '\n' + fence + '\n\n';
     }
-    const childParts = Array.from(node.childNodes || []).map(messageDomText);
+    if (tag === 'ol' || tag === 'ul') {
+      const indent = '  '.repeat(listDepth);
+      let itemNum = tag === 'ol' ? (parseInt(node.getAttribute?.('start') || '1', 10) || 1) : 1;
+      const items = joinMarkdownParts(Array.from(node.childNodes || []).map(child => {
+        if (child && child.nodeType === 1 && (child.tagName || '').toLowerCase() === 'li') {
+          const item = joinMarkdownParts(Array.from(child.childNodes || []).map(c => messageDomText(c, listDepth + 1))).trim();
+          const marker = tag === 'ol' ? `${itemNum++}.` : '-';
+          return item ? `\n${indent}${marker} ${item}` : '';
+        }
+        return messageDomText(child, listDepth);
+      }));
+      return `\n${items}\n`;
+    }
+    if (tag === 'blockquote') {
+      const q = joinMarkdownParts(Array.from(node.childNodes || []).map(c => messageDomText(c, listDepth))).trim();
+      if (!q) return '';
+      return '\n\n' + q.split('\n').map(line => (line ? `> ${line}` : '>')).join('\n') + '\n\n';
+    }
+    const childParts = Array.from(node.childNodes || []).map(c => messageDomText(c, listDepth));
     if (tag === 'code') return wrapInlineCode(childParts.join(''));
     const text = joinMarkdownParts(childParts);
     if (/^h[1-6]$/.test(tag)) return '\n\n' + '#'.repeat(Number(tag[1])) + ' ' + text + '\n\n';
-    if (tag === 'li') return '\n- ' + text;
-    if (['p','div','ul','ol','blockquote'].includes(tag)) return '\n' + text + '\n';
+    if (tag === 'li') return `\n${'  '.repeat(Math.max(0, listDepth))}- ${text.trim()}`;
+    if (['p','div'].includes(tag)) return '\n' + text + '\n';
     if (tag === 'strong' || tag === 'b') return '**' + text + '**';
+    if (tag === 'em' || tag === 'i') return '*' + text + '*';
     if (tag === 'a' && /^https?:/i.test(node.getAttribute('href') || '')) return '[' + text + '](<' + node.getAttribute('href').replace(/>/g,'%3E') + '>)';
     return text || node.textContent || '';
   }
@@ -486,7 +525,18 @@
           }
           att.sourceURL = src;
           att.url = src;
-          att.dataURI = att.dataURI || await resolveImageAsDataUri(img, controller?.signal);
+          const resolvedUri = att.dataURI || await resolveImageAsDataUri(img, controller?.signal);
+          att.dataURI = resolvedUri;
+          const detectedMimeMatch = typeof resolvedUri === 'string' ? resolvedUri.match(/^data:(image\/[a-z0-9+.-]+);/i) : null;
+          const urlExtMatch = typeof src === 'string' ? src.split('?')[0].split('#')[0].match(/\.(jpe?g|png|webp|gif|avif)$/i) : null;
+          const resolvedMime = detectedMimeMatch
+            ? detectedMimeMatch[1].toLowerCase().replace('image/jpg', 'image/jpeg')
+            : (urlExtMatch ? ({ jpg: 'image/jpeg', jpeg: 'image/jpeg', png: 'image/png', webp: 'image/webp', gif: 'image/gif', avif: 'image/avif' }[urlExtMatch[1].toLowerCase()]) : (att.mimeType || 'image/png'));
+          att.mimeType = resolvedMime;
+          const resolvedExt = resolvedMime === 'image/jpeg' ? 'jpg' : resolvedMime.replace('image/', '');
+          if (att.filename && /\.png$/i.test(att.filename) && resolvedExt !== 'png') {
+            att.filename = att.filename.replace(/\.png$/i, `.${resolvedExt}`);
+          }
           att.availability = att.dataURI ? 'embedded' : 'referenced';
         }
         msg.attachments = atts;
@@ -524,8 +574,14 @@
         if ((widthAttr > 0 && widthAttr < 32) || (heightAttr > 0 && heightAttr < 32) || src.includes('avatar')) return;
 
         const alt = img.getAttribute('alt') || 'imagen';
-        const ext = src.startsWith('data:image/jpeg') ? 'jpg' : 'png';
         const dataUri = (typeof extractImageDataUri === 'function' ? extractImageDataUri(img) : null) || (src.startsWith('data:') ? src : null);
+        const dataMimeM = typeof dataUri === 'string' ? dataUri.match(/^data:(image\/[a-z0-9+.-]+);/i) : null;
+        const srcMimeM = typeof src === 'string' ? src.match(/^data:(image\/[a-z0-9+.-]+);/i) : null;
+        const urlExtM = typeof src === 'string' ? src.split('?')[0].split('#')[0].match(/\.(jpe?g|png|webp|gif|avif)$/i) : null;
+        const mimeType = (dataMimeM?.[1] || srcMimeM?.[1] || (urlExtM ? `image/${urlExtM[1].toLowerCase().replace('jpg', 'jpeg')}` : 'image/png'))
+          .toLowerCase()
+          .replace('image/jpg', 'image/jpeg');
+        const ext = mimeType === 'image/jpeg' ? 'jpg' : (mimeType.replace('image/', '') || 'png');
         const attId = `dom_att_img_${stableHash(`${msgIdSeed || ''}|${src}|${imgIdx}`)}`;
         imgIdx++;
         attachments.push({
@@ -533,7 +589,7 @@
           assetId: attId,
           name: `${alt.replace(/[^a-zA-Z0-9_\-]/g, '_').slice(0, 24)}.${ext}`,
           filename: `${alt.replace(/[^a-zA-Z0-9_\-]/g, '_').slice(0, 24)}.${ext}`,
-          mimeType: src.startsWith('data:image/jpeg') ? 'image/jpeg' : 'image/png',
+          mimeType,
           kind: 'image',
           sourceType: 'dom-image',
           sourceURL: src,
@@ -555,7 +611,7 @@
     if (messageNodes && messageNodes.length > 0) {
       messageNodes.forEach((node) => {
         const rawRole = (node.getAttribute('data-message-author-role') || 'assistant').toLowerCase();
-        const role = rawRole === 'user' ? 'user' : 'assistant';
+        const role = ['user', 'assistant', 'system', 'tool'].includes(rawRole) ? rawRole : 'assistant';
         const msgId = node.getAttribute('data-message-id') || undefined;
         const textContainer = node.querySelector('.markdown') || node.querySelector('.whitespace-pre-wrap') || node;
 
@@ -591,7 +647,7 @@
           turns.push({
             id: msgId,
             role,
-            author: role === 'user' ? 'Usuario' : 'ChatGPT',
+            author: role === 'user' ? 'Usuario' : (role === 'assistant' ? 'ChatGPT' : role),
             text,
             codeBlocks,
             attachments
@@ -604,17 +660,20 @@
     if (turns.length === 0) {
       const USER_MARKER_RE = /^(?:you said|tú dijiste|tu dijiste|dijiste|usuario dijo|user said)\s*:?$/i;
       const ASSISTANT_MARKER_RE = /^(?:chatgpt said|chatgpt dijo|el asistente dijo|assistant said)\s*:?$/i;
+      const SYSTEM_MARKER_RE = /^(?:system|system said|sistema|sistema dijo)\s*:?$/i;
+      const TOOL_MARKER_RE = /^(?:tool|tool said|herramienta|herramienta dijo)\s*:?$/i;
       const h4Nodes = Array.from(root.querySelectorAll('h4')).filter(h => {
         const t = (h.textContent || h.innerText || '').trim();
-        return USER_MARKER_RE.test(t) || ASSISTANT_MARKER_RE.test(t);
+        return USER_MARKER_RE.test(t) || ASSISTANT_MARKER_RE.test(t) || SYSTEM_MARKER_RE.test(t) || TOOL_MARKER_RE.test(t);
       });
 
       if (h4Nodes && h4Nodes.length > 0) {
         h4Nodes.forEach((h4) => {
           const markerText = (h4.textContent || h4.innerText || '').trim();
-          const isUser = USER_MARKER_RE.test(markerText);
-          const role = isUser ? 'user' : 'assistant';
-          const author = isUser ? 'Usuario' : 'ChatGPT';
+          const role = USER_MARKER_RE.test(markerText)
+            ? 'user'
+            : (SYSTEM_MARKER_RE.test(markerText) ? 'system' : (TOOL_MARKER_RE.test(markerText) ? 'tool' : 'assistant'));
+          const author = role === 'user' ? 'Usuario' : (role === 'assistant' ? 'ChatGPT' : role);
 
           const container = h4.parentElement;
           if (!container) return;
@@ -673,15 +732,16 @@
         }
         const msgId = art.getAttribute?.('data-message-id') || undefined;
         const attachments = extractTurnAttachments(clone, msgId);
+        const explicitRole = (art.getAttribute?.('data-message-author-role') || clone.querySelector?.('[data-message-author-role]')?.getAttribute?.('data-message-author-role') || '').toLowerCase();
         const isAssistant = clone.querySelector ? clone.querySelector('.markdown') !== null : false;
-        const role = isAssistant ? 'assistant' : 'user';
+        const role = ['user', 'assistant', 'system', 'tool'].includes(explicitRole) ? explicitRole : (isAssistant ? 'assistant' : 'user');
         const text = cleanText(messageDomText(clone));
 
         if (text.length > 0 || attachments.length > 0) {
           turns.push({
             id: msgId,
             role,
-            author: role === 'user' ? 'Usuario' : 'ChatGPT',
+            author: role === 'user' ? 'Usuario' : (role === 'assistant' ? 'ChatGPT' : role),
             text,
             codeBlocks: [],
             attachments
@@ -696,7 +756,7 @@
   let activeHarvestCancelled = false;
   let navigationEpoch = 0;
   let lastObservedUrl = typeof window !== 'undefined' && window.location ? window.location.href : '';
-  let lastObservedConvId = null;
+  let lastObservedConvId = undefined;
   let lastHarvestedConversationId = null;
   let lastHarvestedSignatures = [];
 
@@ -706,7 +766,7 @@
     const currentConvId = detectActiveConversationId();
     const baseCurrentUrl = currentUrl.split('?')[0].split('#')[0];
     const baseLastUrl = lastObservedUrl ? lastObservedUrl.split('?')[0].split('#')[0] : '';
-    if (lastObservedConvId === null) {
+    if (lastObservedConvId === undefined) {
       lastObservedConvId = currentConvId;
       lastObservedUrl = currentUrl;
     } else if (
@@ -733,7 +793,7 @@
   function resetNavigationEpochForTest() {
     navigationEpoch = 0;
     lastObservedUrl = '';
-    lastObservedConvId = null;
+    lastObservedConvId = undefined;
     activeHarvestCancelled = false;
     lastHarvestedConversationId = null;
     lastHarvestedSignatures = [];
@@ -858,15 +918,71 @@
     try {
       let previousSnapshotSignatures = initialVisible.map(t => `${t.role}:::${t.text}`);
 
-      // 1. Desplazamiento inicial al techo para forzar montaje de los primeros turnos
+      const checkAbortOrNav = () => {
+        if (activeHarvestCancelled) return true;
+        if (startEpoch !== null && checkNavigationEpoch() !== startEpoch) {
+          diagnostics.terminationReason = 'ABORT_NAVIGATION_EPOCH_CHANGED';
+          activeHarvestCancelled = true;
+          return true;
+        }
+        if (expectedConvId && detectActiveConversationId() !== expectedConvId) {
+          diagnostics.terminationReason = 'ABORT_CONVERSATION_ID_CHANGED';
+          activeHarvestCancelled = true;
+          return true;
+        }
+        return false;
+      };
+
+      const settleDomWindow = async (pollMs = 110, maxWaitMs = 640, minSettleMs = 0) => {
+        const settleStart = Date.now();
+        let lastHeight = container.scrollHeight;
+        let lastSnapshot = extractVisibleTurns(document);
+        let lastSig = lastSnapshot.map(t => `${t.role}:::${t.text}`).join('\u0001');
+        let stablePolls = 0;
+        while (true) {
+          await waitMs(pollMs);
+          if (checkAbortOrNav()) return { aborted: true, snapshot: lastSnapshot, signatures: lastSnapshot.map(t => `${t.role}:::${t.text}`) };
+          const curHeight = container.scrollHeight;
+          const curSnap = extractVisibleTurns(document);
+          const curSig = curSnap.map(t => `${t.role}:::${t.text}`).join('\u0001');
+          const elapsed = Date.now() - settleStart;
+          const changed = curHeight !== lastHeight || curSig !== lastSig;
+          lastHeight = curHeight;
+          lastSnapshot = curSnap;
+          lastSig = curSig;
+          if (changed) {
+            stablePolls = 0;
+          } else if (elapsed >= minSettleMs) {
+            stablePolls++;
+            if (stablePolls >= 1) {
+              return { aborted: false, snapshot: curSnap, signatures: curSnap.map(t => `${t.role}:::${t.text}`) };
+            }
+          }
+          if (elapsed >= maxWaitMs) {
+            return { aborted: false, snapshot: curSnap, signatures: curSnap.map(t => `${t.role}:::${t.text}`), timedOut: changed };
+          }
+        }
+      };
+
+      // 1. Desplazamiento inicial al techo para forzar montaje de los primeros turnos (espera virtualización diferida)
       let stepStartTime = Date.now();
-      if (container.scrollTop > 0) {
+      const jumpedToTop = container.scrollTop > 0;
+      if (jumpedToTop) {
         container.scrollTop = 0;
-        await waitMs(140);
       }
-      let accumulated = extractVisibleTurns(document);
+      const topSettled = await settleDomWindow(110, 720, jumpedToTop ? 240 : 120);
+      if (topSettled.aborted) {
+        return {
+          turns: [],
+          integrity: 'aborted',
+          integrityNotice: 'Captura abortada por cambio de conversación durante el barrido DOM.',
+          diagnostics,
+          aborted: true
+        };
+      }
+      let accumulated = topSettled.snapshot;
       const topSnapshot = accumulated;
-      const topSnapshotSignatures = topSnapshot.map(t => `${t.role}:::${t.text}`);
+      const topSnapshotSignatures = topSettled.signatures;
       const topDomChanged = topSnapshotSignatures.length !== previousSnapshotSignatures.length ||
                             topSnapshotSignatures.some((sig, i) => sig !== previousSnapshotSignatures[i]);
       previousSnapshotSignatures = topSnapshotSignatures;
@@ -897,31 +1013,20 @@
       let sweeps = 0;
       const MAX_SWEEPS = 120; // Soporta conversaciones extensas de 100+ turnos sin truncamiento prematuro
       let consecutiveZeroNewTurns = 0;
+      let unstableConvergence = Boolean(topSettled.timedOut);
 
       while (sweeps < MAX_SWEEPS) {
         stepStartTime = Date.now();
-        const dynamicMaxScroll = Math.max(container.scrollHeight - clientHeight, 0);
-        currentPos = Math.min(currentPos + step, dynamicMaxScroll);
+        const dynamicMaxScrollBefore = Math.max(container.scrollHeight - clientHeight, 0);
+        currentPos = Math.min(currentPos + step, dynamicMaxScrollBefore);
         container.scrollTop = currentPos;
-        await waitMs(100);
-
-        // Verificar cancelación o navegación ANTES de leer e incorporar snapshots (evita mezcla A→inicio / A→B→A)
-        if (activeHarvestCancelled) {
+        const settled = await settleDomWindow(100, 620, currentPos >= dynamicMaxScrollBefore ? 240 : 0);
+        if (settled.aborted || checkAbortOrNav()) {
           break;
         }
-        if (startEpoch !== null && checkNavigationEpoch() !== startEpoch) {
-          diagnostics.terminationReason = 'ABORT_NAVIGATION_EPOCH_CHANGED';
-          activeHarvestCancelled = true;
-          break;
-        }
-        if (expectedConvId && detectActiveConversationId() !== expectedConvId) {
-          diagnostics.terminationReason = 'ABORT_CONVERSATION_ID_CHANGED';
-          activeHarvestCancelled = true;
-          break;
-        }
-
-        const currentSnapshot = extractVisibleTurns(document);
-        const currentSnapshotSignatures = currentSnapshot.map(t => `${t.role}:::${t.text}`);
+        const dynamicMaxScroll = Math.max(container.scrollHeight - clientHeight, 0);
+        const currentSnapshot = settled.snapshot;
+        const currentSnapshotSignatures = settled.signatures;
         const domChanged = currentSnapshotSignatures.length !== previousSnapshotSignatures.length ||
                            currentSnapshotSignatures.some((sig, i) => sig !== previousSnapshotSignatures[i]);
         previousSnapshotSignatures = currentSnapshotSignatures;
@@ -931,8 +1036,9 @@
         accumulated = alignAndAppendTurns(accumulated, currentSnapshot);
         const accumulatedAfter = accumulated.length;
         const turnsAdded = accumulatedAfter - accumulatedBefore;
+        if (settled.timedOut) unstableConvergence = true;
 
-        if (turnsAdded === 0 && currentPos >= dynamicMaxScroll) {
+        if (turnsAdded === 0 && !domChanged && currentPos >= dynamicMaxScroll) {
           consecutiveZeroNewTurns++;
         } else {
           consecutiveZeroNewTurns = 0;
@@ -1000,6 +1106,10 @@
         diagnostics.terminationReason = `LOOP_LIMIT_EXCEEDED_${MAX_SWEEPS}_SWEEPS`;
         detectedIntegrity = 'partial';
         integrityNotice = 'Captura posiblemente parcial: la conversación superó el límite de barrido de 120 ventanas.';
+      } else if (unstableConvergence || currentPos < finalMaxScroll) {
+        diagnostics.terminationReason = unstableConvergence ? 'DOM_CONVERGENCE_TIMEOUT' : `INCOMPLETE_SCROLL (${currentPos} < ${finalMaxScroll})`;
+        detectedIntegrity = 'partial';
+        integrityNotice = 'Captura potencialmente parcial: el DOM virtualizado no terminó de converger.';
       } else if (currentPos >= finalMaxScroll) {
         diagnostics.terminationReason = `MAX_SCROLL_REACHED (currentPos=${currentPos} >= dynamicMaxScroll=${finalMaxScroll})`;
       } else {
@@ -1441,7 +1551,7 @@
     }
 
     // SOURCE IDENTITY INVARIANT: Si la conversación solicitada difiere de la activa en DOM, RECHAZAR
-    if (targetConversationId && activeConvId && activeConvId !== targetConversationId) {
+    if (targetConversationId && activeConvId !== targetConversationId) {
       throw new Error(`SOURCE_IDENTITY_MISMATCH: La conversación activa en pantalla (${activeConvId}) no coincide con la solicitada (${targetConversationId}). Se rechaza la captura por salvaguarda de atribución.`);
     }
 
@@ -2240,6 +2350,7 @@
     module.exports = {
       cleanText,
       cleanMessageDom,
+      messageDomText,
       isContentImage,
       extractVisibleTurns,
       enrichConversationWithLiveDomAssets,

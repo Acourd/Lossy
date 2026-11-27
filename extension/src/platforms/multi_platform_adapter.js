@@ -264,14 +264,21 @@
       seen.add(src);
       const dataURI = captureImgSyncDataUri(img);
       const alt = (img.getAttribute ? img.getAttribute('alt') : '') || '';
-      const filename = `${platform}_img_${turnIdx + 1}_${iIdx + 1}.png`;
+      const uriSrc = dataURI || (src.startsWith('data:image/') ? src : '');
+      const uriMimeM = uriSrc ? uriSrc.match(/^data:(image\/[a-z0-9+.-]+);/i) : null;
+      const urlExtM = typeof src === 'string' && !src.startsWith('data:') ? src.split('?')[0].split('#')[0].match(/\.(jpe?g|png|webp|gif|avif)$/i) : null;
+      const mimeType = (uriMimeM?.[1] || (urlExtM ? `image/${urlExtM[1].toLowerCase().replace('jpg', 'jpeg')}` : 'image/png'))
+        .toLowerCase()
+        .replace('image/jpg', 'image/jpeg');
+      const ext = mimeType === 'image/jpeg' ? 'jpg' : (mimeType.replace('image/', '') || 'png');
+      const filename = `${platform}_img_${turnIdx + 1}_${iIdx + 1}.${ext}`;
       out.push({
         id: `att_${platform}_${turnIdx + 1}_${iIdx + 1}`,
         assetId: `att_${platform}_${turnIdx + 1}_${iIdx + 1}`,
         sourceMessageId: `msg_${platform}_${turnIdx + 1}`,
         name: alt || filename,
         filename,
-        mimeType: 'image/png',
+        mimeType,
         kind: 'image',
         sourceType: `${platform}-dom-image`,
         sourceURL: src.startsWith('data:') ? null : src,

@@ -75,7 +75,7 @@
 
         contextLines.push(`- **${titleStr}** (${platformStr} - ${modelStr}): [\`JSON\`](${filename}) | [\`Markdown\`](${mdFilename})`);
 
-        files[filename] = JSON.stringify(c, null, 2);
+        files[filename] = JSON.stringify(typeof transferBundle.normalizeJsonBinaries === 'function' ? transferBundle.normalizeJsonBinaries(c) : c, null, 2);
         files[mdFilename] = serializeToMarkdown(c);
       });
 
@@ -125,6 +125,14 @@
         importPrompt,
         files
       }, convList, options);
+    }
+
+    async generatePackageAsync(conversations, options = {}) {
+      const convList = Array.isArray(conversations) ? conversations : [conversations];
+      const materialized = typeof transferBundle.materializeBlobs === 'function'
+        ? await Promise.all(convList.map(c => transferBundle.materializeBlobs(c)))
+        : convList;
+      return this.generatePackage(materialized, options);
     }
   }
 

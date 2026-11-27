@@ -61,7 +61,7 @@
         const jsonPath = `conversations/${safeId}.json`;
         const mdPath = `conversations/${safeId}.md`;
 
-        files[jsonPath] = JSON.stringify(c, null, 2);
+        files[jsonPath] = JSON.stringify(typeof transferBundle.normalizeJsonBinaries === 'function' ? transferBundle.normalizeJsonBinaries(c) : c, null, 2);
         files[mdPath] = serializeToMarkdown(c);
 
         if (c.integrity?.warnings && c.integrity.warnings.length > 0) {
@@ -98,6 +98,14 @@
         receipt,
         files
       }, convList, options);
+    }
+
+    async generatePackageAsync(conversations, options = {}) {
+      const convList = Array.isArray(conversations) ? conversations : [conversations];
+      const materialized = typeof transferBundle.materializeBlobs === 'function'
+        ? await Promise.all(convList.map(c => transferBundle.materializeBlobs(c)))
+        : convList;
+      return this.generatePackage(materialized, options);
     }
   }
 

@@ -1,6 +1,6 @@
 # Lossy — Security, Permissions Matrix & Data Governance
 
-Lossy is a **100% local-first Chrome Manifest V3** extension with zero external backend, zero telemetry, and zero third-party runtime dependencies.
+Lossy is a **100% local-first Chrome Manifest V3** extension with zero external backend, zero telemetry, and zero declared npm runtime dependencies (bundled vendorized offline renderers: `extension/vendor/markdown-it.min.js` and `extension/vendor/katex*`).
 
 ## 1. Manifest V3 Permission Matrix
 
