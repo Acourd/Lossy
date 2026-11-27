@@ -1144,67 +1144,133 @@
         buf = [];
       }
     };
-    const matchFenceContainers = (line, fcStack) => {
-      let rest = line;
-      const hasBq = fcStack.some(c => c.type === 'bq');
-      for (const c of fcStack) {
-        if (c.type === 'bq') {
-          const m = rest.match(/^ {0,3}>[ \t]?/);
-          if (!m) return { bqOk: false, rest };
-          rest = rest.slice(m[0].length);
-        } else {
-          const sp = (rest.match(/^ */) || [''])[0].length;
-          if (sp >= c.indent) rest = rest.slice(c.indent);
-          else if (hasBq && rest.trim().length > 0) return { bqOk: false, rest };
-          else rest = rest.slice(sp);
+    const measureLeadCols = (str, startCol = 0) => {
+      let col = startCol;
+      let i = 0;
+      while (i < str.length) {
+        if (str[i] === ' ') { col += 1; i++; }
+        else if (str[i] === '\t') { col += 4 - (col % 4); i++; }
+        else break;
+      }
+      return { idx: i, cols: col - startCol, endCol: col };
+    };
+    const stripIndentCols = (str, startCol, targetCols) => {
+      let col = startCol;
+      let i = 0;
+      while (col < startCol + targetCols && i < str.length) {
+        if (str[i] === ' ') { col += 1; i++; }
+        else if (str[i] === '\t') { col += 4 - (col % 4); i++; }
+        else return { ok: false, rest: str, col: startCol };
+      }
+      if (col < startCol + targetCols) return { ok: false, rest: str, col };
+      const excess = col - (startCol + targetCols);
+      const rest = (excess > 0 ? ' '.repeat(excess) : '') + str.slice(i);
+      return { ok: true, rest, col: startCol + targetCols };
+    };
+    const matchBq = (str, startCol) => {
+      const lead = measureLeadCols(str, startCol);
+      if (lead.cols > 3 || str[lead.idx] !== '>') return { ok: false };
+      let i = lead.idx + 1;
+      let col = lead.endCol + 1;
+      let pad = '';
+      if (i < str.length) {
+        if (str[i] === ' ') { i++; col += 1; }
+        else if (str[i] === '\t') {
+          const adv = 4 - (col % 4);
+          i++;
+          col += 1;
+          if (adv > 1) pad = ' '.repeat(adv - 1);
         }
       }
-      return { bqOk: true, rest };
+      return { ok: true, rest: pad + str.slice(i), col };
+    };
+    const matchList = (str, startCol) => {
+      const lead = measureLeadCols(str, startCol);
+      if (lead.cols > 3) return { ok: false };
+      const after = str.slice(lead.idx);
+      const m = after.match(/^([-*+]|\d{1,9}[.)])([ \t]+)/);
+      if (!m) return { ok: false };
+      const markerLen = m[1].length;
+      const wsStartCol = lead.endCol + markerLen;
+      const wsLead = measureLeadCols(after.slice(markerLen), wsStartCol);
+      const isEmptyItem = after.slice(markerLen + wsLead.idx).trim().length === 0;
+      const wsCols = isEmptyItem ? 1 : (wsLead.cols >= 5 ? 1 : wsLead.cols);
+      const targetIndent = lead.cols + markerLen + wsCols;
+      const stripped = stripIndentCols(after.slice(markerLen), wsStartCol, wsCols);
+      const rest = stripped.ok ? stripped.rest : after.slice(markerLen + wsLead.idx);
+      return { ok: true, indent: targetIndent, col: startCol + targetIndent, rest };
+    };
+    const matchFenceContainers = (line, fcStack) => {
+      let rest = line;
+      let col = 0;
+      if (rest.trim().length === 0) {
+        if (fcStack.some(c => c.type === 'bq')) return { ok: false, rest, col };
+        return { ok: true, rest, col };
+      }
+      for (const c of fcStack) {
+        if (c.type === 'bq') {
+          const m = matchBq(rest, col);
+          if (!m.ok) return { ok: false, rest, col };
+          rest = m.rest;
+          col = m.col;
+        } else {
+          const s = stripIndentCols(rest, col, c.indent);
+          if (!s.ok) return { ok: false, rest, col };
+          rest = s.rest;
+          col = s.col;
+        }
+      }
+      return { ok: true, rest, col };
     };
     const advanceContainers = line => {
       let rest = line;
+      let col = 0;
       let matched = 0;
       while (matched < containers.length) {
         const c = containers[matched];
         if (c.type === 'bq') {
-          const m = rest.match(/^ {0,3}>[ \t]?/);
-          if (!m) break;
-          rest = rest.slice(m[0].length);
+          const m = matchBq(rest, col);
+          if (!m.ok) break;
+          rest = m.rest;
+          col = m.col;
           matched++;
         } else {
           if (rest.trim().length === 0) {
             matched++;
             continue;
           }
-          const sp = (rest.match(/^ */) || [''])[0].length;
-          if (sp < c.indent) break;
-          rest = rest.slice(c.indent);
+          const s = stripIndentCols(rest, col, c.indent);
+          if (!s.ok) break;
+          rest = s.rest;
+          col = s.col;
           matched++;
         }
       }
       containers.length = matched;
       while (rest.trim().length > 0) {
-        const bq = rest.match(/^ {0,3}>[ \t]?/);
-        if (bq) {
+        const bq = matchBq(rest, col);
+        if (bq.ok) {
           containers.push({ type: 'bq' });
-          rest = rest.slice(bq[0].length);
+          rest = bq.rest;
+          col = bq.col;
           continue;
         }
-        const lst = rest.match(/^ {0,3}(?:[-*+]|\d{1,9}[.)])[ \t]+/);
-        if (lst) {
-          containers.push({ type: 'list', indent: lst[0].length });
-          rest = rest.slice(lst[0].length);
+        const lst = matchList(rest, col);
+        if (lst.ok) {
+          containers.push({ type: 'list', indent: lst.indent });
+          rest = lst.rest;
+          col = lst.col;
           continue;
         }
         break;
       }
-      return rest;
+      return { rest, col };
     };
 
     for (const line of lines) {
       if (inFence) {
-        const { bqOk, rest } = matchFenceContainers(line, fenceContainers);
-        if (!bqOk) {
+        const { ok, rest, col } = matchFenceContainers(line, fenceContainers);
+        if (!ok) {
           flush(true);
           inFence = false;
           fenceChar = '';
@@ -1212,7 +1278,8 @@
           fenceContainers = [];
         } else {
           buf.push(line);
-          const closeM = rest.match(/^ {0,3}(`{3,}|~{3,})[ \t]*$/);
+          const closeLead = measureLeadCols(rest, col);
+          const closeM = closeLead.cols <= 3 ? rest.slice(closeLead.idx).match(/^(`{3,}|~{3,})[ \t]*$/) : null;
           if (closeM && closeM[1][0] === fenceChar && closeM[1].length >= fenceLen) {
             flush(true);
             inFence = false;
@@ -1224,8 +1291,9 @@
         }
       }
 
-      const rest = advanceContainers(line);
-      const openM = rest.match(/^ {0,3}(`{3,}|~{3,})(.*)$/);
+      const { rest, col } = advanceContainers(line);
+      const lead = measureLeadCols(rest, col);
+      const openM = lead.cols <= 3 ? rest.slice(lead.idx).match(/^(`{3,}|~{3,})(.*)$/) : null;
       if (openM && !(openM[1][0] === '`' && openM[2].includes('`'))) {
         flush(false);
         inFence = true;
