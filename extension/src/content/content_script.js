@@ -105,10 +105,13 @@
     }
     return acc;
   }
-  function messageDomText(node, listDepth = 0) {
+  function messageDomText(node, listDepthOrIndent = '') {
     if (!node) return '';
     if (node.nodeType === 3) return node.textContent || '';
     const tag = (node.tagName || '').toLowerCase();
+    const listIndent = typeof listDepthOrIndent === 'number'
+      ? '  '.repeat(Math.max(0, listDepthOrIndent))
+      : String(listDepthOrIndent || '');
     if (tag === 'img') return '';
     if (tag === 'br') return '\n';
     if (tag === 'hr') return '\n\n---\n\n';
@@ -121,28 +124,28 @@
       return '\n\n' + fence + lang + '\n' + rawCode + '\n' + fence + '\n\n';
     }
     if (tag === 'ol' || tag === 'ul') {
-      const indent = '  '.repeat(listDepth);
       let itemNum = tag === 'ol' ? (parseInt(node.getAttribute?.('start') || '1', 10) || 1) : 1;
       const items = joinMarkdownParts(Array.from(node.childNodes || []).map(child => {
         if (child && child.nodeType === 1 && (child.tagName || '').toLowerCase() === 'li') {
-          const item = joinMarkdownParts(Array.from(child.childNodes || []).map(c => messageDomText(c, listDepth + 1))).trim();
           const marker = tag === 'ol' ? `${itemNum++}.` : '-';
-          return item ? `\n${indent}${marker} ${item}` : '';
+          const childIndent = listIndent + ' '.repeat(marker.length + 1);
+          const item = joinMarkdownParts(Array.from(child.childNodes || []).map(c => messageDomText(c, childIndent))).trim();
+          return item ? `\n${listIndent}${marker} ${item}` : '';
         }
-        return messageDomText(child, listDepth);
+        return messageDomText(child, listIndent);
       }));
       return `\n${items}\n`;
     }
     if (tag === 'blockquote') {
-      const q = joinMarkdownParts(Array.from(node.childNodes || []).map(c => messageDomText(c, listDepth))).trim();
+      const q = joinMarkdownParts(Array.from(node.childNodes || []).map(c => messageDomText(c, listIndent))).trim();
       if (!q) return '';
       return '\n\n' + q.split('\n').map(line => (line ? `> ${line}` : '>')).join('\n') + '\n\n';
     }
-    const childParts = Array.from(node.childNodes || []).map(c => messageDomText(c, listDepth));
+    const childParts = Array.from(node.childNodes || []).map(c => messageDomText(c, listIndent));
     if (tag === 'code') return wrapInlineCode(childParts.join(''));
     const text = joinMarkdownParts(childParts);
     if (/^h[1-6]$/.test(tag)) return '\n\n' + '#'.repeat(Number(tag[1])) + ' ' + text + '\n\n';
-    if (tag === 'li') return `\n${'  '.repeat(Math.max(0, listDepth))}- ${text.trim()}`;
+    if (tag === 'li') return `\n${listIndent}- ${text.trim()}`;
     if (['p','div'].includes(tag)) return '\n' + text + '\n';
     if (tag === 'strong' || tag === 'b') return '**' + text + '**';
     if (tag === 'em' || tag === 'i') return '*' + text + '*';
@@ -933,11 +936,14 @@
         return false;
       };
 
-      const settleDomWindow = async (pollMs = 110, maxWaitMs = 640, minSettleMs = 0) => {
+      const settleDomWindow = async (pollMs = 100, maxWaitMs = 1050, minSettleMs = 0, preSig = '', preHeight = -1) => {
         const settleStart = Date.now();
         let lastHeight = container.scrollHeight;
         let lastSnapshot = extractVisibleTurns(document);
         let lastSig = lastSnapshot.map(t => `${t.role}:::${t.text}`).join('\u0001');
+        let sawChangeFromPre = Boolean(
+          (preHeight >= 0 && lastHeight !== preHeight) || (preSig && lastSig !== preSig)
+        );
         let stablePolls = 0;
         while (true) {
           await waitMs(pollMs);
@@ -947,15 +953,18 @@
           const curSig = curSnap.map(t => `${t.role}:::${t.text}`).join('\u0001');
           const elapsed = Date.now() - settleStart;
           const changed = curHeight !== lastHeight || curSig !== lastSig;
+          if (changed || (preHeight >= 0 && curHeight !== preHeight) || (preSig && curSig !== preSig)) {
+            sawChangeFromPre = true;
+          }
           lastHeight = curHeight;
           lastSnapshot = curSnap;
           lastSig = curSig;
           if (changed) {
             stablePolls = 0;
-          } else if (elapsed >= minSettleMs) {
+          } else if (elapsed >= minSettleMs || (sawChangeFromPre && elapsed >= pollMs)) {
             stablePolls++;
             if (stablePolls >= 1) {
-              return { aborted: false, snapshot: curSnap, signatures: curSnap.map(t => `${t.role}:::${t.text}`) };
+              return { aborted: false, snapshot: curSnap, signatures: curSnap.map(t => `${t.role}:::${t.text}`), timedOut: false };
             }
           }
           if (elapsed >= maxWaitMs) {
@@ -966,11 +975,13 @@
 
       // 1. Desplazamiento inicial al techo para forzar montaje de los primeros turnos (espera virtualización diferida)
       let stepStartTime = Date.now();
+      const preTopSig = previousSnapshotSignatures.join('\u0001');
+      const preTopHeight = container.scrollHeight;
       const jumpedToTop = container.scrollTop > 0;
       if (jumpedToTop) {
         container.scrollTop = 0;
       }
-      const topSettled = await settleDomWindow(110, 720, jumpedToTop ? 240 : 120);
+      const topSettled = await settleDomWindow(100, 1050, jumpedToTop ? 520 : 240, preTopSig, preTopHeight);
       if (topSettled.aborted) {
         return {
           turns: [],
@@ -1017,10 +1028,14 @@
 
       while (sweeps < MAX_SWEEPS) {
         stepStartTime = Date.now();
+        const prevSweepPos = container.scrollTop;
+        const preSweepHeight = container.scrollHeight;
+        const preSweepSig = previousSnapshotSignatures.join('\u0001');
         const dynamicMaxScrollBefore = Math.max(container.scrollHeight - clientHeight, 0);
         currentPos = Math.min(currentPos + step, dynamicMaxScrollBefore);
         container.scrollTop = currentPos;
-        const settled = await settleDomWindow(100, 620, currentPos >= dynamicMaxScrollBefore ? 240 : 0);
+        const movedScroll = currentPos !== prevSweepPos;
+        const settled = await settleDomWindow(100, 1050, movedScroll ? 520 : 140, preSweepSig, preSweepHeight);
         if (settled.aborted || checkAbortOrNav()) {
           break;
         }

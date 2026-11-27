@@ -395,15 +395,49 @@
       const text = typeof msg.text === 'string' ? msg.text : (msg.content?.text || '');
       let bodyHtml = renderSimpleMarkdownToHtml(text, { omitImages: options.imageStrategy === 'omit' });
       const storedCode = Array.isArray(msg.codeBlocks) ? msg.codeBlocks : (Array.isArray(msg.content?.codeBlocks) ? msg.content.codeBlocks : []);
-      const hasInlineCodeBlock = widgets && typeof widgets.splitFencedCodeSegments === 'function'
-        ? widgets.splitFencedCodeSegments(text).some(seg => seg.isCode)
-        : /(?:^|\n) {0,3}(?:`{3,}|~{3,})/.test(text);
-      if (storedCode.length > 0 && !hasInlineCodeBlock) {
-        bodyHtml += storedCode.map(cb => {
-          const lang = String(cb?.language || '').trim() || 'text';
-          const codeStr = typeof cb?.code === 'string' ? cb.code : '';
-          return `<div class="l-code-wrap"><div class="l-code-head"><span>${escapeHtml(lang)}</span></div><pre><code>${escapeHtml(codeStr)}</code></pre></div>`;
-        }).join('');
+      if (storedCode.length > 0) {
+        const normCode = s => String(s || '').replace(/\r\n/g, '\n').replace(/^\n+|\n+$/g, '').trim();
+        const inlineBodies = [];
+        if (widgets && typeof widgets.splitFencedCodeSegments === 'function') {
+          for (const seg of widgets.splitFencedCodeSegments(text)) {
+            if (!seg.isCode) continue;
+            const cLines = seg.text.split('\n');
+            const openM = cLines[0].match(/^ {0,3}(`{3,}|~{3,})(.*)$/);
+            if (openM && !(openM[1][0] === '`' && openM[2].includes('`'))) {
+              const fChar = openM[1][0];
+              const fLen = openM[1].length;
+              const lastLine = cLines.length > 1 ? cLines[cLines.length - 1] : '';
+              const closeM = lastLine.match(/^ {0,3}(`{3,}|~{3,})[ \t]*$/);
+              const hasClose = Boolean(closeM && closeM[1][0] === fChar && closeM[1].length >= fLen);
+              inlineBodies.push(normCode(cLines.slice(1, hasClose ? -1 : undefined).join('\n')));
+            } else {
+              inlineBodies.push(normCode(seg.text));
+            }
+          }
+        } else {
+          const fenceRe = /(?:^|\n) {0,3}(`{3,}|~{3,})[^\n]*\n([\s\S]*?)\n {0,3}\1[ \t]*(?=\n|$)/g;
+          let m;
+          while ((m = fenceRe.exec(text)) !== null) {
+            inlineBodies.push(normCode(m[2]));
+          }
+        }
+        const extraBlocks = storedCode.filter(cb => {
+          const body = normCode(cb?.code);
+          if (!body) return false;
+          const idxMatch = inlineBodies.indexOf(body);
+          if (idxMatch !== -1) {
+            inlineBodies.splice(idxMatch, 1);
+            return false;
+          }
+          return true;
+        });
+        if (extraBlocks.length > 0) {
+          bodyHtml += extraBlocks.map(cb => {
+            const lang = String(cb?.language || '').trim() || 'text';
+            const codeStr = typeof cb?.code === 'string' ? cb.code : '';
+            return `<div class="l-code-wrap"><div class="l-code-head"><span>${escapeHtml(lang)}</span></div><pre><code>${escapeHtml(codeStr)}</code></pre></div>`;
+          }).join('');
+        }
       }
 
       // Embedded images for this turn (prefer options.assets, fall back to msg.attachments)

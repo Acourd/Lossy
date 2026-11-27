@@ -107,6 +107,9 @@
     }
 
     createJob(type, items = [], metadata = {}) {
+      if (this._runningLoop || this._runPromise) {
+        throw new Error('Ya existe un trabajo en ejecución concurrente');
+      }
       const jobId = `job_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`;
       const formattedItems = items.map((it, idx) => {
         const isStr = typeof it === 'string';
@@ -312,7 +315,10 @@
         await loopPromise;
 
         this._syncJobCounters(runJob);
-        if (this._abortSignal) {
+        const hasIncompleteItems = runJob.items.some(
+          it => it && (it.status === ITEM_STATUS.PENDING || it.status === ITEM_STATUS.ACQUIRING)
+        );
+        if (this._abortSignal || (!this._pauseSignal && hasIncompleteItems)) {
           runJob.status = JOB_STATUS.CANCELLED;
         } else if (this._pauseSignal) {
           runJob.status = JOB_STATUS.PAUSED;

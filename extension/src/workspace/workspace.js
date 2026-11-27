@@ -1179,6 +1179,43 @@
     });
   }
 
+  function inferExpectedPlatform(entry) {
+    const rawPlat = String(entry?.platform || entry?.source?.platform || '').toLowerCase().trim();
+    if (rawPlat && rawPlat !== 'unknown') return rawPlat;
+    const cid = String(entry?.canonicalId || entry?.id || '');
+    const m = cid.match(/^conv_(chatgpt|claude|gemini)_/);
+    if (m && m[1]) return m[1];
+    const url = String(entry?.url || entry?.source?.url || '');
+    if (/claude\.ai/i.test(url)) return 'claude';
+    if (/gemini\.google\.com/i.test(url)) return 'gemini';
+    if (/chatgpt\.com|chat\.openai\.com/i.test(url)) return 'chatgpt';
+    return 'chatgpt';
+  }
+
+  function platformTabQueryConfig(platform) {
+    if (platform === 'claude') {
+      return { urls: ['https://claude.ai/*'], matchTab: (t, id) => Boolean(t.url && t.url.includes(`/chat/${id}`)), allowStructuredFallback: false };
+    }
+    if (platform === 'gemini') {
+      return { urls: ['https://gemini.google.com/*'], matchTab: (t, id) => Boolean(t.url && t.url.includes(`/app/${id}`)), allowStructuredFallback: false };
+    }
+    return { urls: ['https://chatgpt.com/*', 'https://chat.openai.com/*'], matchTab: (t, id) => Boolean(t.url && t.url.includes(`/c/${id}`)), allowStructuredFallback: true };
+  }
+
+  function verifyAcquiredIdentity(ext, { expectedConvId, expectedPlatform, expectedCanonicalId }) {
+    const receivedConvId = ext?.source?.conversationId;
+    if (!receivedConvId || receivedConvId !== expectedConvId) {
+      throw new Error(`SOURCE_IDENTITY_MISMATCH: Se esperaba ${expectedConvId} pero se recibió ${receivedConvId || 'desconocido'}.`);
+    }
+    const receivedPlatform = ext?.source?.platform ? String(ext.source.platform).toLowerCase().trim() : null;
+    if (expectedPlatform && (!receivedPlatform || receivedPlatform !== expectedPlatform)) {
+      throw new Error(`SOURCE_IDENTITY_MISMATCH: Proveedor incompatible (esperado ${expectedPlatform}, recibido ${receivedPlatform || 'desconocido'}).`);
+    }
+    if (expectedCanonicalId && ext?.canonicalId && ext.canonicalId !== expectedCanonicalId) {
+      throw new Error(`SOURCE_IDENTITY_MISMATCH: CanonicalId incompatible (${ext.canonicalId} != ${expectedCanonicalId}).`);
+    }
+  }
+
   // --- ACTUALIZACIÓN CONTEXTUAL DE CAPTURA INDIVIDUAL ---
   async function startSingleCapture(canonicalId) {
     const db = getLinerDb();
@@ -1187,18 +1224,25 @@
     const conv = await db.getConversation(canonicalId);
     if (!conv) return;
 
+    const expectedPlatform = inferExpectedPlatform(conv);
     const item = {
       id: conv.canonicalId,
       canonicalId: conv.canonicalId,
       title: conv.title,
       conversationId: conv.source?.conversationId,
-      platform: conv.source?.platform || 'chatgpt',
+      platform: expectedPlatform,
       url: conv.source?.url
     };
 
     const engine = getJobEngine();
     if (engine) {
-      const job = engine.createJob('SINGLE_ACQUISITION', [item]);
+      let job;
+      try {
+        job = engine.createJob('SINGLE_ACQUISITION', [item]);
+      } catch (err) {
+        showToast(err.message || 'Ya hay una captura en curso.', { isError: true });
+        return;
+      }
       currentActiveJob = job;
       updateGlobalJobTray(job);
       engine.onProgress(updatedJob => {
@@ -1215,22 +1259,33 @@
 
     if (typeof chrome !== 'undefined' && chrome.tabs && chrome.tabs.query && conv.source?.conversationId) {
       try {
-        const tabs = await chrome.tabs.query({ url: ['https://chatgpt.com/*', 'https://chat.openai.com/*'] });
+        const cfg = platformTabQueryConfig(expectedPlatform);
+        const tabs = await chrome.tabs.query({ url: cfg.urls });
         if (tabs && tabs.length > 0) {
-          const exactTab = tabs.find(t => t.url && t.url.includes(`/c/${conv.source.conversationId}`));
+          const exactTab = tabs.find(t => cfg.matchTab(t, conv.source.conversationId));
+          if (!exactTab && !cfg.allowStructuredFallback) {
+            showToast(`No se encontró una pestaña activa para esta conversación de ${expectedPlatform}.`);
+            return;
+          }
           const targetTab = exactTab || tabs[0];
           const isStructuredOnly = !exactTab;
           const action = isStructuredOnly ? 'ACQUIRE_STRUCTURED_ONLY' : 'ACQUIRE_CONVERSATION';
 
-          const res = await safeTabMessagingWithAutoInject(targetTab.id, { action, conversationId: conv.source.conversationId });
+          const res = await safeTabMessagingWithAutoInject(targetTab.id, { action, conversationId: conv.source.conversationId, platform: expectedPlatform });
           if (captureWipeEpoch !== null && typeof db.getWipeEpoch === 'function' && db.getWipeEpoch() !== captureWipeEpoch) {
             return;
           }
           if (res && res.success && res.data) {
-            // SOURCE IDENTITY INVARIANT:
-            if (!res.data.source?.conversationId || res.data.source.conversationId !== conv.source.conversationId) {
-              console.error('[Liner Workspace] Violación de invariante: ID recibido no coincide con solicitado.');
-              showToast('Error de identidad: Se recibió una conversación distinta a la solicitada.');
+            // SOURCE IDENTITY INVARIANT (fail-closed across both UUID & provider):
+            try {
+              verifyAcquiredIdentity(res.data, {
+                expectedConvId: conv.source.conversationId,
+                expectedPlatform,
+                expectedCanonicalId: conv.canonicalId
+              });
+            } catch (idErr) {
+              console.error('[Liner Workspace] Violación de invariante:', idErr.message);
+              showToast(idErr.message, { isError: true });
               return;
             }
             await db.saveConversation(res.data, captureWipeEpoch !== null ? { expectedWipeEpoch: captureWipeEpoch } : undefined);
@@ -2884,11 +2939,11 @@
           canonicalId: c.canonicalId,
           title: c.title,
           conversationId: c.source?.conversationId,
-          platform: c.source?.platform || 'chatgpt',
+          platform: inferExpectedPlatform(c),
           url: c.source?.url
         });
       } else {
-        items.push({ id, canonicalId: id, title: id });
+        items.push({ id, canonicalId: id, title: id, platform: inferExpectedPlatform({ id, canonicalId: id }) });
       }
     }
 
@@ -2898,7 +2953,13 @@
       return;
     }
 
-    const job = engine.createJob('BULK_ACQUISITION', items);
+    let job;
+    try {
+      job = engine.createJob('BULK_ACQUISITION', items);
+    } catch (err) {
+      showToast(err.message || 'Ya hay un trabajo en curso.', { isError: true });
+      return;
+    }
     currentActiveJob = job;
     updateGlobalJobTray(job);
 
@@ -2924,18 +2985,23 @@
       updateGlobalJobTray(job);
 
       const expectedConvId = deriveExpectedConvId(item);
+      const expectedPlatform = inferExpectedPlatform(item);
 
       if (typeof chrome !== 'undefined' && chrome.tabs && chrome.tabs.query) {
-        const tabs = await chrome.tabs.query({ url: ['https://chatgpt.com/*', 'https://chat.openai.com/*'] });
+        const cfg = platformTabQueryConfig(expectedPlatform);
+        const tabs = await chrome.tabs.query({ url: cfg.urls });
         if (tabs && tabs.length > 0) {
           if (!expectedConvId) {
             throw new Error('Identidad de conversación ausente en elemento de captura masiva.');
           }
-          const exactTab = tabs.find(t => t.url && t.url.includes(`/c/${expectedConvId}`));
+          const exactTab = tabs.find(t => cfg.matchTab(t, expectedConvId));
+          if (!exactTab && !cfg.allowStructuredFallback) {
+            throw new Error(`No hay pestaña abierta para la conversación ${expectedConvId} en ${expectedPlatform}.`);
+          }
           const tab = exactTab || tabs[0];
           const isStructuredOnly = !exactTab;
           const action = isStructuredOnly ? 'ACQUIRE_STRUCTURED_ONLY' : 'ACQUIRE_CONVERSATION';
-          const response = await safeTabMessagingWithAutoInject(tab.id, { action, conversationId: expectedConvId });
+          const response = await safeTabMessagingWithAutoInject(tab.id, { action, conversationId: expectedConvId, platform: expectedPlatform });
 
           if (bulkWipeEpoch !== null && typeof db.getWipeEpoch === 'function' && db.getWipeEpoch() !== bulkWipeEpoch) {
             throw new Error('WRITE_ABORTED_BY_CLEAR_ALL');
@@ -2946,19 +3012,17 @@
           }
 
           const ext = response.data;
-          // SOURCE IDENTITY INVARIANT (fail-closed):
-          const receivedConvId = ext.source?.conversationId;
-          if (!receivedConvId || receivedConvId !== expectedConvId) {
-            throw new Error(`SOURCE_IDENTITY_MISMATCH: Se esperaba ${expectedConvId} pero se recibió ${receivedConvId || 'desconocido'}.`);
-          }
-          if (item.canonicalId && ext.canonicalId && ext.canonicalId !== item.canonicalId && ext.canonicalId !== `conv_chatgpt_${expectedConvId}`) {
-            throw new Error(`SOURCE_IDENTITY_MISMATCH: CanonicalId incompatible (${ext.canonicalId} != ${item.canonicalId}).`);
-          }
+          // SOURCE IDENTITY INVARIANT (fail-closed on UUID, platform, and canonicalId):
+          verifyAcquiredIdentity(ext, {
+            expectedConvId,
+            expectedPlatform,
+            expectedCanonicalId: item.canonicalId || item.id
+          });
 
           const updated = {
             canonicalId: item.id,
             title: ext.title || item.title,
-            source: ext.source || { platform: 'chatgpt', conversationId: expectedConvId, url: item.url, acquisitionMethod: isStructuredOnly ? 'structured-session' : 'dom-harvest' },
+            source: ext.source || { platform: expectedPlatform, conversationId: expectedConvId, url: item.url, acquisitionMethod: isStructuredOnly ? 'structured-session' : 'dom-harvest' },
             model: ext.model || null,
             createdAt: ext.createdAt || new Date().toISOString(),
             updatedAt: new Date().toISOString(),
@@ -4792,8 +4856,8 @@
             projectSaveTimer = null;
           }
           lastDeletedContext = null;
-          if (currentActiveEngine && typeof currentActiveEngine.cancel === 'function') {
-            try { currentActiveEngine.cancel(); } catch (_) {}
+          if (activeJobEngine && typeof activeJobEngine.cancel === 'function') {
+            try { activeJobEngine.cancel(); } catch (_) {}
           }
           if (typeof chrome !== 'undefined' && chrome.tabs && chrome.tabs.query) {
             try {

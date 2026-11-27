@@ -27,9 +27,25 @@
 
   const DB_NAME = 'LinerContextWorkbenchDB';
   const DB_VERSION = 1;
+  const WIPE_EPOCH_KEY = '__lossy_wipe_epoch__';
+  const IDB_SHARED_WIPE_STATES = new WeakMap();
+  function getSharedWipeState(idbRef) {
+    if (!idbRef || typeof idbRef !== 'object') return null;
+    let st = IDB_SHARED_WIPE_STATES.get(idbRef);
+    if (!st) {
+      st = { epoch: 0, clearing: 0, idbEpoch: 0, tokens: new Set() };
+      IDB_SHARED_WIPE_STATES.set(idbRef, st);
+    }
+    return st;
+  }
 
   function retainLocalCapture(incoming, existing) {
     if (!existing || existing.canonicalId !== incoming.canonicalId) return incoming;
+    const existingPlat = String(existing.source?.platform || '').toLowerCase();
+    const incomingPlat = String(incoming.source?.platform || '').toLowerCase();
+    if (existingPlat && incomingPlat && existingPlat !== 'unknown' && incomingPlat !== 'unknown' && existingPlat !== incomingPlat) {
+      return existing;
+    }
     const isCompleteStatus = s => ['captured', 'harvested', 'complete'].includes(String(s || '').toLowerCase());
     const isPartialStatus = s => ['partial', 'uncaptured'].includes(String(s || '').toLowerCase());
     const existingMsgs = Array.isArray(existing.messages) ? existing.messages : [];
@@ -299,7 +315,37 @@
       this.opening = null;
       this.useMemoryFallback = !this.indexedDB;
       this._wipeEpoch = 0;
+      this._remoteWipeEpoch = 0;
+      this._knownIdbWipeEpoch = 0;
       this._clearing = null;
+      this._seenWipeTokens = new Set();
+      this._wipeChannel = null;
+      if (typeof BroadcastChannel !== 'undefined' && !this.useMemoryFallback) {
+        try {
+          this._wipeChannel = new BroadcastChannel('lossy_db_wipe_epoch_v1');
+          if (typeof this._wipeChannel.unref === 'function') this._wipeChannel.unref();
+          this._wipeChannel.onmessage = (ev) => {
+            const msg = ev && ev.data;
+            if (!msg || typeof msg !== 'object') return;
+            const shared = getSharedWipeState(this.indexedDB);
+            const knownSameRealm = Boolean(msg.wipeToken && shared?.tokens?.has(msg.wipeToken));
+            if (msg.type === 'CLEAR_START') {
+              if (!knownSameRealm && msg.wipeToken && !this._seenWipeTokens.has(msg.wipeToken)) {
+                this._seenWipeTokens.add(msg.wipeToken);
+                this._remoteWipeEpoch++;
+              }
+            } else if (msg.type === 'CLEAR_DONE') {
+              if (!knownSameRealm && msg.wipeToken && !this._seenWipeTokens.has(msg.wipeToken)) {
+                this._seenWipeTokens.add(msg.wipeToken);
+                this._remoteWipeEpoch++;
+              }
+              if (Number.isInteger(msg.idbEpoch) && msg.idbEpoch > this._knownIdbWipeEpoch) {
+                this._knownIdbWipeEpoch = msg.idbEpoch;
+              }
+            }
+          };
+        } catch (_) {}
+      }
 
       // Almacenes en memoria para entornos de test en Node
       this.memoryStores = {
@@ -313,19 +359,82 @@
     }
 
     getWipeEpoch() {
-      return this._wipeEpoch;
+      const shared = this.useMemoryFallback ? null : getSharedWipeState(this.indexedDB);
+      return this._wipeEpoch + this._remoteWipeEpoch + (shared ? shared.epoch : 0);
+    }
+
+    _resolveBaselineIdbEpoch() {
+      const shared = this.useMemoryFallback ? null : getSharedWipeState(this.indexedDB);
+      return Math.max(this._knownIdbWipeEpoch, shared ? (shared.idbEpoch || 0) : 0);
     }
 
     _resolveWriteEpoch(options) {
-      return (options && Number.isInteger(options.expectedWipeEpoch)) ? options.expectedWipeEpoch : this._wipeEpoch;
+      return (options && Number.isInteger(options.expectedWipeEpoch)) ? options.expectedWipeEpoch : this.getWipeEpoch();
     }
 
     _assertWriteEpoch(expectedEpoch) {
-      if (this._clearing || this._wipeEpoch !== expectedEpoch) {
+      const shared = this.useMemoryFallback ? null : getSharedWipeState(this.indexedDB);
+      if (this._clearing || (shared && shared.clearing > 0) || this.getWipeEpoch() !== expectedEpoch) {
         const err = new Error('WRITE_ABORTED_BY_CLEAR_ALL');
         err.code = 'WRITE_ABORTED_BY_CLEAR_ALL';
         throw err;
       }
+    }
+
+    _hasDiagStore() {
+      return Boolean(this.db && this.db.objectStoreNames && typeof this.db.objectStoreNames.contains === 'function' && this.db.objectStoreNames.contains('diagnostics'));
+    }
+
+    _runGuardedTx(storeNames, writeEpoch, baselineIdbEpoch, execInTx, resolveValue) {
+      return new Promise((resolve, reject) => {
+        try { this._assertWriteEpoch(writeEpoch); } catch (e) { reject(e); return; }
+        const useDiag = this._hasDiagStore();
+        const txStores = useDiag && !storeNames.includes('diagnostics') ? [...storeNames, 'diagnostics'] : storeNames;
+        const tx = this.db.transaction(txStores, 'readwrite');
+        let settled = false;
+        let resultVal;
+        const failAbort = (err) => {
+          if (settled) return;
+          settled = true;
+          try { tx.abort(); } catch (_) {}
+          reject(err);
+        };
+        tx.oncomplete = () => {
+          if (settled) return;
+          if (this.getWipeEpoch() !== writeEpoch) reject(new Error('WRITE_ABORTED_BY_CLEAR_ALL'));
+          else resolve(typeof resolveValue === 'function' ? resolveValue(resultVal) : resolveValue);
+        };
+        tx.onerror = () => { if (!settled) { settled = true; reject(tx.error || new Error('Error de almacenamiento')); } };
+        tx.onabort = () => { if (!settled) { settled = true; reject(tx.error || new Error('Transacción abortada')); } };
+
+        const proceed = () => {
+          try {
+            this._assertWriteEpoch(writeEpoch);
+            execInTx(tx, v => { resultVal = v; }, failAbort);
+          } catch (err) {
+            failAbort(err);
+          }
+        };
+
+        if (useDiag) {
+          try {
+            const diagReq = tx.objectStore('diagnostics').get(WIPE_EPOCH_KEY);
+            diagReq.onsuccess = () => {
+              const persisted = Number(diagReq.result?.epoch || 0);
+              if (persisted > baselineIdbEpoch) {
+                failAbort(new Error('WRITE_ABORTED_BY_CLEAR_ALL'));
+                return;
+              }
+              proceed();
+            };
+            diagReq.onerror = () => proceed();
+          } catch (_) {
+            proceed();
+          }
+        } else {
+          proceed();
+        }
+      });
     }
 
     async open() {
@@ -388,6 +497,19 @@
           if(settled){connection.close();return;}
           settled=true;this.db=connection;
           connection.onversionchange=()=>{connection.close();if(this.db===connection)this.db=null;};
+          if (connection.objectStoreNames && typeof connection.objectStoreNames.contains === 'function' && connection.objectStoreNames.contains('diagnostics')) {
+            try {
+              const tx = connection.transaction(['diagnostics'], 'readonly');
+              const req = tx.objectStore('diagnostics').get(WIPE_EPOCH_KEY);
+              req.onsuccess = () => {
+                const persisted = Number(req.result?.epoch || 0);
+                if (persisted > this._knownIdbWipeEpoch) this._knownIdbWipeEpoch = persisted;
+                resolve(this);
+              };
+              req.onerror = () => resolve(this);
+              return;
+            } catch (_) {}
+          }
           resolve(this);
         };
 
@@ -423,29 +545,27 @@
         this.memoryStores.metadata_index.set(record.canonicalId, meta);
         return record.canonicalId;
       }
-      return new Promise((resolve, reject) => {
-        try { this._assertWriteEpoch(writeEpoch); } catch (e) { reject(e); return; }
-        const tx = this.db.transaction(['conversations', 'metadata_index'], 'readwrite');
-        tx.oncomplete = () => {
-          if (this._wipeEpoch !== writeEpoch) reject(new Error('WRITE_ABORTED_BY_CLEAR_ALL'));
-          else resolve(conv.canonicalId);
-        };
-        tx.onerror = () => reject(tx.error || new Error('Error de almacenamiento'));
-        tx.onabort = () => reject(tx.error || new Error('Transacción abortada'));
-        const store = tx.objectStore('conversations');
-        const request = store.get(conv.canonicalId);
-        request.onsuccess = () => {
-          try {
-            this._assertWriteEpoch(writeEpoch);
-            const { record, meta } = prepare(request.result);
-            store.put(record);
-            tx.objectStore('metadata_index').put(meta);
-          } catch (error) {
-            try { tx.abort(); } catch (_) {}
-            reject(error);
-          }
-        };
-      });
+      const baselineIdbEpoch = this._resolveBaselineIdbEpoch();
+      return this._runGuardedTx(
+        ['conversations', 'metadata_index'],
+        writeEpoch,
+        baselineIdbEpoch,
+        (tx, setResult, failAbort) => {
+          const store = tx.objectStore('conversations');
+          const request = store.get(conv.canonicalId);
+          request.onsuccess = () => {
+            try {
+              this._assertWriteEpoch(writeEpoch);
+              const { record, meta } = prepare(request.result);
+              store.put(record);
+              tx.objectStore('metadata_index').put(meta);
+              setResult(conv.canonicalId);
+            } catch (error) {
+              failAbort(error);
+            }
+          };
+        }
+      );
     }
 
     conversationRecords(conv) {
@@ -563,19 +683,17 @@
         return canonicalId;
       }
 
-      return new Promise((resolve, reject) => {
-        try { this._assertWriteEpoch(writeEpoch); } catch (e) { reject(e); return; }
-        const tx = this.db.transaction(['conversations', 'metadata_index'], 'readwrite');
-        tx.objectStore('conversations').put(clip);
-        tx.objectStore('metadata_index').put(metaRecord);
-
-        tx.oncomplete = () => {
-          if (this._wipeEpoch !== writeEpoch) reject(new Error('WRITE_ABORTED_BY_CLEAR_ALL'));
-          else resolve(canonicalId);
-        };
-        tx.onerror = () => reject(tx.error||new Error('Error de almacenamiento'));
-        tx.onabort = () => reject(tx.error||new Error('Transacción abortada'));
-      });
+      const baselineIdbEpoch = this._resolveBaselineIdbEpoch();
+      return this._runGuardedTx(
+        ['conversations', 'metadata_index'],
+        writeEpoch,
+        baselineIdbEpoch,
+        (tx, setResult) => {
+          tx.objectStore('conversations').put(clip);
+          tx.objectStore('metadata_index').put(metaRecord);
+          setResult(canonicalId);
+        }
+      );
     }
 
     /**
@@ -1035,17 +1153,16 @@
         return collection;
       }
 
-      return new Promise((resolve, reject) => {
-        try { this._assertWriteEpoch(writeEpoch); } catch (e) { reject(e); return; }
-        const tx = this.db.transaction(['collections'], 'readwrite');
-        tx.objectStore('collections').put(collection);
-        tx.oncomplete = () => {
-          if (this._wipeEpoch !== writeEpoch) reject(new Error('WRITE_ABORTED_BY_CLEAR_ALL'));
-          else resolve(collection);
-        };
-        tx.onerror = () => reject(tx.error||new Error('Error de almacenamiento'));
-        tx.onabort = () => reject(tx.error||new Error('Transacción abortada'));
-      });
+      const baselineIdbEpoch = this._resolveBaselineIdbEpoch();
+      return this._runGuardedTx(
+        ['collections'],
+        writeEpoch,
+        baselineIdbEpoch,
+        (tx, setResult) => {
+          tx.objectStore('collections').put(collection);
+          setResult(collection);
+        }
+      );
     }
 
     async mutateCollection(collectionId, transform, options = {}) {
@@ -1067,26 +1184,26 @@
         this.memoryStores.collections.set(collectionId, record);
         return structuredClone(record);
       }
-      return new Promise((resolve, reject) => {
-        try { this._assertWriteEpoch(writeEpoch); } catch (e) { reject(e); return; }
-        const tx = this.db.transaction(['collections'], 'readwrite');
-        const store = tx.objectStore('collections');
-        let record;
-        tx.oncomplete = () => {
-          if (this._wipeEpoch !== writeEpoch) reject(new Error('WRITE_ABORTED_BY_CLEAR_ALL'));
-          else resolve(record);
-        };
-        tx.onerror = () => reject(tx.error || new Error('No se pudo guardar el proyecto'));
-        tx.onabort = () => reject(tx.error || new Error('Guardado de proyecto cancelado'));
-        const request = store.get(collectionId);
-        request.onsuccess = () => {
-          try {
-            this._assertWriteEpoch(writeEpoch);
-            record = apply(request.result);
-            store.put(record);
-          } catch (error) { try { tx.abort(); } catch (_) {} reject(error); }
-        };
-      });
+      const baselineIdbEpoch = this._resolveBaselineIdbEpoch();
+      return this._runGuardedTx(
+        ['collections'],
+        writeEpoch,
+        baselineIdbEpoch,
+        (tx, setResult, failAbort) => {
+          const store = tx.objectStore('collections');
+          const request = store.get(collectionId);
+          request.onsuccess = () => {
+            try {
+              this._assertWriteEpoch(writeEpoch);
+              const record = apply(request.result);
+              store.put(record);
+              setResult(record);
+            } catch (error) {
+              failAbort(error);
+            }
+          };
+        }
+      );
     }
 
     async saveProjectContext(collectionId, context, expectedRevision) {
@@ -1247,17 +1364,16 @@
         return job.jobId;
       }
 
-      return new Promise((resolve, reject) => {
-        try { this._assertWriteEpoch(writeEpoch); } catch (e) { reject(e); return; }
-        const tx = this.db.transaction(['jobs'], 'readwrite');
-        tx.objectStore('jobs').put(job);
-        tx.oncomplete = () => {
-          if (this._wipeEpoch !== writeEpoch) reject(new Error('WRITE_ABORTED_BY_CLEAR_ALL'));
-          else resolve(job.jobId);
-        };
-        tx.onerror = () => reject(tx.error||new Error('Error de almacenamiento'));
-        tx.onabort = () => reject(tx.error||new Error('Transacción abortada'));
-      });
+      const baselineIdbEpoch = this._resolveBaselineIdbEpoch();
+      return this._runGuardedTx(
+        ['jobs'],
+        writeEpoch,
+        baselineIdbEpoch,
+        (tx, setResult) => {
+          tx.objectStore('jobs').put(job);
+          setResult(job.jobId);
+        }
+      );
     }
 
     async getJob(jobId) {
@@ -1307,17 +1423,16 @@
         return transfer.transferId;
       }
 
-      return new Promise((resolve, reject) => {
-        try { this._assertWriteEpoch(writeEpoch); } catch (e) { reject(e); return; }
-        const tx = this.db.transaction(['transfers'], 'readwrite');
-        tx.objectStore('transfers').put(transfer);
-        tx.oncomplete = () => {
-          if (this._wipeEpoch !== writeEpoch) reject(new Error('WRITE_ABORTED_BY_CLEAR_ALL'));
-          else resolve(transfer.transferId);
-        };
-        tx.onerror = () => reject(tx.error||new Error('Error de almacenamiento'));
-        tx.onabort = () => reject(tx.error||new Error('Transacción abortada'));
-      });
+      const baselineIdbEpoch = this._resolveBaselineIdbEpoch();
+      return this._runGuardedTx(
+        ['transfers'],
+        writeEpoch,
+        baselineIdbEpoch,
+        (tx, setResult) => {
+          tx.objectStore('transfers').put(transfer);
+          setResult(transfer.transferId);
+        }
+      );
     }
 
     async listTransfers() {
@@ -1339,6 +1454,16 @@
      */
     async clearAll() {
       this._wipeEpoch++;
+      const wipeToken = `${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
+      const shared = this.useMemoryFallback ? null : getSharedWipeState(this.indexedDB);
+      if (shared) {
+        shared.tokens.add(wipeToken);
+        shared.epoch++;
+        shared.clearing++;
+      }
+      if (this._wipeChannel) {
+        try { this._wipeChannel.postMessage({ type: 'CLEAR_START', wipeToken, epoch: this.getWipeEpoch() }); } catch (_) {}
+      }
       this.memoryStores.conversations.clear();
       this.memoryStores.metadata_index.clear();
       this.memoryStores.collections.clear();
@@ -1360,13 +1485,29 @@
 
         return new Promise((resolve, reject) => {
           const tx = this.db.transaction(['conversations', 'metadata_index', 'collections', 'transfers', 'jobs', 'diagnostics'], 'readwrite');
-          tx.objectStore('conversations').clear();
-          tx.objectStore('metadata_index').clear();
-          tx.objectStore('collections').clear();
-          tx.objectStore('transfers').clear();
-          tx.objectStore('jobs').clear();
-          tx.objectStore('diagnostics').clear();
-          tx.oncomplete = () => resolve(true);
+          const diagStore = tx.objectStore('diagnostics');
+          let writtenEpoch = 0;
+          const finishClear = (prevIdbEpoch) => {
+            writtenEpoch = Math.max(prevIdbEpoch + 1, this.getWipeEpoch(), this._resolveBaselineIdbEpoch() + 1);
+            tx.objectStore('conversations').clear();
+            tx.objectStore('metadata_index').clear();
+            tx.objectStore('collections').clear();
+            tx.objectStore('transfers').clear();
+            tx.objectStore('jobs').clear();
+            diagStore.clear();
+            diagStore.put({ id: WIPE_EPOCH_KEY, epoch: writtenEpoch });
+          };
+          const curReq = diagStore.get(WIPE_EPOCH_KEY);
+          curReq.onsuccess = () => finishClear(Number(curReq.result?.epoch || 0));
+          curReq.onerror = () => finishClear(this._resolveBaselineIdbEpoch());
+          tx.oncomplete = () => {
+            if (writtenEpoch > this._knownIdbWipeEpoch) this._knownIdbWipeEpoch = writtenEpoch;
+            if (shared && writtenEpoch > (shared.idbEpoch || 0)) shared.idbEpoch = writtenEpoch;
+            if (this._wipeChannel) {
+              try { this._wipeChannel.postMessage({ type: 'CLEAR_DONE', wipeToken, idbEpoch: writtenEpoch }); } catch (_) {}
+            }
+            resolve(true);
+          };
           tx.onerror = () => reject(tx.error||new Error('Error de almacenamiento'));
           tx.onabort = () => reject(tx.error||new Error('Transacción abortada'));
         });
@@ -1377,6 +1518,7 @@
       try {
         return await p;
       } finally {
+        if (shared && shared.clearing > 0) shared.clearing--;
         if (this._clearing === p) this._clearing = null;
       }
     }

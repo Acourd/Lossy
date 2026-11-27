@@ -24,48 +24,8 @@
   let navGeneration = 0;
   let lastObservedHref = (typeof window !== 'undefined' && window.location) ? window.location.href : '';
   let lastDomState = null;
-
-  function bumpNavigation() {
-    navGeneration++;
-    if (activeAbortController) {
-      try { activeAbortController.abort(); } catch (_) {}
-    }
-    if (typeof window !== 'undefined' && window.location) {
-      lastObservedHref = window.location.href || '';
-    }
-  }
-
-  function checkRouteChanged() {
-    if (typeof window === 'undefined' || !window.location) return false;
-    const href = window.location.href || '';
-    if (href !== lastObservedHref) {
-      bumpNavigation();
-      return true;
-    }
-    return false;
-  }
-
-  if (typeof window !== 'undefined') {
-    window.addEventListener('popstate', bumpNavigation);
-    window.addEventListener('hashchange', bumpNavigation);
-    if (window.navigation && typeof window.navigation.addEventListener === 'function') {
-      window.navigation.addEventListener('navigate', bumpNavigation);
-    }
-    if (typeof history !== 'undefined') {
-      for (const method of ['pushState', 'replaceState']) {
-        if (typeof history[method] === 'function') {
-          try {
-            const orig = history[method].bind(history);
-            history[method] = function (...args) {
-              const res = orig(...args);
-              checkRouteChanged();
-              return res;
-            };
-          } catch (_) {}
-        }
-      }
-    }
-  }
+  let pendingNavTransition = false;
+  let domObserverInitialized = false;
 
   function computeDomTurnSignature(data) {
     return (data?.messages || [])
@@ -74,9 +34,108 @@
       .join('\n---\n');
   }
 
+  function extractSnapshotForHref(href) {
+    const adapter = getAdapter();
+    if (!adapter || !href) return null;
+    const info = adapter.detectPlatform(href);
+    if (!info) return null;
+    const data = info.platform === 'claude'
+      ? adapter.extractClaudeDom(document, href)
+      : adapter.extractGeminiDom(document, href);
+    const sig = computeDomTurnSignature(data);
+    if (!sig) return null;
+    return {
+      url: href,
+      platform: info.platform,
+      convId: info.conversationId,
+      signature: sig
+    };
+  }
+
+  function recordCurrentDomBaseline() {
+    if (typeof window === 'undefined' || !window.location || pendingNavTransition) return;
+    const href = window.location.href || '';
+    if (href !== lastObservedHref) return;
+    const snap = extractSnapshotForHref(href);
+    if (snap && snap.convId) {
+      lastDomState = snap;
+    }
+  }
+
+  function bumpNavigation(preNavSnap = null) {
+    navGeneration++;
+    pendingNavTransition = true;
+    if (preNavSnap && preNavSnap.convId && preNavSnap.signature) {
+      lastDomState = preNavSnap;
+    }
+    if (activeAbortController) {
+      try { activeAbortController.abort(); } catch (_) {}
+    }
+    if (typeof window !== 'undefined' && window.location) {
+      lastObservedHref = window.location.href || '';
+    }
+  }
+
+  function checkRouteChanged(preNavSnap = null) {
+    if (typeof window === 'undefined' || !window.location) return false;
+    const href = window.location.href || '';
+    if (href !== lastObservedHref) {
+      bumpNavigation(preNavSnap);
+      return true;
+    }
+    return false;
+  }
+
+  function initNavigationTracking() {
+    if (typeof window === 'undefined') return;
+    recordCurrentDomBaseline();
+    window.addEventListener('popstate', () => { bumpNavigation(); });
+    window.addEventListener('hashchange', () => { bumpNavigation(); });
+    if (window.navigation && typeof window.navigation.addEventListener === 'function') {
+      window.navigation.addEventListener('navigate', () => { bumpNavigation(); });
+    }
+    if (typeof history !== 'undefined') {
+      for (const method of ['pushState', 'replaceState']) {
+        if (typeof history[method] === 'function') {
+          try {
+            const orig = history[method].bind(history);
+            history[method] = function (...args) {
+              const prevHref = window.location?.href || '';
+              const preSnap = (!pendingNavTransition && prevHref === lastObservedHref)
+                ? extractSnapshotForHref(prevHref)
+                : null;
+              if (preSnap && preSnap.convId && preSnap.signature) {
+                lastDomState = preSnap;
+              }
+              const res = orig(...args);
+              checkRouteChanged(preSnap);
+              return res;
+            };
+          } catch (_) {}
+        }
+      }
+    }
+    if (!domObserverInitialized && typeof MutationObserver !== 'undefined' && typeof document !== 'undefined') {
+      domObserverInitialized = true;
+      try {
+        const rootNode = document.body || document.documentElement;
+        if (rootNode) {
+          const observer = new MutationObserver(() => {
+            if (checkRouteChanged()) return;
+            recordCurrentDomBaseline();
+          });
+          observer.observe(rootNode, { childList: true, subtree: true, characterData: true });
+        }
+      } catch (_) {}
+    }
+  }
+
+  initNavigationTracking();
+
   function detectDomDeclaredConversationId() {
     if (typeof document === 'undefined' || !document.querySelector) return null;
-    const el = document.querySelector('[data-conversation-id]');
+    const scoped = document.querySelector('main [data-conversation-id], [role="main"] [data-conversation-id]');
+    const el = scoped || document.querySelector('[data-conversation-id]');
     const val = el?.getAttribute?.('data-conversation-id');
     return val ? String(val).trim() : null;
   }
@@ -156,6 +215,7 @@
   }
 
   function getPageStatus() {
+    checkRouteChanged();
     const adapter = getAdapter();
     const url = window.location?.href || '';
     const info = adapter ? adapter.detectPlatform(url) : null;
@@ -163,6 +223,10 @@
     const extracted = info.platform === 'claude'
       ? adapter.extractClaudeDom(document, url)
       : adapter.extractGeminiDom(document, url);
+    if (!pendingNavTransition && info.conversationId) {
+      const sig = computeDomTurnSignature(extracted);
+      if (sig) lastDomState = { url, platform: info.platform, convId: info.conversationId, signature: sig };
+    }
     return {
       platform: info.platform,
       conversationId: info.conversationId,
@@ -218,14 +282,17 @@
               const domCid = detectDomDeclaredConversationId();
               return Boolean(domCid && startConvId && domCid !== startConvId);
             };
-            const isStaleFromOtherConv = () => Boolean(
-              domDeclMismatch() ||
-              (lastDomState && startConvId && lastDomState.convId && lastDomState.convId !== startConvId &&
-               lastDomState.signature && sig && sig === lastDomState.signature)
-            );
+            const isStaleFromOtherConv = () => {
+              if (domDeclMismatch()) return true;
+              if (lastDomState && startConvId && lastDomState.convId && lastDomState.convId !== startConvId) {
+                if (lastDomState.signature && sig && sig === lastDomState.signature) return true;
+              }
+              return false;
+            };
+            const needsPostNavRenderWait = () => pendingNavTransition && !sig;
 
-            if (isStaleFromOtherConv()) {
-              for (let waitStep = 0; waitStep < 5; waitStep++) {
+            if (isStaleFromOtherConv() || needsPostNavRenderWait()) {
+              for (let waitStep = 0; waitStep < 8; waitStep++) {
                 await new Promise(r => setTimeout(r, 80));
                 if (controller?.signal?.aborted || checkRouteChanged() || navGeneration !== startNavGen || (window.location?.href || '') !== startHref) {
                   sendResponse({ success: false, error: 'NAVIGATION_ABORT: La conversación cambió durante la espera de convergencia DOM.' });
@@ -233,7 +300,7 @@
                 }
                 data = extractNow(startHref, infoAtStart.platform);
                 sig = computeDomTurnSignature(data);
-                if (!isStaleFromOtherConv()) break;
+                if (!isStaleFromOtherConv() && !needsPostNavRenderWait()) break;
               }
               if (isStaleFromOtherConv()) {
                 sendResponse({
@@ -268,8 +335,9 @@
               return;
             }
 
+            pendingNavTransition = false;
             if (startConvId && sig) {
-              lastDomState = { url: startHref, convId: startConvId, signature: sig };
+              lastDomState = { url: startHref, platform: infoAtStart.platform, convId: startConvId, signature: sig };
             }
             sendResponse({ success: true, data });
           } catch (err) {
