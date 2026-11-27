@@ -1305,6 +1305,8 @@ test('R44 P1: arranque frío sin notificaciones ni reloj monotónico aborta SAVE
     );
   });
 
+  await Promise.resolve();
+  await Promise.resolve();
   const pending = [];
   for (let i = 1; i <= 20; i++) pending.push(sendSaveClip(`clip_cold_${i}`));
   await new ColdLinerDB().clearAll();
@@ -1315,5 +1317,70 @@ test('R44 P1: arranque frío sin notificaciones ni reloj monotónico aborta SAVE
 
   const after = await sendSaveClip('clip_after');
   assert.equal(after.success, true);
+  assert.equal(savedClips.size, 1);
+});
+
+test('R46: borrado histórico antes de arranque frío no rechaza SAVE_CLIP enviado antes de terminar open()', async () => {
+  const vm = require('node:vm');
+  const fs = require('node:fs');
+  const path = require('node:path');
+
+  const persistedEpoch = 2; // borrado histórico ya finalizado antes de iniciar el worker
+  const savedClips = new Map();
+
+  class HistoricalWipeLinerDB {
+    constructor() {
+      this._wipeEpoch = 0;
+      this._knownIdbWipeEpoch = 0;
+      this.db = null;
+    }
+    async open() {
+      await new Promise(r => setTimeout(r, 15));
+      this.db = {};
+      if (persistedEpoch > this._knownIdbWipeEpoch) this._knownIdbWipeEpoch = persistedEpoch;
+      return this;
+    }
+    getWipeEpoch() { return this._wipeEpoch; }
+    _resolveBaselineIdbEpoch(opts) {
+      if (opts && Number.isInteger(opts.expectedIdbWipeEpoch)) return opts.expectedIdbWipeEpoch;
+      return this._knownIdbWipeEpoch;
+    }
+    async saveClip(clip, opts = {}) {
+      await this.open();
+      const base = this._resolveBaselineIdbEpoch(opts);
+      if (persistedEpoch > base) throw new Error('WRITE_ABORTED_BY_CLEAR_ALL');
+      savedClips.set(clip.canonicalId, clip);
+      return clip.canonicalId;
+    }
+  }
+
+  let onMessageHandler = null;
+  const sandbox = {
+    console,
+    Promise,
+    importScripts: () => {},
+    LinerDB: HistoricalWipeLinerDB,
+    chrome: {
+      runtime: {
+        id: 'test-ext-id',
+        onInstalled: { addListener: () => {} },
+        onMessage: { addListener: fn => { onMessageHandler = fn; } },
+        getURL: p => p
+      },
+      tabs: { create: () => {} }
+    }
+  };
+  const swCode = fs.readFileSync(path.resolve(__dirname, '../../extension/src/background/service_worker.js'), 'utf8');
+  vm.runInNewContext(swCode, sandbox);
+
+  // Enviar SAVE_CLIP inmediatamente antes de que open() termine
+  const res = await new Promise(resolve => {
+    onMessageHandler(
+      { action: 'SAVE_CLIP', clip: { canonicalId: 'clip_hist_ok', title: 'Hist', selectedMessages: [{ id: 'm1', role: 'user', content: { text: 'hola' } }] } },
+      { id: 'test-ext-id' },
+      resolve
+    );
+  });
+  assert.equal(res.success, true);
   assert.equal(savedClips.size, 1);
 });

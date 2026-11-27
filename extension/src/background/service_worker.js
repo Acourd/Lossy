@@ -1,6 +1,7 @@
 importScripts('../core/storage/liner_db.js');
 const clipDb = new LinerDB();
-clipDb.open().catch(() => {});
+let startupHydrated = false;
+const startupReady = clipDb.open().then(() => { startupHydrated = true; }).catch(() => { startupHydrated = true; });
 let clipWriteQueue=Promise.resolve();
 /**
  * AI Conversation Portability (AICP / Liner) — Background Service Worker (Manifest V3)
@@ -17,8 +18,12 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
   if(request.action==='SAVE_CLIP'){
     if(typeof request.clip?.canonicalId !== 'string' || !request.clip.canonicalId.startsWith('clip_')){sendResponse({success:false,error:'Clip inválido'});return false;}
     const enqueuedWipeEpoch = clipDb.getWipeEpoch();
-    const expectedIdbWipeEpoch = clipDb._resolveBaselineIdbEpoch();
-    const write = () => clipDb.saveClip(request.clip, { expectedWipeEpoch: enqueuedWipeEpoch, expectedIdbWipeEpoch });
+    const syncIdbEpoch = startupHydrated ? clipDb._resolveBaselineIdbEpoch() : null;
+    const write = async () => {
+      if (!startupHydrated) await startupReady;
+      const expectedIdbWipeEpoch = syncIdbEpoch !== null ? syncIdbEpoch : clipDb._resolveBaselineIdbEpoch();
+      return clipDb.saveClip(request.clip, { expectedWipeEpoch: enqueuedWipeEpoch, expectedIdbWipeEpoch });
+    };
     const job=clipWriteQueue.then(write,write);clipWriteQueue=job;
     job.then(id=>sendResponse({success:true,id})).catch(error=>sendResponse({success:false,error:error.message}));
     return true;
