@@ -183,17 +183,47 @@
         const base = String(m || '').split(';')[0].trim().toLowerCase();
         return base === 'image/jpg' ? 'image/jpeg' : base;
       };
+      const isDataUriStr = (u) => typeof u === 'string' && /^data:/i.test(u);
+      const parseDataUriMime = (u) => (isDataUriStr(u) ? normMime(u.slice(5).split(';')[0]) : '');
+      const toRawBytes = (rawData, uri) => {
+        if (rawData instanceof Uint8Array) return rawData;
+        if (ArrayBuffer.isView(rawData)) return new Uint8Array(rawData.buffer, rawData.byteOffset, rawData.byteLength);
+        if (rawData instanceof ArrayBuffer) return new Uint8Array(rawData);
+        if (Array.isArray(rawData) || (rawData && typeof rawData.length === 'number' && typeof rawData !== 'string')) return new Uint8Array(rawData);
+        if (isDataUriStr(uri)) return dataUriToUint8Array(uri);
+        return null;
+      };
+      const detectMagicMime = (bytes) => {
+        if (!bytes || bytes.length < 4) return '';
+        if (bytes[0] === 0x25 && bytes[1] === 0x50 && bytes[2] === 0x44 && bytes[3] === 0x46 && (bytes.length < 5 || bytes[4] === 0x2D)) return 'application/pdf';
+        if (bytes[0] === 0x89 && bytes[1] === 0x50 && bytes[2] === 0x4E && bytes[3] === 0x47) return 'image/png';
+        if (bytes[0] === 0xFF && bytes[1] === 0xD8 && bytes[2] === 0xFF) return 'image/jpeg';
+        if (bytes[0] === 0x47 && bytes[1] === 0x49 && bytes[2] === 0x46 && bytes[3] === 0x38) return 'image/gif';
+        if (bytes.length >= 12 && bytes[0] === 0x52 && bytes[1] === 0x49 && bytes[2] === 0x46 && bytes[3] === 0x46 &&
+            bytes[8] === 0x57 && bytes[9] === 0x45 && bytes[10] === 0x42 && bytes[11] === 0x50) return 'image/webp';
+        return '';
+      };
+      const mimeFromFilename = (name) => {
+        const lower = String(name || '').toLowerCase();
+        if (lower.endsWith('.png')) return 'image/png';
+        if (lower.endsWith('.jpg') || lower.endsWith('.jpeg')) return 'image/jpeg';
+        if (lower.endsWith('.gif')) return 'image/gif';
+        if (lower.endsWith('.webp')) return 'image/webp';
+        if (lower.endsWith('.pdf')) return 'application/pdf';
+        return '';
+      };
       const isGenericMime = (m) => !m || m === 'application/octet-stream';
-      const areMimesCompatible = (target, att, dataURI) => {
-        const candMime = normMime(target?.mimeType);
-        const attMime = normMime(att?.mimeType);
-        const uriMime = (typeof dataURI === 'string' && dataURI.startsWith('data:'))
-          ? normMime(dataURI.slice(5).split(';')[0])
-          : '';
-        if (attMime && !isGenericMime(candMime) && !isGenericMime(attMime) && attMime !== candMime) return false;
-        if (uriMime && !isGenericMime(candMime) && !isGenericMime(uriMime) && uriMime !== candMime) return false;
-        if (att?.kind && target?.mimeType && !isGenericMime(candMime)) {
-          if (att.kind === 'image' && !candMime.startsWith('image/')) return false;
+      const areMimesCompatible = (target, att, dataURI, localBlob) => {
+        const candMime = normMime(target?.mimeType) || mimeFromFilename(target?.filename);
+        const attMime = normMime(att?.mimeType) || normMime(localBlob?.type);
+        const uriMime = parseDataUriMime(dataURI);
+        const magicMime = detectMagicMime(toRawBytes(localBlob, dataURI));
+        const incomingMimes = [attMime, uriMime, magicMime].filter(m => m && !isGenericMime(m));
+        if (!isGenericMime(candMime)) {
+          for (const inc of incomingMimes) {
+            if (inc !== candMime) return false;
+          }
+          if (att?.kind === 'image' && !candMime.startsWith('image/')) return false;
         }
         return true;
       };
@@ -243,12 +273,12 @@
           const resolvedFileId = (typeof att.fileId === 'string' && att.fileId) || safePtr?.replace(/^(?:sediment|file-service):\/\//, '') || null;
           const isBareHydrationStub = !att.assetId && !att.filename && !att.name && !remoteURL && !att.fileId && !att.assetPointer && !att.kind && Boolean(dataURI) && !localBlob;
           let existing = resolvedFileId ? index.fileIds.get(resolvedFileId) : index.assetIds.get(rawAssetId);
-          if (existing && !areMimesCompatible(existing, att, dataURI)) {
+          if (existing && !areMimesCompatible(existing, att, dataURI, localBlob)) {
             existing = null;
           }
           if (!existing && isBareHydrationStub && index.fileIds.has(rawAssetId)) {
             const candidate = index.fileIds.get(rawAssetId);
-            if (candidate && !candidate.dataURI && !candidate.data && areMimesCompatible(candidate, att, dataURI)) {
+            if (candidate && !candidate.dataURI && !candidate.data && areMimesCompatible(candidate, att, dataURI, localBlob)) {
               existing = candidate;
             }
           }
@@ -263,7 +293,8 @@
           emittedMsgExplicitIds.add(rawAssetId);
           const assetId = allocateUniqueAssetId(rawAssetId, mIdx, aIdx);
 
-          const mimeType = att.mimeType || (att.kind === 'image' ? 'image/png' : 'application/octet-stream');
+          const resolvedAttMime = normMime(att.mimeType) || normMime(localBlob?.type) || parseDataUriMime(dataURI) || detectMagicMime(toRawBytes(localBlob, dataURI));
+          const mimeType = resolvedAttMime || (att.kind === 'image' ? 'image/png' : 'application/octet-stream');
           const ext = mimeType.includes('jpeg') || mimeType.includes('jpg') ? 'jpg' : (mimeType.includes('png') ? 'png' : (mimeType.includes('pdf') ? 'pdf' : 'bin'));
           const filename = att.filename || att.name || `image_${mIdx}_${aIdx}.${ext}`;
 
@@ -343,14 +374,14 @@
           const imgUrl = match[2].replace(/^<|>$/g, '');
           if (!imgUrl || imgUrl.includes('\u0000') || index.locations.has(imgUrl)) continue;
           const cleanAlt = match[1].replace(/\u0000CODE\u0000/g, '');
-          const isInlineData = imgUrl.startsWith('data:');
+          const isInlineData = isDataUriStr(imgUrl);
           const rawMdId = `md_img_${mIdx}_${imgIdx++}`;
           const scopedKey = `md::${msgId}::${imgIdx}`;
           if (seenKeys.has(scopedKey)) continue;
           seenKeys.add(scopedKey);
           const assetId = allocateUniqueAssetId(rawMdId, mIdx, imgIdx);
 
-          const mimeType = isInlineData ? (imgUrl.split(';')[0].replace('data:', '') || 'image/png') : 'image/png';
+          const mimeType = isInlineData ? (parseDataUriMime(imgUrl) || 'image/png') : 'image/png';
           const ext = mimeType.includes('jpeg') || mimeType.includes('jpg') ? 'jpg' : 'png';
           const filename = cleanAlt ? `${cleanAlt.replace(/[^a-zA-Z0-9_\-]/g, '_').slice(0, 24)}.${ext}` : `inline_img_${mIdx}_${imgIdx}.${ext}`;
 
@@ -404,14 +435,7 @@
           return true;
         };
 
-        const toBytes = (rawData, uri) => {
-          if (rawData instanceof Uint8Array) return rawData;
-          if (ArrayBuffer.isView(rawData)) return new Uint8Array(rawData.buffer, rawData.byteOffset, rawData.byteLength);
-          if (rawData instanceof ArrayBuffer) return new Uint8Array(rawData);
-          if (Array.isArray(rawData) || (rawData && typeof rawData.length === 'number' && typeof rawData !== 'string')) return new Uint8Array(rawData);
-          if (typeof uri === 'string' && uri.startsWith('data:')) return dataUriToUint8Array(uri);
-          return null;
-        };
+        const toBytes = toRawBytes;
         const bytesEqual = (aBytes, bBytes) => {
           if (!aBytes || !bBytes || aBytes.length !== bBytes.length) return false;
           for (let i = 0; i < aBytes.length; i++) if (aBytes[i] !== bBytes[i]) return false;
@@ -425,7 +449,7 @@
           (att.sourceMessageId && records.find(r => r.sourceMessageId === att.sourceMessageId && (r.id === rawTopId || r.assetId === rawTopId))) ||
           null;
 
-        if (exactMirror && !areMimesCompatible(exactMirror, att, dataURI)) {
+        if (exactMirror && !areMimesCompatible(exactMirror, att, dataURI, localBlob)) {
           exactMirror = null;
         }
         if (exactMirror) {
@@ -652,10 +676,8 @@
     let inIndented = false;
     let fenceChar = '';
     let fenceLen = 0;
-    let fenceBqDepth = 0;
-    let fenceListIndent = 0;
-    let listStack = [];
-    let activeBqDepth = 0;
+    let fenceContainers = [];
+    let containers = [];
     let prevLineBlank = true;
 
     const flush = isCode => {
@@ -664,76 +686,85 @@
         buf = [];
       }
     };
-    const stripExactBq = (line, targetDepth) => {
+    const matchFenceContainers = (line, fcStack) => {
       let rest = line;
-      let depth = 0;
-      while (depth < targetDepth) {
-        const bq = rest.match(/^ {0,3}>[ \t]?/);
-        if (!bq) break;
-        depth++;
-        rest = rest.slice(bq[0].length);
-      }
-      return { depth, rest };
-    };
-    const parseContainers = line => {
-      let rest = line;
-      let bqDepth = 0;
-      while (true) {
-        const bq = rest.match(/^ {0,3}>[ \t]?/);
-        if (!bq) break;
-        bqDepth++;
-        rest = rest.slice(bq[0].length);
-      }
-      const isBlank = rest.trim().length === 0;
-      if (bqDepth !== activeBqDepth) {
-        listStack = [];
-        activeBqDepth = bqDepth;
-      }
-      let leadSpaces = (rest.match(/^ */) || [''])[0].length;
-      if (!isBlank) {
-        while (listStack.length > 0 && listStack[listStack.length - 1] > leadSpaces) {
-          listStack.pop();
+      const hasBq = fcStack.some(c => c.type === 'bq');
+      for (const c of fcStack) {
+        if (c.type === 'bq') {
+          const m = rest.match(/^ {0,3}>[ \t]?/);
+          if (!m) return { bqOk: false, rest };
+          rest = rest.slice(m[0].length);
+        } else {
+          const sp = (rest.match(/^ */) || [''])[0].length;
+          if (sp >= c.indent) rest = rest.slice(c.indent);
+          else if (hasBq && rest.trim().length > 0) return { bqOk: false, rest };
+          else rest = rest.slice(sp);
         }
       }
-      let hadList = false;
-      let consumedCol = (!isBlank && listStack.length > 0) ? listStack[listStack.length - 1] : 0;
-      if (consumedCol > 0) rest = rest.slice(consumedCol);
-      while (!isBlank) {
-        const lst = rest.match(/^ {0,3}(?:[-*+]|\d{1,9}[.)])[ \t]+/);
-        if (!lst) break;
-        hadList = true;
-        consumedCol += lst[0].length;
-        listStack.push(consumedCol);
-        rest = rest.slice(lst[0].length);
+      return { bqOk: true, rest };
+    };
+    const advanceContainers = line => {
+      let rest = line;
+      let matched = 0;
+      while (matched < containers.length) {
+        const c = containers[matched];
+        if (c.type === 'bq') {
+          const m = rest.match(/^ {0,3}>[ \t]?/);
+          if (!m) break;
+          rest = rest.slice(m[0].length);
+          matched++;
+        } else {
+          if (rest.trim().length === 0) {
+            matched++;
+            continue;
+          }
+          const sp = (rest.match(/^ */) || [''])[0].length;
+          if (sp < c.indent) break;
+          rest = rest.slice(c.indent);
+          matched++;
+        }
       }
-      const effectiveListIndent = listStack.length > 0 ? listStack[listStack.length - 1] : 0;
-      return { bqDepth, hadList, effectiveListIndent, rest, rawAfterBqIsBlank: isBlank };
+      containers.length = matched;
+      let hadMarker = false;
+      while (rest.trim().length > 0) {
+        const bq = rest.match(/^ {0,3}>[ \t]?/);
+        if (bq) {
+          containers.push({ type: 'bq' });
+          rest = rest.slice(bq[0].length);
+          hadMarker = true;
+          continue;
+        }
+        const lst = rest.match(/^ {0,3}(?:[-*+]|\d{1,9}[.)])[ \t]+/);
+        if (lst) {
+          containers.push({ type: 'list', indent: lst[0].length });
+          rest = rest.slice(lst[0].length);
+          hadMarker = true;
+          continue;
+        }
+        break;
+      }
+      return { rest, hadMarker, isBlank: rest.trim().length === 0 };
     };
 
     for (const line of lines) {
       if (inFence) {
-        const { depth, rest } = stripExactBq(line, fenceBqDepth);
+        const { bqOk, rest } = matchFenceContainers(line, fenceContainers);
         const isBlank = rest.trim().length === 0;
-        if (fenceBqDepth > 0 && depth < fenceBqDepth) {
+        if (!bqOk) {
           flush(true);
           inFence = false;
           fenceChar = '';
           fenceLen = 0;
-          fenceBqDepth = 0;
-          fenceListIndent = 0;
+          fenceContainers = [];
         } else {
           buf.push(line);
-          const closeRe = fenceListIndent > 0
-            ? new RegExp('^ {0,' + (fenceListIndent + 3) + '}(`{3,}|~{3,})[ \\t]*$')
-            : /^ {0,3}(`{3,}|~{3,})[ \t]*$/;
-          const closeM = rest.match(closeRe);
+          const closeM = rest.match(/^ {0,3}(`{3,}|~{3,})[ \t]*$/);
           if (closeM && closeM[1][0] === fenceChar && closeM[1].length >= fenceLen) {
             flush(true);
             inFence = false;
             fenceChar = '';
             fenceLen = 0;
-            fenceBqDepth = 0;
-            fenceListIndent = 0;
+            fenceContainers = [];
             prevLineBlank = false;
           } else {
             prevLineBlank = isBlank;
@@ -742,8 +773,7 @@
         }
       }
 
-      const { bqDepth, hadList, effectiveListIndent, rest, rawAfterBqIsBlank } = parseContainers(line);
-      const isBlank = rawAfterBqIsBlank;
+      const { rest, hadMarker, isBlank } = advanceContainers(line);
 
       if (inIndented) {
         if (/^(?: {4}|\t)/.test(rest) || isBlank) {
@@ -761,14 +791,13 @@
         inFence = true;
         fenceChar = openM[1][0];
         fenceLen = openM[1].length;
-        fenceBqDepth = bqDepth;
-        fenceListIndent = effectiveListIndent;
+        fenceContainers = containers.map(c => ({ ...c }));
         buf.push(line);
         prevLineBlank = false;
         continue;
       }
 
-      if (!hadList && prevLineBlank && /^(?: {4}|\t)/.test(rest) && !isBlank) {
+      if (!hadMarker && prevLineBlank && /^(?: {4}|\t)/.test(rest) && !isBlank) {
         flush(false);
         inIndented = true;
         buf.push(line);
