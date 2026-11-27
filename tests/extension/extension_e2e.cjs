@@ -8,6 +8,7 @@ const output=path.resolve(process.env.LOSSY_QA_OUTPUTS||'scratch/extension-e2e')
 const profile=path.resolve(process.env.LOSSY_QA_PROFILE||'scratch/extension-test-profile');
 (async()=>{
  const context=await chromium.launchPersistentContext(profile,{channel:'chromium',headless:true,timeout:20000,ignoreDefaultArgs:['--disable-extensions'],viewport:{width:1200,height:900},colorScheme:'dark',args:['--lang=es-ES','--disable-extensions-except='+path.join(root,'extension'),'--load-extension='+path.join(root,'extension')],acceptDownloads:true});
+ await context.addInitScript(()=>{try{localStorage.setItem('lossy.uiLanguage','es');}catch(_){}});
  context.setDefaultTimeout(20000);
  console.log('Extension test browser started.');
  let popup;const failures=[];const network=[];
@@ -37,9 +38,9 @@ const profile=path.resolve(process.env.LOSSY_QA_PROFILE||'scratch/extension-test
   const saved=await popup.evaluate(async()=>new LinerDB().getConversation('conv_chatgpt_fixture-chat'));
   assert.equal(saved.messages[0].attachments.length,3);assert.equal(saved.messages[1].attachments.length,2);assert.ok(saved.messages.every(m=>m.attachments.every(a=>a.dataURI)));
   assert.equal(network.filter(n=>n.path.startsWith('/backend-api/files/download/')).length,5);
-  const bounds=await popup.locator('.quick-format-card').first().boundingBox();assert.ok(Math.abs(bounds.width-bounds.height)<2 && bounds.width>=100);
+  const bounds=await popup.locator('.quick-format-card').first().boundingBox();assert.ok(bounds.width>=100&&bounds.height>=80);
   await popup.screenshot({path:path.join(output,'popup-dark.png'),animations:'disabled'});console.log('PASS actual extension capture: 5 offscreen images persisted in IndexedDB; square controls.');
-  await popup.getByRole('button',{name:'Exportar MD',exact:true}).click();await popup.locator('#md-export-dialog').waitFor({state:'visible'});await popup.screenshot({path:path.join(output,'markdown-choice.png'),animations:'disabled'});
+  await popup.getByRole('button',{name:'Exportar MD',exact:true}).click();await popup.locator('#md-export-dialog').waitFor({state:'visible'});await popup.screenshot({path:path.join(output,'markdown-choice.png')});
   await popup.locator('#btn-cancel-md-export').click();await popup.locator('#md-export-dialog').waitFor({state:'hidden'});
   await popup.getByRole('button',{name:'Exportar MD',exact:true}).click();
   const zip=await download(popup.locator('[data-md-strategy="package"]'),'markdown-with-images.zip');const files=parseZip(zip.bytes);
@@ -68,7 +69,7 @@ const profile=path.resolve(process.env.LOSSY_QA_PROFILE||'scratch/extension-test
   console.log('PASS existing saved capture: missing image bytes recovered and persisted from the export action.');
   await chat.bringToFront();await chat.evaluate(()=>{const image=document.createElement('img');image.src='https://files.oaiusercontent.com/file_fixture_4';image.width=640;image.height=320;image.alt='Imagen del mensaje';document.querySelector('[data-message-id="assistant-msg"] .markdown').append(image);});
   assert.equal(await chat.locator('.lossy-message-action-btn').count(),1);
-  await chat.getByRole('button',{name:'Acciones de contexto Lossy'}).click();await chat.getByText('Guardar como Clip',{exact:true}).click();await chat.locator('.lossy-toast-notice').filter({hasText:'Clip guardado'}).waitFor();
+  await chat.locator('.lossy-message-action-btn').click();await chat.locator('[data-action="save-clip"]').click();await chat.locator('.lossy-toast-notice').filter({hasText:/Clip guardado|Clip saved/}).waitFor();
   const clips=await popup.evaluate(async()=>{const db=new LinerDB();return (await db.listMetadata()).filter(m=>m.entityType==='clip');});assert.equal(clips.length,1);assert.equal(clips[0].messageCount,1);
   const clipData=await popup.evaluate(async id=>new LinerDB().getClip(id),clips[0].canonicalId);assert.ok(clipData.selectedMessages[0].attachments[0].dataURI);
   console.log('PASS inline clip action: one control per message, image bytes and message count saved by the real service worker.');

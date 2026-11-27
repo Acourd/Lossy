@@ -519,8 +519,9 @@
         };
         tx.oncomplete = () => {
           if (settled) return;
+          settled = true;
           if (this.getWipeEpoch() !== writeEpoch) reject(new Error('WRITE_ABORTED_BY_CLEAR_ALL'));
-          else resolve(typeof resolveValue === 'function' ? resolveValue(resultVal) : resolveValue);
+          else resolve(resolveValue === undefined ? resultVal : (typeof resolveValue === 'function' ? resolveValue(resultVal) : resolveValue));
         };
         tx.onerror = () => { if (!settled) { settled = true; reject(tx.error || new Error('Error de almacenamiento')); } };
         tx.onabort = () => { if (!settled) { settled = true; reject(tx.error || new Error('Transacción abortada')); } };

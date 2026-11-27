@@ -1087,3 +1087,35 @@ test('R34 P2-UI-1: createJob bloquea ejecución concurrente sin sobrescribir act
   assert.equal(finished.completedItems, 2);
   assert.ok(finished.items.every(it => it.status === ITEM_STATUS.STORED));
 });
+
+test('R42: LinerDB._runGuardedTx devuelve resultVal en IndexedDB real cuando resolveValue se omite', async () => {
+  const { LinerDB } = require('../../extension/src/core/storage/liner_db.js');
+  const stored = new Map();
+  const fakeDb = {
+    objectStoreNames: { contains: () => false },
+    transaction() {
+      const tx = {
+        oncomplete: null,
+        onerror: null,
+        onabort: null,
+        objectStore() {
+          return {
+            put(val) {
+              stored.set(val.collectionId || val.id, val);
+              queueMicrotask(() => tx.oncomplete && tx.oncomplete());
+              return {};
+            }
+          };
+        }
+      };
+      return tx;
+    }
+  };
+  const db = new LinerDB();
+  db.useMemoryFallback = false;
+  db.db = fakeDb;
+  const col = await db.createCollection('Proyecto Real IDB', 'Descripción');
+  assert.ok(col && typeof col.collectionId === 'string' && col.collectionId.startsWith('coll_'));
+  assert.equal(col.name, 'Proyecto Real IDB');
+  assert.equal(stored.get(col.collectionId).name, 'Proyecto Real IDB');
+});

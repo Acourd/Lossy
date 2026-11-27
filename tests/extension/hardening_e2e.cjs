@@ -7,7 +7,7 @@ const out=path.resolve(process.env.LOSSY_QA_OUTPUTS||'scratch/hardening-qa');fs.
 const {deflatedZip}=require('./fixtures/zip_cases.cjs');
 const profile=path.resolve(process.env.LOSSY_QA_PROFILE||'scratch/hardening-profile');
 (async()=>{
- const context=await chromium.launchPersistentContext(profile,{channel:'chromium',headless:true,ignoreDefaultArgs:['--disable-extensions'],viewport:{width:1200,height:900},colorScheme:'dark',acceptDownloads:true,args:['--lang=es-ES','--disable-extensions-except='+path.join(root,'extension'),'--load-extension='+path.join(root,'extension')]});context.setDefaultTimeout(12000);
+ const context=await chromium.launchPersistentContext(profile,{channel:'chromium',headless:true,ignoreDefaultArgs:['--disable-extensions'],viewport:{width:1200,height:900},colorScheme:'dark',acceptDownloads:true,args:['--lang=es-ES','--disable-extensions-except='+path.join(root,'extension'),'--load-extension='+path.join(root,'extension')]});await context.addInitScript(()=>{try{localStorage.setItem('lossy.uiLanguage','es');}catch(_){}});context.setDefaultTimeout(12000);
  let gate;const errors=[];context.on('page',p=>p.on('pageerror',e=>errors.push(e.message)));
  await context.route('https://chatgpt.com/**',async route=>{
   const url=new URL(route.request().url()),p=url.pathname;
