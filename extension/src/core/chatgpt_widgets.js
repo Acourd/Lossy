@@ -1082,40 +1082,7 @@
 
   function transformSegment(segment, blockRenderer, mode) {
     const ranges = findTopLevelWidgetRanges(segment);
-    const cleanNonWidget = chunk => {
-      const lines = chunk.split('\n');
-      let prevBlank = true;
-      let inIndented = false;
-      const out = [];
-      let plainBuf = [];
-      const flushPlain = () => {
-        if (!plainBuf.length) return;
-        out.push(transformOutsideInlineCode(plainBuf.join('\n'), s => stripInlineControlTags(s, mode)));
-        plainBuf = [];
-      };
-      for (const line of lines) {
-        const isBlank = line.trim().length === 0;
-        if (inIndented) {
-          if (/^(?: {4}|\t)/.test(line) || isBlank) {
-            out.push(line);
-            prevBlank = isBlank;
-            continue;
-          }
-          inIndented = false;
-        }
-        if (prevBlank && /^(?: {4}|\t)/.test(line) && !isBlank) {
-          flushPlain();
-          inIndented = true;
-          out.push(line);
-          prevBlank = false;
-          continue;
-        }
-        plainBuf.push(line);
-        prevBlank = isBlank;
-      }
-      flushPlain();
-      return out.join('\n');
-    };
+    const cleanNonWidget = chunk => transformOutsideInlineCode(chunk, s => stripInlineControlTags(s, mode));
     let rebuilt = '';
     let cursor = 0;
     for (const r of ranges) {
@@ -1133,10 +1100,26 @@
     const segments = [];
     let buf = [];
     let inFence = false;
+    let inIndented = false;
+    let indentedBqCount = 0;
     let fenceChar = '';
     let fenceLen = 0;
     let fenceContainers = [];
     let containers = [];
+    let prevLineBlank = true;
+    let widgetDepth = 0;
+
+    const updateWidgetDepth = (s) => {
+      const openRe = /<(grid|card|row|col|stack|box|flex|svg)\b[^>]*>/gi;
+      const closeRe = /<\/(grid|card|row|col|stack|box|flex|svg)\s*>/gi;
+      let m;
+      while ((m = openRe.exec(s)) !== null) {
+        if (!/\/>\s*$/.test(m[0])) widgetDepth++;
+      }
+      while ((m = closeRe.exec(s)) !== null) {
+        if (widgetDepth > 0) widgetDepth--;
+      }
+    };
 
     const flush = isCode => {
       if (buf.length) {
@@ -1247,12 +1230,14 @@
         }
       }
       containers.length = matched;
+      let hadMarker = false;
       while (rest.trim().length > 0) {
         const bq = matchBq(rest, col);
         if (bq.ok) {
           containers.push({ type: 'bq' });
           rest = bq.rest;
           col = bq.col;
+          hadMarker = true;
           continue;
         }
         const lst = matchList(rest, col);
@@ -1260,16 +1245,20 @@
           containers.push({ type: 'list', indent: lst.indent });
           rest = lst.rest;
           col = lst.col;
+          hadMarker = true;
           continue;
         }
         break;
       }
-      return { rest, col };
+      return { rest, col, hadMarker, isBlank: rest.trim().length === 0 };
     };
+
+    const isWidgetTagLine = s => /^(?:<\/?(?:grid|card|row|col|stack|box|flex|svg|title|text|caption|divider|favicon|link|slider|bar|metric|chart|table)\b|\{@(?:body|state)|\{#each\b|\{\/each\})/i.test(s);
 
     for (const line of lines) {
       if (inFence) {
         const { ok, rest, col } = matchFenceContainers(line, fenceContainers);
+        const isBlank = rest.trim().length === 0;
         if (!ok) {
           flush(true);
           inFence = false;
@@ -1286,13 +1275,29 @@
             fenceChar = '';
             fenceLen = 0;
             fenceContainers = [];
+            prevLineBlank = false;
+          } else {
+            prevLineBlank = isBlank;
           }
           continue;
         }
       }
 
-      const { rest, col } = advanceContainers(line);
+      const { rest, col, hadMarker, isBlank } = advanceContainers(line);
       const lead = measureLeadCols(rest, col);
+      const curBqCount = containers.filter(c => c.type === 'bq').length;
+
+      if (inIndented) {
+        if (curBqCount >= indentedBqCount && (lead.cols >= 4 || isBlank)) {
+          buf.push(line);
+          prevLineBlank = isBlank;
+          continue;
+        }
+        flush(true);
+        inIndented = false;
+        indentedBqCount = 0;
+      }
+
       const openM = lead.cols <= 3 ? rest.slice(lead.idx).match(/^(`{3,}|~{3,})(.*)$/) : null;
       if (openM && !(openM[1][0] === '`' && openM[2].includes('`'))) {
         flush(false);
@@ -1301,11 +1306,27 @@
         fenceLen = openM[1].length;
         fenceContainers = containers.map(c => ({ ...c }));
         buf.push(line);
+        prevLineBlank = false;
         continue;
       }
+
+      const trimmedAfterLead = rest.slice(lead.idx);
+      if ((hadMarker || prevLineBlank) && lead.cols >= 4 && !isBlank && !(curBqCount === 0 && (widgetDepth > 0 || isWidgetTagLine(trimmedAfterLead)))) {
+        flush(false);
+        inIndented = true;
+        indentedBqCount = curBqCount;
+        buf.push(line);
+        prevLineBlank = false;
+        continue;
+      }
+
+      if (curBqCount === 0 && !isBlank) {
+        updateWidgetDepth(trimmedAfterLead);
+      }
       buf.push(line);
+      prevLineBlank = isBlank;
     }
-    flush(inFence);
+    flush(inFence || inIndented);
     return segments;
   }
 

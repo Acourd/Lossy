@@ -111,6 +111,44 @@
     return btoa(binary);
   }
 
+  function normMimeType(m) {
+    const base = String(m || '').split(';')[0].trim().toLowerCase();
+    return base === 'image/jpg' ? 'image/jpeg' : base;
+  }
+
+  function isGenericMimeType(m) {
+    return !m || m === 'application/octet-stream';
+  }
+
+  function isDataUriString(u) {
+    return typeof u === 'string' && /^data:/i.test(u);
+  }
+
+  function parseDataUriMimeType(u) {
+    return isDataUriString(u) ? normMimeType(u.slice(5).split(';')[0]) : '';
+  }
+
+  function detectMagicMimeType(bytes) {
+    if (!bytes || bytes.length < 4) return '';
+    if (bytes[0] === 0x25 && bytes[1] === 0x50 && bytes[2] === 0x44 && bytes[3] === 0x46 && (bytes.length < 5 || bytes[4] === 0x2D)) return 'application/pdf';
+    if (bytes[0] === 0x89 && bytes[1] === 0x50 && bytes[2] === 0x4E && bytes[3] === 0x47) return 'image/png';
+    if (bytes[0] === 0xFF && bytes[1] === 0xD8 && bytes[2] === 0xFF) return 'image/jpeg';
+    if (bytes[0] === 0x47 && bytes[1] === 0x49 && bytes[2] === 0x46 && bytes[3] === 0x38) return 'image/gif';
+    if (bytes.length >= 12 && bytes[0] === 0x52 && bytes[1] === 0x49 && bytes[2] === 0x46 && bytes[3] === 0x46 &&
+        bytes[8] === 0x57 && bytes[9] === 0x45 && bytes[10] === 0x42 && bytes[11] === 0x50) return 'image/webp';
+    return '';
+  }
+
+  function mimeFromAssetFilename(name) {
+    const lower = String(name || '').toLowerCase();
+    if (lower.endsWith('.png')) return 'image/png';
+    if (lower.endsWith('.jpg') || lower.endsWith('.jpeg')) return 'image/jpeg';
+    if (lower.endsWith('.gif')) return 'image/gif';
+    if (lower.endsWith('.webp')) return 'image/webp';
+    if (lower.endsWith('.pdf')) return 'application/pdf';
+    return '';
+  }
+
   function resolveDataUriForAsset(att, assetBinaryMap) {
     if (!att) return null;
     if (att.dataURI) return att.dataURI;
@@ -179,12 +217,9 @@
         seenMsgAssetIds.add(candidate);
         return candidate;
       };
-      const normMime = (m) => {
-        const base = String(m || '').split(';')[0].trim().toLowerCase();
-        return base === 'image/jpg' ? 'image/jpeg' : base;
-      };
-      const isDataUriStr = (u) => typeof u === 'string' && /^data:/i.test(u);
-      const parseDataUriMime = (u) => (isDataUriStr(u) ? normMime(u.slice(5).split(';')[0]) : '');
+      const normMime = normMimeType;
+      const isDataUriStr = isDataUriString;
+      const parseDataUriMime = parseDataUriMimeType;
       const toRawBytes = (rawData, uri) => {
         if (rawData instanceof Uint8Array) return rawData;
         if (ArrayBuffer.isView(rawData)) return new Uint8Array(rawData.buffer, rawData.byteOffset, rawData.byteLength);
@@ -193,26 +228,9 @@
         if (isDataUriStr(uri)) return dataUriToUint8Array(uri);
         return null;
       };
-      const detectMagicMime = (bytes) => {
-        if (!bytes || bytes.length < 4) return '';
-        if (bytes[0] === 0x25 && bytes[1] === 0x50 && bytes[2] === 0x44 && bytes[3] === 0x46 && (bytes.length < 5 || bytes[4] === 0x2D)) return 'application/pdf';
-        if (bytes[0] === 0x89 && bytes[1] === 0x50 && bytes[2] === 0x4E && bytes[3] === 0x47) return 'image/png';
-        if (bytes[0] === 0xFF && bytes[1] === 0xD8 && bytes[2] === 0xFF) return 'image/jpeg';
-        if (bytes[0] === 0x47 && bytes[1] === 0x49 && bytes[2] === 0x46 && bytes[3] === 0x38) return 'image/gif';
-        if (bytes.length >= 12 && bytes[0] === 0x52 && bytes[1] === 0x49 && bytes[2] === 0x46 && bytes[3] === 0x46 &&
-            bytes[8] === 0x57 && bytes[9] === 0x45 && bytes[10] === 0x42 && bytes[11] === 0x50) return 'image/webp';
-        return '';
-      };
-      const mimeFromFilename = (name) => {
-        const lower = String(name || '').toLowerCase();
-        if (lower.endsWith('.png')) return 'image/png';
-        if (lower.endsWith('.jpg') || lower.endsWith('.jpeg')) return 'image/jpeg';
-        if (lower.endsWith('.gif')) return 'image/gif';
-        if (lower.endsWith('.webp')) return 'image/webp';
-        if (lower.endsWith('.pdf')) return 'application/pdf';
-        return '';
-      };
-      const isGenericMime = (m) => !m || m === 'application/octet-stream';
+      const detectMagicMime = detectMagicMimeType;
+      const mimeFromFilename = mimeFromAssetFilename;
+      const isGenericMime = isGenericMimeType;
       const areMimesCompatible = (target, att, dataURI, localBlob) => {
         const candMime = normMime(target?.mimeType) || mimeFromFilename(target?.filename);
         const attMime = normMime(att?.mimeType);
@@ -572,6 +590,16 @@
       };
       const idKeys = new Set(assets.map(a => a.assetId).filter(Boolean));
       const bind = (asset, bytes, availability) => {
+        const magicMime = detectMagicMimeType(bytes);
+        const declaredMime = normMimeType(asset.mimeType) || mimeFromAssetFilename(asset.filename);
+        if (magicMime && declaredMime && !isGenericMimeType(declaredMime) && magicMime !== declaredMime) {
+          asset.warnings = [...(asset.warnings || []), `Firma binaria incompatible (${magicMime} != ${declaredMime})`];
+          asset.error = asset.warnings[asset.warnings.length - 1];
+          asset.data = null;
+          asset.dataURI = null;
+          asset.availability = ASSET_AVAILABILITY.UNAVAILABLE;
+          return;
+        }
         asset.data = bytes;
         asset.availability = availability;
         assetBinaryMap.set(asset.assetId, bytes);
@@ -685,6 +713,7 @@
     let buf = [];
     let inFence = false;
     let inIndented = false;
+    let indentedBqCount = 0;
     let fenceChar = '';
     let fenceLen = 0;
     let fenceContainers = [];
@@ -853,15 +882,17 @@
 
       const { rest, col, hadMarker, isBlank } = advanceContainers(line);
       const lead = measureLeadCols(rest, col);
+      const curBqCount = containers.filter(c => c.type === 'bq').length;
 
       if (inIndented) {
-        if (lead.cols >= 4 || isBlank) {
+        if (curBqCount >= indentedBqCount && (lead.cols >= 4 || isBlank)) {
           buf.push(line);
           prevLineBlank = isBlank;
           continue;
         }
         flush(true);
         inIndented = false;
+        indentedBqCount = 0;
       }
 
       const openM = lead.cols <= 3 ? rest.slice(lead.idx).match(/^(`{3,}|~{3,})(.*)$/) : null;
@@ -876,9 +907,10 @@
         continue;
       }
 
-      if (!hadMarker && prevLineBlank && lead.cols >= 4 && !isBlank) {
+      if ((hadMarker || prevLineBlank) && lead.cols >= 4 && !isBlank) {
         flush(false);
         inIndented = true;
+        indentedBqCount = curBqCount;
         buf.push(line);
         prevLineBlank = false;
         continue;
