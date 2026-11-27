@@ -169,6 +169,16 @@
 
       const seenKeys = new Set();
       const seenMsgAssetIds = new Set();
+      const allocateUniqueAssetId = (rawId, mIdx, aIdx) => {
+        let candidate = rawId;
+        let disambig = 1;
+        while (seenMsgAssetIds.has(candidate)) {
+          candidate = `${rawId}__u${mIdx}_${aIdx}_${disambig++}`;
+        }
+        seenMsgAssetIds.add(rawId);
+        seenMsgAssetIds.add(candidate);
+        return candidate;
+      };
       let activeMessageIndex = null;
       const addAsset = asset => {
         records.push(asset);
@@ -204,7 +214,8 @@
           }
 
           const rawAssetId = att.assetId || att.id || `asset_${mIdx}_${aIdx}`;
-          const identity = att.fileId || att.assetPointer?.replace(/^(?:sediment|file-service):\/\//, '') || rawAssetId;
+          const safePtr = typeof att.assetPointer === 'string' ? att.assetPointer : null;
+          const identity = (typeof att.fileId === 'string' && att.fileId) || safePtr?.replace(/^(?:sediment|file-service):\/\//, '') || rawAssetId;
           const existing = index.identities.get(identity);
           if (existing) {
             if (!existing.dataURI && dataURI) { existing.dataURI=dataURI;existing.availability='embedded';index.locations.add(dataURI); }
@@ -213,13 +224,7 @@
           const scopedKey = `${msgId}::${rawAssetId}`;
           if (seenKeys.has(scopedKey)) return;
           seenKeys.add(scopedKey);
-          let assetId = rawAssetId;
-          let disambig = 1;
-          while (seenMsgAssetIds.has(assetId)) {
-            assetId = `${rawAssetId}__u${mIdx}_${aIdx}_${disambig++}`;
-          }
-          seenMsgAssetIds.add(rawAssetId);
-          seenMsgAssetIds.add(assetId);
+          const assetId = allocateUniqueAssetId(rawAssetId, mIdx, aIdx);
 
           const mimeType = att.mimeType || (att.kind === 'image' ? 'image/png' : 'application/octet-stream');
           const ext = mimeType.includes('jpeg') || mimeType.includes('jpg') ? 'jpg' : (mimeType.includes('png') ? 'png' : 'bin');
@@ -238,8 +243,8 @@
             dataURI,
             data: localBlob,
             sourceURL: remoteURL,
-            assetPointer: att.assetPointer || null,
-            fileId: att.fileId || att.assetPointer?.replace(/^(?:sediment|file-service):\/\//, '') || null,
+            assetPointer: safePtr,
+            fileId: (typeof att.fileId === 'string' && att.fileId) || safePtr?.replace(/^(?:sediment|file-service):\/\//, '') || null,
             warnings,
             error: availability === ASSET_AVAILABILITY.UNAVAILABLE ? warnings[0] : null
           });
@@ -251,9 +256,11 @@
             if (part && typeof part === 'object' && (part.content_type === 'image_asset_pointer' || part.asset_pointer)) {
               const ptr = part.asset_pointer || part.id || `img_ptr_${mIdx}_${pIdx}`;
               if (index.pointers.has(ptr)) return;
-              const assetId = `ptr_${mIdx}_${pIdx}`;
-              if (seenKeys.has(assetId)) return;
-              seenKeys.add(assetId);
+              const rawPtrId = `ptr_${mIdx}_${pIdx}`;
+              const scopedPtrKey = `${msgId}::${rawPtrId}`;
+              if (seenKeys.has(scopedPtrKey)) return;
+              seenKeys.add(scopedPtrKey);
+              const assetId = allocateUniqueAssetId(rawPtrId, mIdx, pIdx);
 
               // Un puntero interno sin URL ni binario es estrictamente UNAVAILABLE
               const warnings = ['Puntero interno de ChatGPT no descargable en modo estático'];
@@ -287,11 +294,11 @@
           const imgUrl = match[2].replace(/^<|>$/g, '');
           if (index.locations.has(imgUrl)) continue;
           const isInlineData = imgUrl.startsWith('data:');
-          const assetId = `md_img_${mIdx}_${imgIdx++}`;
-          const scopedKey = `${msgId}::${assetId}`;
-          if (seenKeys.has(scopedKey)) return;
+          const rawMdId = `md_img_${mIdx}_${imgIdx++}`;
+          const scopedKey = `${msgId}::${rawMdId}`;
+          if (seenKeys.has(scopedKey)) continue;
           seenKeys.add(scopedKey);
-          seenMsgAssetIds.add(assetId);
+          const assetId = allocateUniqueAssetId(rawMdId, mIdx, imgIdx);
 
           const mimeType = isInlineData ? (imgUrl.split(';')[0].replace('data:', '') || 'image/png') : 'image/png';
           const ext = mimeType.includes('jpeg') || mimeType.includes('jpg') ? 'jpg' : 'png';
@@ -406,11 +413,14 @@
         })());
         return downloads.get(address);
       };
+      const idKeys = new Set(assets.map(a => a.assetId).filter(Boolean));
       const bind = (asset, bytes, availability) => {
         asset.data = bytes;
         asset.availability = availability;
-        assetBinaryMap.set(asset.filename, bytes);
         assetBinaryMap.set(asset.assetId, bytes);
+        if (asset.filename && !idKeys.has(asset.filename) && !assetBinaryMap.has(asset.filename)) {
+          assetBinaryMap.set(asset.filename, bytes);
+        }
       };
       const resolve = async asset => {
         if (asset.data && typeof asset.data.arrayBuffer === 'function') asset.data = new Uint8Array(await asset.data.arrayBuffer());
@@ -467,6 +477,7 @@
     const segments = [];
     let buf = [];
     let inFence = false;
+    let fenceChar = '';
     let fenceLen = 0;
 
     const flush = isCode => {
@@ -478,10 +489,11 @@
 
     for (const line of lines) {
       if (!inFence) {
-        const openM = line.match(/^(`{3,})[^`]*$/);
-        if (openM) {
+        const openM = line.match(/^ {0,3}(`{3,}|~{3,})(.*)$/);
+        if (openM && !(openM[1][0] === '`' && openM[2].includes('`'))) {
           flush(false);
           inFence = true;
+          fenceChar = openM[1][0];
           fenceLen = openM[1].length;
           buf.push(line);
           continue;
@@ -489,10 +501,11 @@
         buf.push(line);
       } else {
         buf.push(line);
-        const closeM = line.match(/^(`{3,})\s*$/);
-        if (closeM && closeM[1].length >= fenceLen) {
+        const closeM = line.match(/^ {0,3}(`{3,}|~{3,})[ \t]*$/);
+        if (closeM && closeM[1][0] === fenceChar && closeM[1].length >= fenceLen) {
           flush(true);
           inFence = false;
+          fenceChar = '';
           fenceLen = 0;
         }
       }

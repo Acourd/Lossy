@@ -19,9 +19,18 @@
   if(!Array.isArray(list)||list.length>5000)throw Error('Lista de adjuntos inválida');
   for(const a of list){
    if(!a||typeof a!=='object'||Array.isArray(a))throw Error('Adjunto inválido');
-   for(const k of ['id','assetId','filename','name','mimeType','kind','sourceType','sourceURL','url','dataURI','availability']){
+   for(const k of ['id','assetId','fileId','assetPointer','filename','name','mimeType','kind','sourceType','sourceURL','url','dataURI','availability']){
     if(a[k]!==undefined&&a[k]!==null&&typeof a[k]!=='string')throw Error('Campo de adjunto inválido: '+k);
    }
+  }
+ }
+ function validateCodeBlocks(list){
+  if(list===undefined||list===null)return;
+  if(!Array.isArray(list)||list.length>5000)throw Error('Lista de bloques de código inválida');
+  for(const cb of list){
+   if(!cb||typeof cb!=='object'||Array.isArray(cb))throw Error('Bloque de código inválido');
+   if(cb.language!==undefined&&cb.language!==null&&typeof cb.language!=='string')throw Error('Lenguaje de código inválido');
+   if(cb.code!==undefined&&cb.code!==null&&typeof cb.code!=='string')throw Error('Contenido de código inválido');
   }
  }
  function validateEntity(entity){
@@ -33,7 +42,7 @@
    if(plat!==undefined&&plat!==null&&(typeof plat!=='string'||!ALLOWED_PLATFORMS.has(plat.toLowerCase())))throw Error('Plataforma de fuente inválida');
   }
   validateAttachments(entity.attachments);
-  for(const m of messages){validateAttachments(m.attachments);validateAttachments(m.content?.attachments);}
+  for(const m of messages){validateAttachments(m.attachments);validateAttachments(m.content?.attachments);validateCodeBlocks(m.codeBlocks);validateCodeBlocks(m.content?.codeBlocks);}
   for(const k of ['conversationMessageCount','visibleMessageCount','sourceNodeCount'])if(!isSafeCount(entity[k]))throw Error('Métrica numérica inválida: '+k);
   if(entity.nodeMetrics!==undefined&&entity.nodeMetrics!==null){
    if(typeof entity.nodeMetrics!=='object'||Array.isArray(entity.nodeMetrics))throw Error('Métricas de nodo inválidas');

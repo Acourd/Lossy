@@ -68,27 +68,30 @@
     const blocks = [];
     const codeSlots = [];
 
-    // 1. Preserve fenced code blocks (CommonMark-compliant 3+ backtick fences with >= opening length closing fence)
+    // 1. Preserve fenced code blocks (CommonMark-compliant: 0-3 spaces, backticks or tildes, info strings, trailing spaces)
     const srcLines = src.split('\n');
     const outLines = [];
     let inFence = false;
+    let fenceChar = '';
     let fenceLen = 0;
     let fenceLang = '';
     let fenceBuf = [];
     for (const line of srcLines) {
       if (!inFence) {
-        const openM = line.match(/^(`{3,})([a-zA-Z0-9_\-+.]*)\s*$/);
-        if (openM) {
+        const openM = line.match(/^ {0,3}(`{3,}|~{3,})(.*)$/);
+        if (openM && !(openM[1][0] === '`' && openM[2].includes('`'))) {
           inFence = true;
+          fenceChar = openM[1][0];
           fenceLen = openM[1].length;
-          fenceLang = openM[2] || 'text';
+          const infoToken = openM[2].trim().split(/\s+/)[0] || '';
+          fenceLang = infoToken || 'text';
           fenceBuf = [];
           continue;
         }
         outLines.push(line);
       } else {
-        const closeM = line.match(/^(`{3,})\s*$/);
-        if (closeM && closeM[1].length >= fenceLen) {
+        const closeM = line.match(/^ {0,3}(`{3,}|~{3,})[ \t]*$/);
+        if (closeM && closeM[1][0] === fenceChar && closeM[1].length >= fenceLen) {
           const idx = codeSlots.length;
           codeSlots.push(
             `<div class="l-code-wrap"><div class="l-code-head"><span>${escapeHtml(fenceLang)}</span></div>` +
@@ -96,6 +99,7 @@
           );
           outLines.push('', `@@CODE${idx}@@`, '');
           inFence = false;
+          fenceChar = '';
           fenceLen = 0;
           fenceLang = '';
           fenceBuf = [];

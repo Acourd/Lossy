@@ -32,10 +32,12 @@
     if (!existing || existing.canonicalId !== incoming.canonicalId) return incoming;
     const isCompleteStatus = s => ['captured', 'harvested', 'complete'].includes(String(s || '').toLowerCase());
     const isPartialStatus = s => ['partial', 'uncaptured'].includes(String(s || '').toLowerCase());
-    const existingCount = (existing.messages || []).length;
-    const incomingCount = (incoming.messages || []).length;
+    const existingMsgs = Array.isArray(existing.messages) ? existing.messages : [];
+    const incomingMsgs = Array.isArray(incoming.messages) ? incoming.messages : [];
+    const existingCount = existingMsgs.length;
+    const incomingCount = incomingMsgs.length;
     if (!incoming.forceOverwrite && existingCount > 0) {
-      if (incomingCount === 0 || incomingCount < existingCount) {
+      if (incomingCount === 0) {
         return { ...existing, title: incoming.title || existing.title, updatedAt: incoming.updatedAt || existing.updatedAt };
       }
       if (isCompleteStatus(existing.integrity?.status) && isPartialStatus(incoming.integrity?.status)) {
@@ -61,39 +63,88 @@
       }
       return '';
     };
-    const oldMessages = new Map((existing.messages || []).filter(m => m.id).map(m => [m.id, m]));
-    const hydrate = (assets, previous) => {
-      const known = new Map(previous.filter(a => a.dataURI || a.data || a.blob).map(a => [fileIdentity(a), a]).filter(([key]) => key));
-      return (assets || []).map(asset => {
-        const old = known.get(fileIdentity(asset));
-        if (!old || asset.dataURI || asset.data || asset.blob) return asset;
-        if (!old.dataURI && !old.data && !old.blob) return asset;
+    const hasBinary = a => Boolean(a && (a.dataURI || a.data || a.blob));
+    const hydrate = (assets, previous, preserveOmitted) => {
+      const prevList = (previous || []).filter(Boolean);
+      const known = new Map(prevList.filter(hasBinary).map(a => [fileIdentity(a), a]).filter(([key]) => key));
+      const matchedPrevIds = new Set();
+      const hydrated = (assets || []).map(asset => {
+        const key = fileIdentity(asset);
+        const old = known.get(key);
+        if (old) matchedPrevIds.add(key);
+        if (!old || hasBinary(asset)) return asset;
         const oldUrl = getUrl(old), newUrl = getUrl(asset);
         if (oldUrl && newUrl && oldUrl !== newUrl) return asset;
         const restored = { ...asset };
-        for (const key of ['dataURI', 'data', 'blob', 'mimeType', 'width', 'height']) if (old[key]) restored[key] = old[key];
+        for (const k of ['dataURI', 'data', 'blob', 'mimeType', 'width', 'height']) if (old[k]) restored[k] = old[k];
         restored.availability = 'embedded';
         restored.downloadable = true;
         return restored;
       });
+      if (preserveOmitted && prevList.length > 0 && hydrated.length === 0) {
+        const seen = new Set();
+        for (const prev of prevList) {
+          if (!hasBinary(prev)) continue;
+          const pk = fileIdentity(prev) || prev.id || prev.assetId || prev.filename;
+          if (pk && seen.has(pk)) continue;
+          if (pk) seen.add(pk);
+          hydrated.push(prev);
+        }
+      }
+      return hydrated;
     };
     const msgTextOf = m => (typeof m?.text === 'string' ? m.text : (typeof m?.content?.text === 'string' ? m.content.text : ''));
-    const messages = (incoming.messages || []).map(message => {
-      const old = oldMessages.get(message.id);
-      if (!old) return message;
+    const mergeSingleMsg = (old, message) => {
+      if (!old || (old.role && message.role && old.role !== message.role)) return message;
       const previous = [...(old.attachments || []), ...(old.content?.attachments || [])];
-      const mergedMsg = { ...message, attachments: hydrate(message.attachments, previous), content: { ...message.content, attachments: hydrate(message.content?.attachments, previous) } };
+      const preserveOmitted = !incoming.forceOverwrite;
+      const mergedAtts = hydrate(message.attachments, previous, preserveOmitted);
+      const mergedContentAtts = message.content?.attachments !== undefined
+        ? hydrate(message.content.attachments, previous, preserveOmitted)
+        : undefined;
+      const mergedMsg = {
+        ...message,
+        attachments: mergedAtts,
+        ...(message.content ? { content: { ...message.content, ...(mergedContentAtts !== undefined ? { attachments: mergedContentAtts } : {}) } } : {})
+      };
       if (!incoming.forceOverwrite) {
         const oldText = msgTextOf(old);
         const newText = msgTextOf(message);
         if (oldText.length > newText.length) {
           if (typeof old.text === 'string' || typeof mergedMsg.text === 'string') mergedMsg.text = oldText;
-          if (old.content?.text !== undefined || mergedMsg.content?.text !== undefined) mergedMsg.content = { ...mergedMsg.content, text: oldText };
+          if (old.content?.text !== undefined || mergedMsg.content?.text !== undefined) {
+            mergedMsg.content = { ...(mergedMsg.content || {}), text: oldText };
+          }
         }
       }
       return mergedMsg;
-    });
-    return { ...incoming, messages, attachments: hydrate(incoming.attachments, existing.attachments || []) };
+    };
+
+    const oldById = new Map(existingMsgs.filter(m => m && m.id).map(m => [m.id, m]));
+    let messages;
+    if (!incoming.forceOverwrite && existingCount > 0) {
+      const incomingIds = new Set(incomingMsgs.filter(m => m && m.id).map(m => m.id));
+      const missingOld = existingMsgs.filter(m => m && m.id && !incomingIds.has(m.id));
+      const hasOverlap = existingMsgs.some(m => m && m.id && incomingIds.has(m.id));
+      const isAuthoritativeUpgrade = !hasOverlap && incomingCount > existingCount && !isCompleteStatus(existing.integrity?.status);
+      if (missingOld.length > 0 && !isAuthoritativeUpgrade) {
+        // Incomplete capture or shifted window (e.g. [a,b] -> [b,c]): preserve existing history and merge overlapping/new messages
+        const out = existingMsgs.map(old => {
+          const inc = old?.id ? incomingMsgs.find(m => m && m.id === old.id && m.role === old.role) : null;
+          return inc ? mergeSingleMsg(old, inc) : old;
+        });
+        const existingIdSet = new Set(existingMsgs.filter(m => m && m.id).map(m => m.id));
+        for (const inc of incomingMsgs) {
+          if (inc && (!inc.id || !existingIdSet.has(inc.id))) out.push(inc);
+        }
+        messages = out;
+      } else {
+        messages = incomingMsgs.map(message => mergeSingleMsg(oldById.get(message?.id), message));
+      }
+    } else {
+      messages = incomingMsgs.map(message => mergeSingleMsg(oldById.get(message?.id), message));
+    }
+    return { ...incoming, messages, attachments: hydrate(incoming.attachments, existing.attachments || [], !incoming.forceOverwrite) };
   }
 
   class LinerDB {

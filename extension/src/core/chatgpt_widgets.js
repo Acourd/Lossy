@@ -1099,6 +1099,7 @@
     const segments = [];
     let buf = [];
     let inFence = false;
+    let fenceChar = '';
     let fenceLen = 0;
 
     const flush = isCode => {
@@ -1110,10 +1111,11 @@
 
     for (const line of lines) {
       if (!inFence) {
-        const openM = line.match(/^(`{3,})[^`]*$/);
-        if (openM) {
+        const openM = line.match(/^ {0,3}(`{3,}|~{3,})(.*)$/);
+        if (openM && !(openM[1][0] === '`' && openM[2].includes('`'))) {
           flush(false);
           inFence = true;
+          fenceChar = openM[1][0];
           fenceLen = openM[1].length;
           buf.push(line);
           continue;
@@ -1121,10 +1123,11 @@
         buf.push(line);
       } else {
         buf.push(line);
-        const closeM = line.match(/^(`{3,})\s*$/);
-        if (closeM && closeM[1].length >= fenceLen) {
+        const closeM = line.match(/^ {0,3}(`{3,}|~{3,})[ \t]*$/);
+        if (closeM && closeM[1][0] === fenceChar && closeM[1].length >= fenceLen) {
           flush(true);
           inFence = false;
+          fenceChar = '';
           fenceLen = 0;
         }
       }

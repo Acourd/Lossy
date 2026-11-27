@@ -196,15 +196,30 @@
     return false;
   }
 
+  function mergeMonotonicCodeBlocks(existingBlocks, incomingBlocks) {
+    const oldArr = Array.isArray(existingBlocks) ? existingBlocks : [];
+    const newArr = Array.isArray(incomingBlocks) ? incomingBlocks : [];
+    const len = Math.max(oldArr.length, newArr.length);
+    const merged = [];
+    for (let i = 0; i < len; i++) {
+      const o = oldArr[i];
+      const n = newArr[i];
+      if (!o) { merged.push(n); continue; }
+      if (!n) { merged.push(o); continue; }
+      const oCode = String(o.code || '');
+      const nCode = String(n.code || '');
+      merged.push(nCode.length >= oCode.length ? n : o);
+    }
+    return merged;
+  }
+
   function mergeMonotonicTurn(existing, incoming) {
     if (!existing) return incoming;
     if (!incoming) return existing;
     const oldText = String(existing.text || '');
     const newText = String(incoming.text || '');
     const bestText = newText.length >= oldText.length ? newText : oldText;
-    const bestCode = (incoming.codeBlocks?.length || 0) >= (existing.codeBlocks?.length || 0)
-      ? (incoming.codeBlocks || existing.codeBlocks || [])
-      : (existing.codeBlocks || []);
+    const bestCode = mergeMonotonicCodeBlocks(existing.codeBlocks, incoming.codeBlocks);
     const bestAtts = (incoming.attachments?.length || 0) >= (existing.attachments?.length || 0)
       ? (incoming.attachments || existing.attachments || [])
       : (existing.attachments || []);
