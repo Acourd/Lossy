@@ -984,16 +984,131 @@
     return false;
   }
 
-  function stripBqCountFromRaw(rawLine, maxCount) {
-    let rest = rawLine;
-    let count = 0;
-    while (count < maxCount) {
-      const m = rest.match(/^ {0,3}>(?:[ \t])?/);
-      if (!m) break;
-      rest = rest.slice(m[0].length);
-      count++;
+  function measureLeadCols(str, startCol = 0) {
+    let col = startCol;
+    let i = 0;
+    while (i < str.length) {
+      if (str[i] === ' ') { col += 1; i++; }
+      else if (str[i] === '\t') { col += 4 - (col % 4); i++; }
+      else break;
     }
-    return { count, rest };
+    return { idx: i, cols: col - startCol, endCol: col };
+  }
+
+  function stripIndentCols(str, startCol, targetCols) {
+    let col = startCol;
+    let i = 0;
+    while (col < startCol + targetCols && i < str.length) {
+      if (str[i] === ' ') { col += 1; i++; }
+      else if (str[i] === '\t') { col += 4 - (col % 4); i++; }
+      else return { ok: false, rest: str, col: startCol };
+    }
+    if (col < startCol + targetCols) return { ok: false, rest: str, col };
+    const excess = col - (startCol + targetCols);
+    const rest = (excess > 0 ? ' '.repeat(excess) : '') + str.slice(i);
+    return { ok: true, rest, col: startCol + targetCols };
+  }
+
+  function matchBqPrefix(str, startCol) {
+    const lead = measureLeadCols(str, startCol);
+    if (lead.cols > 3 || str[lead.idx] !== '>') return { ok: false };
+    let i = lead.idx + 1;
+    let col = lead.endCol + 1;
+    let pad = '';
+    if (i < str.length) {
+      if (str[i] === ' ') { i++; col += 1; }
+      else if (str[i] === '\t') {
+        const adv = 4 - (col % 4);
+        i++;
+        col += 1;
+        if (adv > 1) pad = ' '.repeat(adv - 1);
+      }
+    }
+    return { ok: true, rest: pad + str.slice(i), col };
+  }
+
+  function matchListPrefix(str, startCol, canInterruptPara = true) {
+    const lead = measureLeadCols(str, startCol);
+    if (lead.cols > 3) return { ok: false };
+    const after = str.slice(lead.idx);
+    const m = after.match(/^([-*+]|\d{1,9}[.)])([ \t]+)/);
+    if (!m) return { ok: false };
+    const markerLen = m[1].length;
+    const wsStartCol = lead.endCol + markerLen;
+    const wsLead = measureLeadCols(after.slice(markerLen), wsStartCol);
+    const isEmptyItem = after.slice(markerLen + wsLead.idx).trim().length === 0;
+    if (!canInterruptPara) {
+      if (isEmptyItem) return { ok: false };
+      if (/^\d/.test(m[1]) && m[1] !== '1.' && m[1] !== '1)') return { ok: false };
+    }
+    const wsCols = isEmptyItem ? 1 : (wsLead.cols >= 5 ? 1 : wsLead.cols);
+    const targetIndent = lead.cols + markerLen + wsCols;
+    const stripped = stripIndentCols(after.slice(markerLen), wsStartCol, wsCols);
+    const rest = stripped.ok ? stripped.rest : after.slice(markerLen + wsLead.idx);
+    return { ok: true, indent: targetIndent, col: startCol + targetIndent, rest };
+  }
+
+  function createContainerStepper() {
+    const containers = [];
+    let inParagraph = false;
+    return {
+      get containers() { return containers; },
+      get inParagraph() { return inParagraph; },
+      set inParagraph(v) { inParagraph = Boolean(v); },
+      step(line) {
+        let rest = line;
+        let col = 0;
+        let matched = 0;
+        const hadActiveList = containers.some(c => c.type === 'list');
+        while (matched < containers.length) {
+          const c = containers[matched];
+          if (c.type === 'bq') {
+            const m = matchBqPrefix(rest, col);
+            if (!m.ok) break;
+            rest = m.rest;
+            col = m.col;
+            matched++;
+          } else {
+            if (rest.trim().length === 0) {
+              matched++;
+              continue;
+            }
+            const s = stripIndentCols(rest, col, c.indent);
+            if (!s.ok) break;
+            rest = s.rest;
+            col = s.col;
+            matched++;
+          }
+        }
+        const listExited = hadActiveList && !containers.slice(0, matched).some(c => c.type === 'list');
+        containers.length = matched;
+        let hadMarker = false;
+        while (rest.trim().length > 0) {
+          const bq = matchBqPrefix(rest, col);
+          if (bq.ok) {
+            containers.push({ type: 'bq' });
+            rest = bq.rest;
+            col = bq.col;
+            hadMarker = true;
+            continue;
+          }
+          const lst = matchListPrefix(rest, col, !inParagraph || listExited || hadMarker);
+          if (lst.ok) {
+            containers.push({ type: 'list', indent: lst.indent });
+            rest = lst.rest;
+            col = lst.col;
+            hadMarker = true;
+            continue;
+          }
+          break;
+        }
+        const lead = measureLeadCols(rest, col);
+        const curBqCount = containers.filter(c => c.type === 'bq').length;
+        const isBlank = rest.trim().length === 0;
+        const trimmedAfterLead = rest.slice(lead.idx);
+        return { rest, col, lead, curBqCount, hadMarker, isBlank, trimmedAfterLead };
+      }
+    };
   }
 
   function isBlockInterruptLine(line, inList = false, inPara = true) {
@@ -1009,31 +1124,29 @@
   function inlineSpanCrossesBlockBreak(s, contentStart, closePos) {
     const firstNl = s.indexOf('\n', contentStart);
     if (firstNl === -1 || firstNl >= closePos) return false;
+    const lines = s.split('\n');
     const openLineStart = s.lastIndexOf('\n', Math.max(0, contentStart - 1)) + 1;
-    const openRaw = s.slice(openLineStart, firstNl).replace(/\r$/, '');
-    let openBq = 0;
-    let openRest = openRaw;
-    while (true) {
-      const m = openRest.match(/^ {0,3}>(?:[ \t])?/);
-      if (!m) break;
-      openRest = openRest.slice(m[0].length);
-      openBq++;
+    let openLineIdx = 0;
+    for (let pos = 0; pos < openLineStart; pos++) {
+      if (s[pos] === '\n') openLineIdx++;
     }
-    const openInList = /^ {0,3}(?:[-+*]|\d{1,9}[.)])[ \t]+\S/.test(openRest);
+    let closeLineIdx = openLineIdx;
+    for (let pos = openLineStart; pos < closePos; pos++) {
+      if (s[pos] === '\n') closeLineIdx++;
+    }
 
-    let lineStart = firstNl + 1;
-    while (lineStart <= closePos) {
-      let lineEnd = s.indexOf('\n', lineStart);
-      if (lineEnd === -1) lineEnd = s.length;
-      const rawLine = s.slice(lineStart, lineEnd).replace(/\r$/, '');
-      if (openBq === 0) {
-        if (isBlockInterruptLine(rawLine, openInList, true)) return true;
-      } else {
-        const stripped = stripBqCountFromRaw(rawLine, openBq);
-        if (isBlockInterruptLine(stripped.rest, openInList, true)) return true;
+    const stepper = createContainerStepper();
+    for (let li = 0; li <= closeLineIdx; li++) {
+      const rawLine = lines[li].replace(/\r$/, '');
+      const { lead, hadMarker, isBlank, trimmedAfterLead } = stepper.step(rawLine);
+      const isNonPara = !isBlank && isSingleLineNonParaBlock(lead.cols, trimmedAfterLead);
+      const isFenceOpen = !isBlank && lead.cols <= 3 && /^(`{3,}[^`]*|~{3,}.*)$/.test(trimmedAfterLead);
+      const isIndented = !isBlank && (hadMarker || !stepper.inParagraph) && lead.cols >= 4;
+
+      if (li > openLineIdx) {
+        if (isBlank || hadMarker || isNonPara || isFenceOpen || isIndented) return true;
       }
-      if (lineEnd >= closePos) break;
-      lineStart = lineEnd + 1;
+      stepper.inParagraph = !(isBlank || isNonPara || isFenceOpen || isIndented);
     }
     return false;
   }
@@ -1223,21 +1336,12 @@
     let fenceChar = '';
     let fenceLen = 0;
     let fenceContainers = [];
-    let containers = [];
-    let inParagraph = false;
-    let prevBqCount = 0;
+    const stepper = createContainerStepper();
     let widgetDepth = 0;
     let inlineOpenTicks = 0;
-    let inlineOpenBqCount = 0;
     let inlineOpenInList = false;
-    let pendingInlineRest = '';
+    let pendingInlineLines = [];
     let pendingSegCount = 0;
-
-    const isEscapedAt = (str, idx) => {
-      let bs = 0;
-      for (let k = idx - 1; k >= 0 && str[k] === '\\'; k--) bs++;
-      return (bs % 2) === 1;
-    };
 
     const updateWidgetDepthPlain = (plain) => {
       const openRe = /<(grid|card|row|col|stack|box|flex|svg)\b[^>]*>/gi;
@@ -1255,17 +1359,48 @@
 
     const flushPendingInline = () => {
       if (inlineOpenTicks <= 0) return;
-      const replay = pendingInlineRest;
+      const entries = pendingInlineLines;
       inlineOpenTicks = 0;
-      pendingInlineRest = '';
-      if (!replay) return;
-      transformOutsideInlineCode(replay, plain => {
-        updateWidgetDepthPlain(plain);
-        return plain;
-      });
+      pendingInlineLines = [];
+      if (!entries.length) return;
+      const joined = entries.map(e => e.text).join('\n');
+      const plainPerLine = new Array(entries.length).fill('');
+      let curLine = 0;
+      let i = 0;
+      while (i < joined.length) {
+        if (joined[i] === '`' && !isEscapedAt(joined, i)) {
+          let ticks = 0;
+          while (i + ticks < joined.length && joined[i + ticks] === '`') ticks++;
+          const delim = '`'.repeat(ticks);
+          let end = i + ticks;
+          let found = -1;
+          while (end < joined.length) {
+            const hit = joined.indexOf(delim, end);
+            if (hit === -1) break;
+            if (joined[hit - 1] !== '`' && joined[hit + ticks] !== '`') {
+              if (!inlineSpanCrossesBlockBreak(joined, i + ticks, hit)) found = hit;
+              break;
+            }
+            end = hit + 1;
+          }
+          if (found !== -1) {
+            for (let k = i; k < found + ticks; k++) {
+              if (joined[k] === '\n') curLine++;
+            }
+            i = found + ticks;
+            continue;
+          }
+        }
+        if (joined[i] === '\n') curLine++;
+        else plainPerLine[curLine] += joined[i];
+        i++;
+      }
+      for (let li = 0; li < entries.length; li++) {
+        if (entries[li].trackDepth && plainPerLine[li]) updateWidgetDepthPlain(plainPerLine[li]);
+      }
     };
 
-    const updateWidgetDepth = (s) => {
+    const updateWidgetDepth = (s, trackDepth) => {
       let src = String(s || '');
       if (inlineOpenTicks > 0) {
         const delim = '`'.repeat(inlineOpenTicks);
@@ -1281,12 +1416,12 @@
           pos = hit + 1;
         }
         if (found === -1) {
-          pendingInlineRest += '\n' + src;
+          pendingInlineLines.push({ text: src, trackDepth });
           return;
         }
         src = src.slice(found + inlineOpenTicks);
         inlineOpenTicks = 0;
-        pendingInlineRest = '';
+        pendingInlineLines = [];
       }
       let idx = 0;
       let plainBuf = '';
@@ -1307,19 +1442,21 @@
             end = hit + 1;
           }
           if (found !== -1) {
-            if (plainBuf) { updateWidgetDepthPlain(plainBuf); plainBuf = ''; }
+            if (plainBuf && trackDepth) updateWidgetDepthPlain(plainBuf);
+            plainBuf = '';
             idx = found + ticks;
             continue;
           }
-          if (plainBuf) { updateWidgetDepthPlain(plainBuf); plainBuf = ''; }
+          if (plainBuf && trackDepth) updateWidgetDepthPlain(plainBuf);
+          plainBuf = '';
           inlineOpenTicks = ticks;
-          pendingInlineRest = src.slice(idx + ticks);
+          pendingInlineLines = [{ text: src.slice(idx + ticks), trackDepth }];
           pendingSegCount = segments.length;
           return;
         }
         plainBuf += src[idx++];
       }
-      if (plainBuf) updateWidgetDepthPlain(plainBuf);
+      if (plainBuf && trackDepth) updateWidgetDepthPlain(plainBuf);
     };
 
     const flush = isCode => {
@@ -1327,66 +1464,6 @@
         segments.push({ isCode, text: buf.join('\n') });
         buf = [];
       }
-    };
-    const measureLeadCols = (str, startCol = 0) => {
-      let col = startCol;
-      let i = 0;
-      while (i < str.length) {
-        if (str[i] === ' ') { col += 1; i++; }
-        else if (str[i] === '\t') { col += 4 - (col % 4); i++; }
-        else break;
-      }
-      return { idx: i, cols: col - startCol, endCol: col };
-    };
-    const stripIndentCols = (str, startCol, targetCols) => {
-      let col = startCol;
-      let i = 0;
-      while (col < startCol + targetCols && i < str.length) {
-        if (str[i] === ' ') { col += 1; i++; }
-        else if (str[i] === '\t') { col += 4 - (col % 4); i++; }
-        else return { ok: false, rest: str, col: startCol };
-      }
-      if (col < startCol + targetCols) return { ok: false, rest: str, col };
-      const excess = col - (startCol + targetCols);
-      const rest = (excess > 0 ? ' '.repeat(excess) : '') + str.slice(i);
-      return { ok: true, rest, col: startCol + targetCols };
-    };
-    const matchBq = (str, startCol) => {
-      const lead = measureLeadCols(str, startCol);
-      if (lead.cols > 3 || str[lead.idx] !== '>') return { ok: false };
-      let i = lead.idx + 1;
-      let col = lead.endCol + 1;
-      let pad = '';
-      if (i < str.length) {
-        if (str[i] === ' ') { i++; col += 1; }
-        else if (str[i] === '\t') {
-          const adv = 4 - (col % 4);
-          i++;
-          col += 1;
-          if (adv > 1) pad = ' '.repeat(adv - 1);
-        }
-      }
-      return { ok: true, rest: pad + str.slice(i), col };
-    };
-    const matchList = (str, startCol, canInterruptPara = true) => {
-      const lead = measureLeadCols(str, startCol);
-      if (lead.cols > 3) return { ok: false };
-      const after = str.slice(lead.idx);
-      const m = after.match(/^([-*+]|\d{1,9}[.)])([ \t]+)/);
-      if (!m) return { ok: false };
-      const markerLen = m[1].length;
-      const wsStartCol = lead.endCol + markerLen;
-      const wsLead = measureLeadCols(after.slice(markerLen), wsStartCol);
-      const isEmptyItem = after.slice(markerLen + wsLead.idx).trim().length === 0;
-      if (!canInterruptPara) {
-        if (isEmptyItem) return { ok: false };
-        if (/^\d/.test(m[1]) && m[1] !== '1.' && m[1] !== '1)') return { ok: false };
-      }
-      const wsCols = isEmptyItem ? 1 : (wsLead.cols >= 5 ? 1 : wsLead.cols);
-      const targetIndent = lead.cols + markerLen + wsCols;
-      const stripped = stripIndentCols(after.slice(markerLen), wsStartCol, wsCols);
-      const rest = stripped.ok ? stripped.rest : after.slice(markerLen + wsLead.idx);
-      return { ok: true, indent: targetIndent, col: startCol + targetIndent, rest };
     };
     const matchFenceContainers = (line, fcStack) => {
       let rest = line;
@@ -1397,7 +1474,7 @@
       }
       for (const c of fcStack) {
         if (c.type === 'bq') {
-          const m = matchBq(rest, col);
+          const m = matchBqPrefix(rest, col);
           if (!m.ok) return { ok: false, rest, col };
           rest = m.rest;
           col = m.col;
@@ -1410,57 +1487,6 @@
       }
       return { ok: true, rest, col };
     };
-    const advanceContainers = line => {
-      let rest = line;
-      let col = 0;
-      let matched = 0;
-      const hadActiveList = containers.some(c => c.type === 'list');
-      while (matched < containers.length) {
-        const c = containers[matched];
-        if (c.type === 'bq') {
-          const m = matchBq(rest, col);
-          if (!m.ok) break;
-          rest = m.rest;
-          col = m.col;
-          matched++;
-        } else {
-          if (rest.trim().length === 0) {
-            matched++;
-            continue;
-          }
-          const s = stripIndentCols(rest, col, c.indent);
-          if (!s.ok) break;
-          rest = s.rest;
-          col = s.col;
-          matched++;
-        }
-      }
-      const listExited = hadActiveList && !containers.slice(0, matched).some(c => c.type === 'list');
-      containers.length = matched;
-      let hadMarker = false;
-      while (rest.trim().length > 0) {
-        const bq = matchBq(rest, col);
-        if (bq.ok) {
-          containers.push({ type: 'bq' });
-          rest = bq.rest;
-          col = bq.col;
-          hadMarker = true;
-          continue;
-        }
-        const lst = matchList(rest, col, !inParagraph || listExited || hadMarker);
-        if (lst.ok) {
-          containers.push({ type: 'list', indent: lst.indent });
-          rest = lst.rest;
-          col = lst.col;
-          hadMarker = true;
-          continue;
-        }
-        break;
-      }
-      return { rest, col, hadMarker, isBlank: rest.trim().length === 0 };
-    };
-
-    const isWidgetTagLine = s => /^(?:<\/?(?:grid|card|row|col|stack|box|flex|svg|title|text|caption|divider|favicon|link|slider|bar|metric|chart|table)\b|\{@(?:body|state)|\{#each\b|\{\/each\})/i.test(s);
 
     for (const line of lines) {
       if (inFence) {
@@ -1471,7 +1497,7 @@
           fenceChar = '';
           fenceLen = 0;
           fenceContainers = [];
-          inParagraph = false;
+          stepper.inParagraph = false;
         } else {
           buf.push(line);
           const closeLead = measureLeadCols(rest, col);
@@ -1482,68 +1508,61 @@
             fenceChar = '';
             fenceLen = 0;
             fenceContainers = [];
-            inParagraph = false;
-          } else {
-            inParagraph = false;
           }
+          stepper.inParagraph = false;
           continue;
         }
       }
 
-      const { rest, col, hadMarker, isBlank } = advanceContainers(line);
-      const lead = measureLeadCols(rest, col);
-      const curBqCount = containers.filter(c => c.type === 'bq').length;
-      if (curBqCount < prevBqCount) inParagraph = false;
-      prevBqCount = curBqCount;
+      const { rest, lead, curBqCount, hadMarker, isBlank, trimmedAfterLead } = stepper.step(line);
 
       if (inIndented) {
         if (curBqCount >= indentedBqCount && (lead.cols >= 4 || isBlank)) {
           buf.push(line);
-          inParagraph = false;
+          stepper.inParagraph = false;
           continue;
         }
         flush(true);
         inIndented = false;
         indentedBqCount = 0;
-        inParagraph = false;
+        stepper.inParagraph = false;
       }
 
-      const openM = lead.cols <= 3 ? rest.slice(lead.idx).match(/^(`{3,}|~{3,})(.*)$/) : null;
+      const openM = lead.cols <= 3 ? trimmedAfterLead.match(/^(`{3,}|~{3,})(.*)$/) : null;
       if (openM && !(openM[1][0] === '`' && openM[2].includes('`'))) {
+        flushPendingInline();
         flush(false);
         inFence = true;
         fenceChar = openM[1][0];
         fenceLen = openM[1].length;
-        fenceContainers = containers.map(c => ({ ...c }));
+        fenceContainers = stepper.containers.map(c => ({ ...c }));
         buf.push(line);
-        inParagraph = false;
+        stepper.inParagraph = false;
         continue;
       }
 
-      const trimmedAfterLead = rest.slice(lead.idx);
       const lineIsNonParaBlock = !isBlank && isSingleLineNonParaBlock(lead.cols, trimmedAfterLead);
-      if (inlineOpenTicks > 0 && (isBlank || hadMarker || curBqCount !== inlineOpenBqCount || segments.length !== pendingSegCount || isBlockInterruptLine(rest, inlineOpenInList, true))) {
+      if (inlineOpenTicks > 0 && (isBlank || hadMarker || segments.length !== pendingSegCount || isBlockInterruptLine(rest, inlineOpenInList, true))) {
         flushPendingInline();
       }
-      if ((hadMarker || !inParagraph) && lead.cols >= 4 && !isBlank && !(curBqCount === 0 && widgetDepth > 0)) {
+      if ((hadMarker || !stepper.inParagraph) && lead.cols >= 4 && !isBlank && !(curBqCount === 0 && widgetDepth > 0)) {
         flushPendingInline();
         flush(false);
         inIndented = true;
         indentedBqCount = curBqCount;
         buf.push(line);
-        inParagraph = false;
+        stepper.inParagraph = false;
         continue;
       }
 
-      if (curBqCount === 0 && !isBlank && !lineIsNonParaBlock) {
+      if (!isBlank && !lineIsNonParaBlock) {
         if (inlineOpenTicks === 0 && trimmedAfterLead.includes('`')) {
-          inlineOpenBqCount = curBqCount;
-          inlineOpenInList = hadMarker;
+          inlineOpenInList = hadMarker || stepper.containers.some(c => c.type === 'list');
         }
-        updateWidgetDepth(trimmedAfterLead);
+        updateWidgetDepth(trimmedAfterLead, curBqCount === 0);
       }
       buf.push(line);
-      inParagraph = isBlank ? false : !lineIsNonParaBlock;
+      stepper.inParagraph = !isBlank && !lineIsNonParaBlock;
     }
     flush(inFence || inIndented);
     return segments;

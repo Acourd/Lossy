@@ -692,51 +692,159 @@
     return false;
   }
 
-  function isBlockInterruptLineMd(line, inList = false, inPara = true) {
-    const ln = String(line || '').replace(/\r$/, '');
-    if (/^[ \t]*$/.test(ln)) return true;
-    if (/^ {0,3}(?:#{1,6}(?:[ \t]|$)|>|`{3,}[^`]*$|~{3,}.*$|==* *$)/.test(ln)) return true;
-    if (/^ {0,3}(?:(?:\*[ \t]*){3,}|(?:-[ \t]*){3,}|(?:_[ \t]*){3,})$/.test(ln)) return true;
-    if (/^ {0,3}(?:[-+*][ \t]+\S|1[.)][ \t]+\S)/.test(ln)) return true;
-    if ((!inPara || inList) && /^ {0,3}\d{1,9}[.)][ \t]+\S/.test(ln)) return true;
-    return false;
+  function measureLeadColsMd(str, startCol = 0) {
+    let col = startCol;
+    let i = 0;
+    while (i < str.length) {
+      if (str[i] === ' ') { col += 1; i++; }
+      else if (str[i] === '\t') { col += 4 - (col % 4); i++; }
+      else break;
+    }
+    return { idx: i, cols: col - startCol, endCol: col };
+  }
+
+  function stripIndentColsMd(str, startCol, targetCols) {
+    let col = startCol;
+    let i = 0;
+    while (col < startCol + targetCols && i < str.length) {
+      if (str[i] === ' ') { col += 1; i++; }
+      else if (str[i] === '\t') { col += 4 - (col % 4); i++; }
+      else return { ok: false, rest: str, col: startCol };
+    }
+    if (col < startCol + targetCols) return { ok: false, rest: str, col };
+    const excess = col - (startCol + targetCols);
+    const rest = (excess > 0 ? ' '.repeat(excess) : '') + str.slice(i);
+    return { ok: true, rest, col: startCol + targetCols };
+  }
+
+  function matchBqPrefixMd(str, startCol) {
+    const lead = measureLeadColsMd(str, startCol);
+    if (lead.cols > 3 || str[lead.idx] !== '>') return { ok: false };
+    let i = lead.idx + 1;
+    let col = lead.endCol + 1;
+    let pad = '';
+    if (i < str.length) {
+      if (str[i] === ' ') { i++; col += 1; }
+      else if (str[i] === '\t') {
+        const adv = 4 - (col % 4);
+        i++;
+        col += 1;
+        if (adv > 1) pad = ' '.repeat(adv - 1);
+      }
+    }
+    return { ok: true, rest: pad + str.slice(i), col };
+  }
+
+  function matchListPrefixMd(str, startCol, canInterruptPara = true) {
+    const lead = measureLeadColsMd(str, startCol);
+    if (lead.cols > 3) return { ok: false };
+    const after = str.slice(lead.idx);
+    const m = after.match(/^([-*+]|\d{1,9}[.)])([ \t]+)/);
+    if (!m) return { ok: false };
+    const markerLen = m[1].length;
+    const wsStartCol = lead.endCol + markerLen;
+    const wsLead = measureLeadColsMd(after.slice(markerLen), wsStartCol);
+    const isEmptyItem = after.slice(markerLen + wsLead.idx).trim().length === 0;
+    if (!canInterruptPara) {
+      if (isEmptyItem) return { ok: false };
+      if (/^\d/.test(m[1]) && m[1] !== '1.' && m[1] !== '1)') return { ok: false };
+    }
+    const wsCols = isEmptyItem ? 1 : (wsLead.cols >= 5 ? 1 : wsLead.cols);
+    const targetIndent = lead.cols + markerLen + wsCols;
+    const stripped = stripIndentColsMd(after.slice(markerLen), wsStartCol, wsCols);
+    const rest = stripped.ok ? stripped.rest : after.slice(markerLen + wsLead.idx);
+    return { ok: true, indent: targetIndent, col: startCol + targetIndent, rest };
+  }
+
+  function createContainerStepperMd() {
+    const containers = [];
+    let inParagraph = false;
+    return {
+      get containers() { return containers; },
+      get inParagraph() { return inParagraph; },
+      set inParagraph(v) { inParagraph = Boolean(v); },
+      step(line) {
+        let rest = line;
+        let col = 0;
+        let matched = 0;
+        const hadActiveList = containers.some(c => c.type === 'list');
+        while (matched < containers.length) {
+          const c = containers[matched];
+          if (c.type === 'bq') {
+            const m = matchBqPrefixMd(rest, col);
+            if (!m.ok) break;
+            rest = m.rest;
+            col = m.col;
+            matched++;
+          } else {
+            if (rest.trim().length === 0) {
+              matched++;
+              continue;
+            }
+            const s = stripIndentColsMd(rest, col, c.indent);
+            if (!s.ok) break;
+            rest = s.rest;
+            col = s.col;
+            matched++;
+          }
+        }
+        const listExited = hadActiveList && !containers.slice(0, matched).some(c => c.type === 'list');
+        containers.length = matched;
+        let hadMarker = false;
+        while (rest.trim().length > 0) {
+          const bq = matchBqPrefixMd(rest, col);
+          if (bq.ok) {
+            containers.push({ type: 'bq' });
+            rest = bq.rest;
+            col = bq.col;
+            hadMarker = true;
+            continue;
+          }
+          const lst = matchListPrefixMd(rest, col, !inParagraph || listExited || hadMarker);
+          if (lst.ok) {
+            containers.push({ type: 'list', indent: lst.indent });
+            rest = lst.rest;
+            col = lst.col;
+            hadMarker = true;
+            continue;
+          }
+          break;
+        }
+        const lead = measureLeadColsMd(rest, col);
+        const curBqCount = containers.filter(c => c.type === 'bq').length;
+        const isBlank = rest.trim().length === 0;
+        const trimmedAfterLead = rest.slice(lead.idx);
+        return { rest, col, lead, curBqCount, hadMarker, isBlank, trimmedAfterLead };
+      }
+    };
   }
 
   function inlineSpanCrossesBlockBreakMd(s, contentStart, closePos) {
     const firstNl = s.indexOf('\n', contentStart);
     if (firstNl === -1 || firstNl >= closePos) return false;
+    const lines = s.split('\n');
     const openLineStart = s.lastIndexOf('\n', Math.max(0, contentStart - 1)) + 1;
-    const openRaw = s.slice(openLineStart, firstNl).replace(/\r$/, '');
-    let openBq = 0;
-    let openRest = openRaw;
-    while (true) {
-      const m = openRest.match(/^ {0,3}>(?:[ \t])?/);
-      if (!m) break;
-      openRest = openRest.slice(m[0].length);
-      openBq++;
+    let openLineIdx = 0;
+    for (let pos = 0; pos < openLineStart; pos++) {
+      if (s[pos] === '\n') openLineIdx++;
     }
-    const openInList = /^ {0,3}(?:[-+*]|\d{1,9}[.)])[ \t]+\S/.test(openRest);
+    let closeLineIdx = openLineIdx;
+    for (let pos = openLineStart; pos < closePos; pos++) {
+      if (s[pos] === '\n') closeLineIdx++;
+    }
 
-    let lineStart = firstNl + 1;
-    while (lineStart <= closePos) {
-      let lineEnd = s.indexOf('\n', lineStart);
-      if (lineEnd === -1) lineEnd = s.length;
-      const rawLine = s.slice(lineStart, lineEnd).replace(/\r$/, '');
-      if (openBq === 0) {
-        if (isBlockInterruptLineMd(rawLine, openInList, true)) return true;
-      } else {
-        let rest = rawLine;
-        let count = 0;
-        while (count < openBq) {
-          const m = rest.match(/^ {0,3}>(?:[ \t])?/);
-          if (!m) break;
-          rest = rest.slice(m[0].length);
-          count++;
-        }
-        if (isBlockInterruptLineMd(rest, openInList, true)) return true;
+    const stepper = createContainerStepperMd();
+    for (let li = 0; li <= closeLineIdx; li++) {
+      const rawLine = lines[li].replace(/\r$/, '');
+      const { lead, hadMarker, isBlank, trimmedAfterLead } = stepper.step(rawLine);
+      const isNonPara = !isBlank && isSingleLineNonParaBlockMd(lead.cols, trimmedAfterLead);
+      const isFenceOpen = !isBlank && lead.cols <= 3 && /^(`{3,}[^`]*|~{3,}.*)$/.test(trimmedAfterLead);
+      const isIndented = !isBlank && (hadMarker || !stepper.inParagraph) && lead.cols >= 4;
+
+      if (li > openLineIdx) {
+        if (isBlank || hadMarker || isNonPara || isFenceOpen || isIndented) return true;
       }
-      if (lineEnd >= closePos) break;
-      lineStart = lineEnd + 1;
+      stepper.inParagraph = !(isBlank || isNonPara || isFenceOpen || isIndented);
     }
     return false;
   }
@@ -804,75 +912,13 @@
     let fenceChar = '';
     let fenceLen = 0;
     let fenceContainers = [];
-    let containers = [];
-    let inParagraph = false;
-    let prevBqCount = 0;
+    const stepper = createContainerStepperMd();
 
     const flush = isCode => {
       if (buf.length) {
         segments.push({ isCode, text: buf.join('\n') });
         buf = [];
       }
-    };
-    const measureLeadCols = (str, startCol = 0) => {
-      let col = startCol;
-      let i = 0;
-      while (i < str.length) {
-        if (str[i] === ' ') { col += 1; i++; }
-        else if (str[i] === '\t') { col += 4 - (col % 4); i++; }
-        else break;
-      }
-      return { idx: i, cols: col - startCol, endCol: col };
-    };
-    const stripIndentCols = (str, startCol, targetCols) => {
-      let col = startCol;
-      let i = 0;
-      while (col < startCol + targetCols && i < str.length) {
-        if (str[i] === ' ') { col += 1; i++; }
-        else if (str[i] === '\t') { col += 4 - (col % 4); i++; }
-        else return { ok: false, rest: str, col: startCol };
-      }
-      if (col < startCol + targetCols) return { ok: false, rest: str, col };
-      const excess = col - (startCol + targetCols);
-      const rest = (excess > 0 ? ' '.repeat(excess) : '') + str.slice(i);
-      return { ok: true, rest, col: startCol + targetCols };
-    };
-    const matchBq = (str, startCol) => {
-      const lead = measureLeadCols(str, startCol);
-      if (lead.cols > 3 || str[lead.idx] !== '>') return { ok: false };
-      let i = lead.idx + 1;
-      let col = lead.endCol + 1;
-      let pad = '';
-      if (i < str.length) {
-        if (str[i] === ' ') { i++; col += 1; }
-        else if (str[i] === '\t') {
-          const adv = 4 - (col % 4);
-          i++;
-          col += 1;
-          if (adv > 1) pad = ' '.repeat(adv - 1);
-        }
-      }
-      return { ok: true, rest: pad + str.slice(i), col };
-    };
-    const matchList = (str, startCol, canInterruptPara = true) => {
-      const lead = measureLeadCols(str, startCol);
-      if (lead.cols > 3) return { ok: false };
-      const after = str.slice(lead.idx);
-      const m = after.match(/^([-*+]|\d{1,9}[.)])([ \t]+)/);
-      if (!m) return { ok: false };
-      const markerLen = m[1].length;
-      const wsStartCol = lead.endCol + markerLen;
-      const wsLead = measureLeadCols(after.slice(markerLen), wsStartCol);
-      const isEmptyItem = after.slice(markerLen + wsLead.idx).trim().length === 0;
-      if (!canInterruptPara) {
-        if (isEmptyItem) return { ok: false };
-        if (/^\d/.test(m[1]) && m[1] !== '1.' && m[1] !== '1)') return { ok: false };
-      }
-      const wsCols = isEmptyItem ? 1 : (wsLead.cols >= 5 ? 1 : wsLead.cols);
-      const targetIndent = lead.cols + markerLen + wsCols;
-      const stripped = stripIndentCols(after.slice(markerLen), wsStartCol, wsCols);
-      const rest = stripped.ok ? stripped.rest : after.slice(markerLen + wsLead.idx);
-      return { ok: true, indent: targetIndent, col: startCol + targetIndent, rest };
     };
     const matchFenceContainers = (line, fcStack) => {
       let rest = line;
@@ -883,67 +929,18 @@
       }
       for (const c of fcStack) {
         if (c.type === 'bq') {
-          const m = matchBq(rest, col);
+          const m = matchBqPrefixMd(rest, col);
           if (!m.ok) return { ok: false, rest, col };
           rest = m.rest;
           col = m.col;
         } else {
-          const s = stripIndentCols(rest, col, c.indent);
+          const s = stripIndentColsMd(rest, col, c.indent);
           if (!s.ok) return { ok: false, rest, col };
           rest = s.rest;
           col = s.col;
         }
       }
       return { ok: true, rest, col };
-    };
-    const advanceContainers = line => {
-      let rest = line;
-      let col = 0;
-      let matched = 0;
-      const hadActiveList = containers.some(c => c.type === 'list');
-      while (matched < containers.length) {
-        const c = containers[matched];
-        if (c.type === 'bq') {
-          const m = matchBq(rest, col);
-          if (!m.ok) break;
-          rest = m.rest;
-          col = m.col;
-          matched++;
-        } else {
-          if (rest.trim().length === 0) {
-            matched++;
-            continue;
-          }
-          const s = stripIndentCols(rest, col, c.indent);
-          if (!s.ok) break;
-          rest = s.rest;
-          col = s.col;
-          matched++;
-        }
-      }
-      const listExited = hadActiveList && !containers.slice(0, matched).some(c => c.type === 'list');
-      containers.length = matched;
-      let hadMarker = false;
-      while (rest.trim().length > 0) {
-        const bq = matchBq(rest, col);
-        if (bq.ok) {
-          containers.push({ type: 'bq' });
-          rest = bq.rest;
-          col = bq.col;
-          hadMarker = true;
-          continue;
-        }
-        const lst = matchList(rest, col, !inParagraph || listExited || hadMarker);
-        if (lst.ok) {
-          containers.push({ type: 'list', indent: lst.indent });
-          rest = lst.rest;
-          col = lst.col;
-          hadMarker = true;
-          continue;
-        }
-        break;
-      }
-      return { rest, col, hadMarker, isBlank: rest.trim().length === 0 };
     };
 
     for (const line of lines) {
@@ -955,10 +952,10 @@
           fenceChar = '';
           fenceLen = 0;
           fenceContainers = [];
-          inParagraph = false;
+          stepper.inParagraph = false;
         } else {
           buf.push(line);
-          const closeLead = measureLeadCols(rest, col);
+          const closeLead = measureLeadColsMd(rest, col);
           const closeM = closeLead.cols <= 3 ? rest.slice(closeLead.idx).match(/^(`{3,}|~{3,})[ \t]*$/) : null;
           if (closeM && closeM[1][0] === fenceChar && closeM[1].length >= fenceLen) {
             flush(true);
@@ -966,57 +963,50 @@
             fenceChar = '';
             fenceLen = 0;
             fenceContainers = [];
-            inParagraph = false;
-          } else {
-            inParagraph = false;
           }
+          stepper.inParagraph = false;
           continue;
         }
       }
 
-      const { rest, col, hadMarker, isBlank } = advanceContainers(line);
-      const lead = measureLeadCols(rest, col);
-      const curBqCount = containers.filter(c => c.type === 'bq').length;
-      if (curBqCount < prevBqCount) inParagraph = false;
-      prevBqCount = curBqCount;
+      const { lead, curBqCount, hadMarker, isBlank, trimmedAfterLead } = stepper.step(line);
 
       if (inIndented) {
         if (curBqCount >= indentedBqCount && (lead.cols >= 4 || isBlank)) {
           buf.push(line);
-          inParagraph = false;
+          stepper.inParagraph = false;
           continue;
         }
         flush(true);
         inIndented = false;
         indentedBqCount = 0;
-        inParagraph = false;
+        stepper.inParagraph = false;
       }
 
-      const openM = lead.cols <= 3 ? rest.slice(lead.idx).match(/^(`{3,}|~{3,})(.*)$/) : null;
+      const openM = lead.cols <= 3 ? trimmedAfterLead.match(/^(`{3,}|~{3,})(.*)$/) : null;
       if (openM && !(openM[1][0] === '`' && openM[2].includes('`'))) {
         flush(false);
         inFence = true;
         fenceChar = openM[1][0];
         fenceLen = openM[1].length;
-        fenceContainers = containers.map(c => ({ ...c }));
+        fenceContainers = stepper.containers.map(c => ({ ...c }));
         buf.push(line);
-        inParagraph = false;
+        stepper.inParagraph = false;
         continue;
       }
 
-      if ((hadMarker || !inParagraph) && lead.cols >= 4 && !isBlank) {
+      if ((hadMarker || !stepper.inParagraph) && lead.cols >= 4 && !isBlank) {
         flush(false);
         inIndented = true;
         indentedBqCount = curBqCount;
         buf.push(line);
-        inParagraph = false;
+        stepper.inParagraph = false;
         continue;
       }
 
-      const trimmedAfterLead = rest.slice(lead.idx);
       const lineIsNonParaBlock = !isBlank && isSingleLineNonParaBlockMd(lead.cols, trimmedAfterLead);
       buf.push(line);
-      inParagraph = isBlank ? false : !lineIsNonParaBlock;
+      stepper.inParagraph = !isBlank && !lineIsNonParaBlock;
     }
     flush(inFence || inIndented);
     return segments;
