@@ -565,14 +565,25 @@ test('R34 P1-3: primera captura tras navegación SPA A->B en Claude y Gemini rec
     const capC = await callMsg({ action: 'ACQUIRE_CONVERSATION' });
     assert.equal(capC.success, true);
 
+    // Contrario P1 R36: pregunta nueva de D acompañada de respuesta residual de C debe rechazarse como obsoleta
     historyObj.pushState({}, '', spec.urlB.replace(/2|b/g, '4').replace(/bbbbbbbbbbbb/, 'dddddddddddd'));
     multiTurns = [
-      { id: 'u1d', role: 'user', text: sharedPrompt },
-      { id: 'a1d', role: 'assistant', text: 'Respuesta completamente nueva de D sobre Postgres.' }
+      { id: 'u1d_new', role: 'user', text: 'Pregunta completamente nueva de D sobre índices' },
+      { id: 'a1c_stale', role: 'assistant', text: 'Respuesta única de C sobre discos.' }
     ];
-    const capD = await callMsg({ action: 'ACQUIRE_CONVERSATION' });
-    assert.equal(capD.success, true, `${spec.platform}: pregunta compartida con respuesta distinta no debe bloquearse`);
-    assert.match(capD.data.messages[1].text, /Postgres/);
+    const staleAnswerUnderNewQuestion = await callMsg({ action: 'ACQUIRE_CONVERSATION' });
+    assert.equal(staleAnswerUnderNewQuestion.success, false, `${spec.platform}: respuesta obsoleta de C con pregunta nueva de D debe rechazarse`);
+    assert.match(staleAnswerUnderNewQuestion.error, /STALE_DOM/);
+
+    // Caso sin falso positivo: conversación E comparte la misma pregunta de usuario que C pero con respuesta propia distinta
+    historyObj.pushState({}, '', spec.urlB.replace(/2|b/g, '5').replace(/bbbbbbbbbbbb/, 'eeeeeeeeeeee'));
+    multiTurns = [
+      { id: 'u1e', role: 'user', text: sharedPrompt },
+      { id: 'a1e', role: 'assistant', text: 'Respuesta completamente nueva de E sobre Postgres.' }
+    ];
+    const capE = await callMsg({ action: 'ACQUIRE_CONVERSATION' });
+    assert.equal(capE.success, true, `${spec.platform}: pregunta compartida con respuesta distinta no debe bloquearse`);
+    assert.match(capE.data.messages[1].text, /Postgres/);
   }
 });
 

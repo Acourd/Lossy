@@ -119,6 +119,11 @@
       if (!tSet || tSet.size === 0) continue;
       const staleFlags = parsedTurns.map(pt => isStaleTurnAgainst(pt, tSet));
       if (!staleFlags.some(Boolean)) continue;
+      // Un turno de usuario repetido con nueva respuesta es válido, pero cualquier respuesta de asistente previa sigue siendo obsoleta.
+      const hasStaleAiResponse = parsedTurns.some((pt, i) => staleFlags[i] && pt.role !== 'user' && pt.body.length >= 6);
+      if (hasStaleAiResponse) {
+        return true;
+      }
       const hasDistinctFreshTurn = parsedTurns.some((pt, i) => !staleFlags[i] && pt.body.length >= 8);
       if (!hasDistinctFreshTurn) {
         return true;
