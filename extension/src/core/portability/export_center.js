@@ -408,7 +408,7 @@
         const text = typeof msg.text === 'string' ? msg.text : (msg.content?.text || '');
         const nonCodeText = splitFencedCodeSegments(text)
           .filter(seg => !seg.isCode)
-          .map(seg => maskInlineCodeSpans(seg.text))
+          .map(seg => maskInlineCodeSpans(seg.text, seg.initialContainers))
           .join('\n');
         const isEscapedBackslash = (str, idx) => {
           let bs = 0;
@@ -756,8 +756,8 @@
     return { ok: true, indent: targetIndent, col: startCol + targetIndent, rest };
   }
 
-  function createContainerStepperMd() {
-    const containers = [];
+  function createContainerStepperMd(initialContainers) {
+    const containers = Array.isArray(initialContainers) ? initialContainers.map(c => ({ ...c })) : [];
     let inParagraph = false;
     return {
       get containers() { return containers; },
@@ -788,10 +788,23 @@
             matched++;
           }
         }
-        const listExited = hadActiveList && !containers.slice(0, matched).some(c => c.type === 'list');
-        containers.length = matched;
+        const listExited = containers.slice(matched).some(c => c.type === 'list');
+        const unmatched = containers.slice(matched);
+        const onlyUnmatchedBq = unmatched.length > 0 && unmatched.every(c => c.type === 'bq');
+        let lazyKeep = false;
+        if (onlyUnmatchedBq && inParagraph && rest.trim().length > 0) {
+          const tailLead = measureLeadColsMd(rest, col);
+          const tailTrim = rest.slice(tailLead.idx);
+          const tailInterrupts =
+            isSingleLineNonParaBlockMd(tailLead.cols, tailTrim) ||
+            (tailLead.cols <= 3 && /^(`{3,}[^`]*|~{3,}.*)$/.test(tailTrim)) ||
+            (tailLead.cols <= 3 && /^(?:[-+*][ \t]+\S|1[.)][ \t]+\S)/.test(tailTrim)) ||
+            (hadActiveList && tailLead.cols <= 3 && /^\d{1,9}[.)][ \t]+\S/.test(tailTrim));
+          if (!tailInterrupts) lazyKeep = true;
+        }
+        if (!lazyKeep) containers.length = matched;
         let hadMarker = false;
-        while (rest.trim().length > 0) {
+        while (!lazyKeep && rest.trim().length > 0) {
           const bq = matchBqPrefixMd(rest, col);
           if (bq.ok) {
             containers.push({ type: 'bq' });
@@ -819,7 +832,7 @@
     };
   }
 
-  function inlineSpanCrossesBlockBreakMd(s, contentStart, closePos) {
+  function inlineSpanCrossesBlockBreakMd(s, contentStart, closePos, initialContainers) {
     const firstNl = s.indexOf('\n', contentStart);
     if (firstNl === -1 || firstNl >= closePos) return false;
     const lines = s.split('\n');
@@ -833,7 +846,7 @@
       if (s[pos] === '\n') closeLineIdx++;
     }
 
-    const stepper = createContainerStepperMd();
+    const stepper = createContainerStepperMd(initialContainers);
     for (let li = 0; li <= closeLineIdx; li++) {
       const rawLine = lines[li].replace(/\r$/, '');
       const { lead, hadMarker, isBlank, trimmedAfterLead } = stepper.step(rawLine);
@@ -849,7 +862,7 @@
     return false;
   }
 
-  function splitInlineCodeSpans(str) {
+  function splitInlineCodeSpans(str, initialContainers) {
     const s = String(str || '');
     const parts = [];
     let plainBuf = '';
@@ -870,7 +883,7 @@
           const pos = s.indexOf(delim, end);
           if (pos === -1) break;
           if (s[pos - 1] !== '`' && s[pos + ticks] !== '`') {
-            if (!inlineSpanCrossesBlockBreakMd(s, i + ticks, pos)) {
+            if (!inlineSpanCrossesBlockBreakMd(s, i + ticks, pos, initialContainers)) {
               found = pos;
             }
             break;
@@ -893,15 +906,15 @@
     return parts;
   }
 
-  function maskInlineCodeSpans(str) {
-    return splitInlineCodeSpans(str).map(p => p.isCode ? '\u0000CODE\u0000' : p.text).join('');
+  function maskInlineCodeSpans(str, initialContainers) {
+    return splitInlineCodeSpans(str, initialContainers).map(p => p.isCode ? '\u0000CODE\u0000' : p.text).join('');
   }
 
-  function transformOutsideInlineCode(str, fn) {
-    return splitInlineCodeSpans(str).map(p => p.isCode ? p.text : fn(p.text)).join('');
+  function transformOutsideInlineCode(str, fn, initialContainers) {
+    return splitInlineCodeSpans(str, initialContainers).map(p => p.isCode ? p.text : fn(p.text)).join('');
   }
 
-  function splitFencedCodeSegments(text) {
+  function splitFencedCodeSegments(text, initialContainers) {
     const src = String(text || '').replace(/\r\n/g, '\n');
     const lines = src.split('\n');
     const segments = [];
@@ -912,13 +925,15 @@
     let fenceChar = '';
     let fenceLen = 0;
     let fenceContainers = [];
-    const stepper = createContainerStepperMd();
+    const stepper = createContainerStepperMd(initialContainers);
+    let bufInitContainers = stepper.containers.map(c => ({ ...c }));
 
-    const flush = isCode => {
+    const flush = (isCode, nextInit) => {
       if (buf.length) {
-        segments.push({ isCode, text: buf.join('\n') });
+        segments.push({ isCode, text: buf.join('\n'), initialContainers: bufInitContainers });
         buf = [];
       }
+      if (nextInit) bufInitContainers = nextInit.map(c => ({ ...c }));
     };
     const matchFenceContainers = (line, fcStack) => {
       let rest = line;
@@ -944,10 +959,11 @@
     };
 
     for (const line of lines) {
+      const beforeLineContainers = stepper.containers.map(c => ({ ...c }));
       if (inFence) {
         const { ok, rest, col } = matchFenceContainers(line, fenceContainers);
         if (!ok) {
-          flush(true);
+          flush(true, beforeLineContainers);
           inFence = false;
           fenceChar = '';
           fenceLen = 0;
@@ -958,7 +974,7 @@
           const closeLead = measureLeadColsMd(rest, col);
           const closeM = closeLead.cols <= 3 ? rest.slice(closeLead.idx).match(/^(`{3,}|~{3,})[ \t]*$/) : null;
           if (closeM && closeM[1][0] === fenceChar && closeM[1].length >= fenceLen) {
-            flush(true);
+            flush(true, stepper.containers);
             inFence = false;
             fenceChar = '';
             fenceLen = 0;
@@ -969,6 +985,7 @@
         }
       }
 
+      if (buf.length === 0) bufInitContainers = beforeLineContainers;
       const { lead, curBqCount, hadMarker, isBlank, trimmedAfterLead } = stepper.step(line);
 
       if (inIndented) {
@@ -977,7 +994,7 @@
           stepper.inParagraph = false;
           continue;
         }
-        flush(true);
+        flush(true, beforeLineContainers);
         inIndented = false;
         indentedBqCount = 0;
         stepper.inParagraph = false;
@@ -985,7 +1002,7 @@
 
       const openM = lead.cols <= 3 ? trimmedAfterLead.match(/^(`{3,}|~{3,})(.*)$/) : null;
       if (openM && !(openM[1][0] === '`' && openM[2].includes('`'))) {
-        flush(false);
+        flush(false, beforeLineContainers);
         inFence = true;
         fenceChar = openM[1][0];
         fenceLen = openM[1].length;
@@ -996,7 +1013,7 @@
       }
 
       if ((hadMarker || !stepper.inParagraph) && lead.cols >= 4 && !isBlank) {
-        flush(false);
+        flush(false, beforeLineContainers);
         inIndented = true;
         indentedBqCount = curBqCount;
         buf.push(line);
@@ -1023,7 +1040,7 @@
       .replace(/\uE200[\s\S]*?\uE201/g, '')
       .replace(/<(?:Cite|SuggestAutomation|DisplayAutomation)\b[^>]*\/>/gi, (m, offset, str) => (isEscaped(str, offset) ? m : ''))
       .replace(/!?\[([^\]]*)\]\(<?app:\/\/[^)>]+>?\)/g, (_, label) => label.replace(/^\$/, ''))
-      .replace(/\[Imagen: (?:sediment:\/\/|file-)[^\]]*\]/g, ''))).join('\n');
+      .replace(/\[Imagen: (?:sediment:\/\/|file-)[^\]]*\]/g, ''), seg.initialContainers)).join('\n');
   }
 
   function isPlainUtf8Text(bytes) {
@@ -1305,7 +1322,7 @@
       if (isEscapedBackslash(s, offset) || isEscapedBackslash(alt, alt.length)) return original;
       const found = images.find(a => a.sourceURL === url || a.url === url || a.dataURI === url);
       return found ? render(found, alt) : (strategy === 'omit' ? '' : original);
-    }))).join('\n');
+    }), seg.initialContainers)).join('\n');
     return body + images.map(a => { const image = render(a); return image ? '\n\n' + image : ''; }).join('');
   }
 

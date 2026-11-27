@@ -1048,8 +1048,8 @@
     return { ok: true, indent: targetIndent, col: startCol + targetIndent, rest };
   }
 
-  function createContainerStepper() {
-    const containers = [];
+  function createContainerStepper(initialContainers) {
+    const containers = Array.isArray(initialContainers) ? initialContainers.map(c => ({ ...c })) : [];
     let inParagraph = false;
     return {
       get containers() { return containers; },
@@ -1080,10 +1080,23 @@
             matched++;
           }
         }
-        const listExited = hadActiveList && !containers.slice(0, matched).some(c => c.type === 'list');
-        containers.length = matched;
+        const listExited = containers.slice(matched).some(c => c.type === 'list');
+        const unmatched = containers.slice(matched);
+        const onlyUnmatchedBq = unmatched.length > 0 && unmatched.every(c => c.type === 'bq');
+        let lazyKeep = false;
+        if (onlyUnmatchedBq && inParagraph && rest.trim().length > 0) {
+          const tailLead = measureLeadCols(rest, col);
+          const tailTrim = rest.slice(tailLead.idx);
+          const tailInterrupts =
+            isSingleLineNonParaBlock(tailLead.cols, tailTrim) ||
+            (tailLead.cols <= 3 && /^(`{3,}[^`]*|~{3,}.*)$/.test(tailTrim)) ||
+            (tailLead.cols <= 3 && /^(?:[-+*][ \t]+\S|1[.)][ \t]+\S)/.test(tailTrim)) ||
+            (hadActiveList && tailLead.cols <= 3 && /^\d{1,9}[.)][ \t]+\S/.test(tailTrim));
+          if (!tailInterrupts) lazyKeep = true;
+        }
+        if (!lazyKeep) containers.length = matched;
         let hadMarker = false;
-        while (rest.trim().length > 0) {
+        while (!lazyKeep && rest.trim().length > 0) {
           const bq = matchBqPrefix(rest, col);
           if (bq.ok) {
             containers.push({ type: 'bq' });
@@ -1121,7 +1134,7 @@
     return false;
   }
 
-  function inlineSpanCrossesBlockBreak(s, contentStart, closePos) {
+  function inlineSpanCrossesBlockBreak(s, contentStart, closePos, initialContainers) {
     const firstNl = s.indexOf('\n', contentStart);
     if (firstNl === -1 || firstNl >= closePos) return false;
     const lines = s.split('\n');
@@ -1135,7 +1148,7 @@
       if (s[pos] === '\n') closeLineIdx++;
     }
 
-    const stepper = createContainerStepper();
+    const stepper = createContainerStepper(initialContainers);
     for (let li = 0; li <= closeLineIdx; li++) {
       const rawLine = lines[li].replace(/\r$/, '');
       const { lead, hadMarker, isBlank, trimmedAfterLead } = stepper.step(rawLine);
@@ -1195,7 +1208,7 @@
    * Construye una copia de longitud 1:1 donde los tramos de código inline (single o multi-línea,
    * sin cruzar líneas en blanco ni fronteras de bloque CommonMark) y las etiquetas escapadas con '\' (`\<`) quedan neutralizados con espacios.
    */
-  function sanitizeForWidgetScan(segment) {
+  function sanitizeForWidgetScan(segment, initialContainers) {
     const s = String(segment || '');
     const chars = s.split('');
     let i = 0;
@@ -1210,7 +1223,7 @@
           const pos = s.indexOf(delim, end);
           if (pos === -1) break;
           if (s[pos - 1] !== '`' && s[pos + ticks] !== '`') {
-            if (!inlineSpanCrossesBlockBreak(s, i + ticks, pos)) {
+            if (!inlineSpanCrossesBlockBreak(s, i + ticks, pos, initialContainers)) {
               found = pos;
             }
             break;
@@ -1239,9 +1252,9 @@
    * Encuentra bloques DIL balanceados de nivel superior (incluyendo directivas {@body ...} precedentes),
    * ignorando código inline y etiquetas escapadas con '\'.
    */
-  function findTopLevelWidgetRanges(segment) {
+  function findTopLevelWidgetRanges(segment, initialContainers) {
     const ranges = [];
-    const scanSegment = sanitizeForWidgetScan(segment);
+    const scanSegment = sanitizeForWidgetScan(segment, initialContainers);
     const openRe = /((?:(?:\{@body\s+[^}]+\}\s*)+)?)<(grid|card|stack|box|row|svg)(?=[\s/>])[^>]*>/gi;
     let match;
     let searchFrom = 0;
@@ -1311,21 +1324,21 @@
       .replace(/<br>/g, '\n');
   }
 
-  function transformSegment(segment, blockRenderer, mode) {
-    const ranges = findTopLevelWidgetRanges(segment);
-    const cleanNonWidget = chunk => transformOutsideInlineCode(chunk, s => stripInlineControlTags(s, mode));
+  function transformSegment(segment, blockRenderer, mode, initialContainers) {
+    const ranges = findTopLevelWidgetRanges(segment, initialContainers);
+    const cleanNonWidget = (chunk, cInit) => transformOutsideInlineCode(chunk, s => stripInlineControlTags(s, mode), cInit);
     let rebuilt = '';
     let cursor = 0;
     for (const r of ranges) {
-      rebuilt += cleanNonWidget(segment.slice(cursor, r.start));
+      rebuilt += cleanNonWidget(segment.slice(cursor, r.start), cursor === 0 ? initialContainers : undefined);
       rebuilt += blockRenderer(r.raw);
       cursor = r.end;
     }
-    rebuilt += cleanNonWidget(segment.slice(cursor));
+    rebuilt += cleanNonWidget(segment.slice(cursor), cursor === 0 ? initialContainers : undefined);
     return rebuilt;
   }
 
-  function splitFencedCodeSegments(text) {
+  function splitFencedCodeSegments(text, initialContainers) {
     const src = String(text || '').replace(/\r\n/g, '\n');
     const lines = src.split('\n');
     const segments = [];
@@ -1336,7 +1349,8 @@
     let fenceChar = '';
     let fenceLen = 0;
     let fenceContainers = [];
-    const stepper = createContainerStepper();
+    const stepper = createContainerStepper(initialContainers);
+    let bufInitContainers = stepper.containers.map(c => ({ ...c }));
     let widgetDepth = 0;
     let inlineOpenTicks = 0;
     let inlineOpenInList = false;
@@ -1459,11 +1473,12 @@
       if (plainBuf && trackDepth) updateWidgetDepthPlain(plainBuf);
     };
 
-    const flush = isCode => {
+    const flush = (isCode, nextInit) => {
       if (buf.length) {
-        segments.push({ isCode, text: buf.join('\n') });
+        segments.push({ isCode, text: buf.join('\n'), initialContainers: bufInitContainers });
         buf = [];
       }
+      if (nextInit) bufInitContainers = nextInit.map(c => ({ ...c }));
     };
     const matchFenceContainers = (line, fcStack) => {
       let rest = line;
@@ -1489,10 +1504,11 @@
     };
 
     for (const line of lines) {
+      const beforeLineContainers = stepper.containers.map(c => ({ ...c }));
       if (inFence) {
         const { ok, rest, col } = matchFenceContainers(line, fenceContainers);
         if (!ok) {
-          flush(true);
+          flush(true, beforeLineContainers);
           inFence = false;
           fenceChar = '';
           fenceLen = 0;
@@ -1503,7 +1519,7 @@
           const closeLead = measureLeadCols(rest, col);
           const closeM = closeLead.cols <= 3 ? rest.slice(closeLead.idx).match(/^(`{3,}|~{3,})[ \t]*$/) : null;
           if (closeM && closeM[1][0] === fenceChar && closeM[1].length >= fenceLen) {
-            flush(true);
+            flush(true, stepper.containers);
             inFence = false;
             fenceChar = '';
             fenceLen = 0;
@@ -1514,6 +1530,7 @@
         }
       }
 
+      if (buf.length === 0) bufInitContainers = beforeLineContainers;
       const { rest, lead, curBqCount, hadMarker, isBlank, trimmedAfterLead } = stepper.step(line);
 
       if (inIndented) {
@@ -1522,7 +1539,7 @@
           stepper.inParagraph = false;
           continue;
         }
-        flush(true);
+        flush(true, beforeLineContainers);
         inIndented = false;
         indentedBqCount = 0;
         stepper.inParagraph = false;
@@ -1531,7 +1548,7 @@
       const openM = lead.cols <= 3 ? trimmedAfterLead.match(/^(`{3,}|~{3,})(.*)$/) : null;
       if (openM && !(openM[1][0] === '`' && openM[2].includes('`'))) {
         flushPendingInline();
-        flush(false);
+        flush(false, beforeLineContainers);
         inFence = true;
         fenceChar = openM[1][0];
         fenceLen = openM[1].length;
@@ -1547,7 +1564,7 @@
       }
       if ((hadMarker || !stepper.inParagraph) && lead.cols >= 4 && !isBlank && !(curBqCount === 0 && widgetDepth > 0)) {
         flushPendingInline();
-        flush(false);
+        flush(false, beforeLineContainers);
         inIndented = true;
         indentedBqCount = curBqCount;
         buf.push(line);
@@ -1571,13 +1588,13 @@
   function transformOutsideCodeFences(text, blockRenderer, mode) {
     const input = String(text || '');
     if (!input) return '';
-    return splitFencedCodeSegments(input).map(seg => seg.isCode ? seg.text : transformSegment(seg.text, blockRenderer, mode)).join('\n');
+    return splitFencedCodeSegments(input).map(seg => seg.isCode ? seg.text : transformSegment(seg.text, blockRenderer, mode, seg.initialContainers)).join('\n');
   }
 
   function hasVisualWidgets(text) {
     const input = String(text || '');
     for (const seg of splitFencedCodeSegments(input)) {
-      if (!seg.isCode && findTopLevelWidgetRanges(seg.text).length > 0) return true;
+      if (!seg.isCode && findTopLevelWidgetRanges(seg.text, seg.initialContainers).length > 0) return true;
     }
     return false;
   }
@@ -1594,7 +1611,7 @@
     return transformOutsideCodeFences(text, renderWidgetBlockToHtml, 'html');
   }
 
-  function transformOutsideInlineCode(str, fn) {
+  function transformOutsideInlineCode(str, fn, initialContainers) {
     const s = String(str || '');
     let out = '';
     let plainBuf = '';
@@ -1610,7 +1627,7 @@
           const pos = s.indexOf(delim, end);
           if (pos === -1) break;
           if (s[pos - 1] !== '`' && s[pos + ticks] !== '`') {
-            if (!inlineSpanCrossesBlockBreak(s, i + ticks, pos)) {
+            if (!inlineSpanCrossesBlockBreak(s, i + ticks, pos, initialContainers)) {
               found = pos;
             }
             break;
@@ -1633,13 +1650,13 @@
     return out;
   }
 
-  function stripControlTokensOnly(text) {
+  function stripControlTokensOnly(text, initialContainers) {
     const input = String(text || '');
     if (!input) return '';
-    return splitFencedCodeSegments(input).map(seg => {
+    return splitFencedCodeSegments(input, initialContainers).map(seg => {
       if (seg.isCode) return seg.text;
       return transformOutsideInlineCode(seg.text, s => s
-        .replace(/<(?:Cite|SuggestAutomation|DisplayAutomation)\b[^>]*\/>/gi, (m, offset, str) => (isEscapedAt(str, offset) ? m : '')));
+        .replace(/<(?:Cite|SuggestAutomation|DisplayAutomation)\b[^>]*\/>/gi, (m, offset, str) => (isEscapedAt(str, offset) ? m : '')), seg.initialContainers);
     }).join('\n');
   }
 

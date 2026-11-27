@@ -64,88 +64,62 @@
   }
 
   function renderSimpleMarkdownToHtml(text, opts = {}) {
-    let src = String(text || '').replace(/\r\n/g, '\n');
+    const src = String(text || '').replace(/\r\n/g, '\n');
     const blocks = [];
     const codeSlots = [];
     const widgetSlots = [];
 
-    // 1. Render DIL visual widgets only outside CommonMark code blocks (container fences, tildes, and indented code)
-    if (widgets && typeof widgets.findTopLevelWidgetRanges === 'function') {
-      const segs = typeof widgets.splitFencedCodeSegments === 'function'
-        ? widgets.splitFencedCodeSegments(src)
-        : [{ isCode: false, text: src }];
-      src = segs.map(seg => {
-        if (seg.isCode) return seg.text;
-        let part = seg.text;
-        const ranges = widgets.findTopLevelWidgetRanges(part);
-        if (ranges.length) {
-          let rebuilt = '';
-          let cursor = 0;
-          for (const r of ranges) {
-            rebuilt += widgets.stripControlTokensOnly(part.slice(cursor, r.start));
-            const idx = widgetSlots.length;
-            widgetSlots.push(widgets.renderWidgetBlockToHtml(r.raw));
-            rebuilt += `\n\n@@WIDGET${idx}@@\n\n`;
-            cursor = r.end;
+    // 1. Unified CommonMark code-block + DIL visual widget extraction
+    let work;
+    if (widgets && typeof widgets.splitFencedCodeSegments === 'function') {
+      const segs = widgets.splitFencedCodeSegments(src);
+      work = segs.map(seg => {
+        if (seg.isCode) {
+          const idx = codeSlots.length;
+          const cLines = seg.text.split('\n');
+          const openM = cLines[0].match(/^ {0,3}(`{3,}|~{3,})(.*)$/);
+          if (openM && !(openM[1][0] === '`' && openM[2].includes('`'))) {
+            const fChar = openM[1][0];
+            const fLen = openM[1].length;
+            const fenceLang = (openM[2].trim().split(/\s+/)[0]) || 'text';
+            const lastLine = cLines.length > 1 ? cLines[cLines.length - 1] : '';
+            const closeM = lastLine.match(/^ {0,3}(`{3,}|~{3,})[ \t]*$/);
+            const hasClose = Boolean(closeM && closeM[1][0] === fChar && closeM[1].length >= fLen);
+            const body = cLines.slice(1, hasClose ? -1 : undefined).join('\n');
+            codeSlots.push(
+              `<div class="l-code-wrap"><div class="l-code-head"><span>${escapeHtml(fenceLang)}</span></div>` +
+              `<pre><code>${escapeHtml(body)}</code></pre></div>`
+            );
+          } else {
+            codeSlots.push(`<div class="l-code-wrap"><pre><code>${escapeHtml(seg.text)}</code></pre></div>`);
           }
-          rebuilt += widgets.stripControlTokensOnly(part.slice(cursor));
-          part = rebuilt;
-        } else {
-          part = widgets.stripControlTokensOnly(part);
+          return `\n\n@@CODE${idx}@@\n\n`;
+        }
+        let part = seg.text;
+        if (typeof widgets.findTopLevelWidgetRanges === 'function') {
+          const initContainers = seg.initialContainers;
+          const ranges = widgets.findTopLevelWidgetRanges(part, initContainers);
+          if (ranges.length) {
+            let rebuilt = '';
+            let cursor = 0;
+            for (const r of ranges) {
+              rebuilt += widgets.stripControlTokensOnly(part.slice(cursor, r.start), cursor === 0 ? initContainers : undefined);
+              const idx = widgetSlots.length;
+              widgetSlots.push(widgets.renderWidgetBlockToHtml(r.raw));
+              rebuilt += `\n\n@@WIDGET${idx}@@\n\n`;
+              cursor = r.end;
+            }
+            rebuilt += widgets.stripControlTokensOnly(part.slice(cursor));
+            part = rebuilt;
+          } else {
+            part = widgets.stripControlTokensOnly(part, initContainers);
+          }
         }
         return part;
       }).join('\n');
+    } else {
+      work = src;
     }
-
-    // 2. Preserve fenced code blocks (CommonMark-compliant: 0-3 spaces, backticks or tildes, info strings, trailing spaces)
-    const srcLines = src.split('\n');
-    const outLines = [];
-    let inFence = false;
-    let fenceChar = '';
-    let fenceLen = 0;
-    let fenceLang = '';
-    let fenceBuf = [];
-    for (const line of srcLines) {
-      if (!inFence) {
-        const openM = line.match(/^ {0,3}(`{3,}|~{3,})(.*)$/);
-        if (openM && !(openM[1][0] === '`' && openM[2].includes('`'))) {
-          inFence = true;
-          fenceChar = openM[1][0];
-          fenceLen = openM[1].length;
-          const infoToken = openM[2].trim().split(/\s+/)[0] || '';
-          fenceLang = infoToken || 'text';
-          fenceBuf = [];
-          continue;
-        }
-        outLines.push(line);
-      } else {
-        const closeM = line.match(/^ {0,3}(`{3,}|~{3,})[ \t]*$/);
-        if (closeM && closeM[1][0] === fenceChar && closeM[1].length >= fenceLen) {
-          const idx = codeSlots.length;
-          codeSlots.push(
-            `<div class="l-code-wrap"><div class="l-code-head"><span>${escapeHtml(fenceLang)}</span></div>` +
-            `<pre><code>${escapeHtml(fenceBuf.join('\n'))}</code></pre></div>`
-          );
-          outLines.push('', `@@CODE${idx}@@`, '');
-          inFence = false;
-          fenceChar = '';
-          fenceLen = 0;
-          fenceLang = '';
-          fenceBuf = [];
-          continue;
-        }
-        fenceBuf.push(line);
-      }
-    }
-    if (inFence) {
-      const idx = codeSlots.length;
-      codeSlots.push(
-        `<div class="l-code-wrap"><div class="l-code-head"><span>${escapeHtml(fenceLang)}</span></div>` +
-        `<pre><code>${escapeHtml(fenceBuf.join('\n'))}</code></pre></div>`
-      );
-      outLines.push('', `@@CODE${idx}@@`, '');
-    }
-    const work = outLines.join('\n');
 
     // 3. Parse lines into paragraphs, headings, lists, tables, blockquotes
     const lines = work.split('\n');

@@ -55,12 +55,12 @@
     :String(src||'').split(/(```[\s\S]*?```)/g).map((text,idx)=>({isCode:idx%2===1,text}));
    const processed=segs.map(seg=>{
     if(seg.isCode)return seg.text;
-    const part=seg.text;
-    const ranges=widgets.findTopLevelWidgetRanges(part);
+    const part=seg.text,initContainers=seg.initialContainers;
+    const ranges=widgets.findTopLevelWidgetRanges(part,initContainers);
     let out='',cursor=0;
-    const transformPlain=(chunk,fn)=>typeof widgets.transformOutsideInlineCode==='function'?widgets.transformOutsideInlineCode(chunk,fn):fn(chunk);
-    const cleanInline=segText=>{
-     let s=widgets.stripControlTokensOnly(segText);
+    const transformPlain=(chunk,fn,cInit)=>typeof widgets.transformOutsideInlineCode==='function'?widgets.transformOutsideInlineCode(chunk,fn,cInit):fn(chunk);
+    const cleanInline=(segText,cInit)=>{
+     let s=widgets.stripControlTokensOnly(segText,cInit);
      s=transformPlain(s,plain=>{
       let p=plain.replace(/<text\b([^>]*)>([\s\S]*?)<\/text>/gi,(m,a,inner,offset,str)=>{
        if(isEscaped(str,offset))return m;
@@ -84,17 +84,17 @@
       });
       p=p.replace(/<divider\s*\/>/gi,(m,offset,str)=>isEscaped(str,offset)?m:'\n\n---\n\n');
       return p;
-     });
+     },cInit);
      return s;
     };
     for(const r of ranges){
-     out+=cleanInline(part.slice(cursor,r.start));
+     out+=cleanInline(part.slice(cursor,r.start),cursor===0?initContainers:undefined);
      const id='LOSSYBLOCK'+blocks.length+'END';
      blocks.push(widgets.renderWidgetBlockToHtml(r.raw));
      out+='\n\n'+id+'\n\n';
      cursor=r.end;
     }
-    out+=cleanInline(part.slice(cursor));
+    out+=cleanInline(part.slice(cursor),cursor===0?initContainers:undefined);
     return out;
    }).join('\n');
    let html=rawRender(processed,env);
