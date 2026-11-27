@@ -38,17 +38,35 @@
     clone.querySelectorAll?.('img').forEach(img => { if (!isContentImage(img)) img.remove(); });
     return clone;
   }
+  function serializeTableDom(tableNode) {
+    const trNodes = tableNode.querySelectorAll ? Array.from(tableNode.querySelectorAll('tr')) : [];
+    if (!trNodes.length) return '';
+    const rows = [];
+    for (const tr of trNodes) {
+      const cells = Array.from(tr.querySelectorAll('th, td')).map(c =>
+        messageDomText(c).replace(/\r?\n+/g, ' ').replace(/\s+/g, ' ').replace(/\|/g, '\\|').trim()
+      );
+      if (cells.length) rows.push(cells);
+    }
+    if (!rows.length) return '';
+    const cols = Math.max(...rows.map(r => r.length));
+    const fmt = r => `| ${r.concat(Array(Math.max(0, cols - r.length)).fill('')).join(' | ')} |`;
+    return `\n\n${fmt(rows[0])}\n| ${Array(cols).fill('---').join(' | ')} |\n${rows.slice(1).map(fmt).join('\n')}\n\n`;
+  }
   function messageDomText(node) {
     if (node.nodeType === 3) return node.textContent || '';
     const tag = (node.tagName || '').toLowerCase();
-    const text = Array.from(node.childNodes || []).map(messageDomText).join('');
     if (tag === 'img') return '';
     if (tag === 'br') return '\n';
+    if (tag === 'table') return serializeTableDom(node);
     if (tag === 'pre') {
       const code=node.querySelector('code');
       const lang=code?.className?.match(/language-([\w+-]+)/)?.[1] || '';
-      return '\n\n```' + lang + '\n' + (code?.textContent || node.textContent) + '\n```\n\n';
+      const rawCode = (code?.textContent || node.textContent || '').replace(/^\n+|\n+$/g, '');
+      const fence = rawCode.includes('```') ? '````' : '```';
+      return '\n\n' + fence + lang + '\n' + rawCode + '\n' + fence + '\n\n';
     }
+    const text = Array.from(node.childNodes || []).map(messageDomText).join('');
     if (tag === 'code') return '`' + text + '`';
     if (/^h[1-6]$/.test(tag)) return '\n\n' + '#'.repeat(Number(tag[1])) + ' ' + text + '\n\n';
     if (tag === 'li') return '\n- ' + text;
@@ -122,11 +140,27 @@
     return null;
   }
 
+  function stableHash(str) {
+    let h = 2166136261;
+    const s = String(str || '');
+    for (let i = 0; i < s.length; i++) {
+      h ^= s.charCodeAt(i);
+      h = Math.imul(h, 16777619);
+    }
+    return (h >>> 0).toString(36);
+  }
+
+  function attachmentSignature(att) {
+    if (!att) return '';
+    return att.sourceURL || att.url || (att.dataURI ? att.dataURI.slice(0, 96) + ':' + att.dataURI.length : '') || att.assetId || att.id || '';
+  }
+
   /**
-   * Compara dos turnos individuales de forma estricta por rol, texto y bloques de código.
+   * Compara dos turnos individuales de forma estricta por identidad, rol, texto, código y adjuntos.
    */
   function areTurnsEqual(t1, t2) {
     if (!t1 || !t2) return false;
+    if (t1.id && t2.id && t1.id !== t2.id) return false;
     if (t1.role !== t2.role) return false;
     if (t1.text !== t2.text) return false;
     const cb1 = t1.codeBlocks || [];
@@ -136,6 +170,12 @@
       if (cb1[i].code !== cb2[i].code || cb1[i].language !== cb2[i].language) {
         return false;
       }
+    }
+    const a1 = t1.attachments || [];
+    const a2 = t2.attachments || [];
+    if (a1.length !== a2.length) return false;
+    for (let i = 0; i < a1.length; i++) {
+      if (attachmentSignature(a1[i]) !== attachmentSignature(a2[i])) return false;
     }
     return true;
   }
@@ -316,91 +356,89 @@
 
   /**
    * Extrae los turnos de conversación materializados en el DOM en el momento de la llamada.
+   * Prioriza atributos estructurales ([data-message-author-role]) sobre heurísticas de encabezados.
    */
   function extractVisibleTurns(root = document) {
     const turns = [];
 
-    // Enfoque 1 (Estructura viva de ChatGPT 2025-2026): Encabezados semánticos sr-only
-    const h4Nodes = Array.from(root.querySelectorAll('h4')).filter(h => {
-      const t = (h.textContent || h.innerText || '').toLowerCase().trim();
-      return t.includes('dijiste') || t.includes('said') || t.includes('dijo') || t.includes('chatgpt') || t.includes('you');
-    });
+    const extractTurnAttachments = (clone, msgIdSeed) => {
+      const attachments = [];
+      const imgNodes = clone.querySelectorAll('img');
+      let imgIdx = 0;
+      imgNodes.forEach(img => {
+        const src = img.getAttribute('src');
+        if (!isContentImage(img)) return;
+        const widthAttr = parseInt(img.getAttribute('width') || '0', 10);
+        const heightAttr = parseInt(img.getAttribute('height') || '0', 10);
+        if ((widthAttr > 0 && widthAttr < 32) || (heightAttr > 0 && heightAttr < 32) || src.includes('avatar')) return;
 
-    if (h4Nodes && h4Nodes.length > 0) {
-      h4Nodes.forEach((h4) => {
-        const markerText = (h4.textContent || h4.innerText || '').toLowerCase();
-        const isUser = markerText.includes('dijiste') || markerText.includes('said') || markerText.includes('you') || markerText.includes('user');
-        const role = isUser ? 'user' : 'assistant';
-        const author = isUser ? 'Usuario' : 'ChatGPT';
+        const alt = img.getAttribute('alt') || 'imagen';
+        const ext = src.startsWith('data:image/jpeg') ? 'jpg' : 'png';
+        const dataUri = (typeof extractImageDataUri === 'function' ? extractImageDataUri(img) : null) || (src.startsWith('data:') ? src : null);
+        const attId = `dom_att_img_${stableHash(`${msgIdSeed || ''}|${src}|${imgIdx}`)}`;
+        imgIdx++;
+        attachments.push({
+          id: attId,
+          assetId: attId,
+          name: `${alt.replace(/[^a-zA-Z0-9_\-]/g, '_').slice(0, 24)}.${ext}`,
+          filename: `${alt.replace(/[^a-zA-Z0-9_\-]/g, '_').slice(0, 24)}.${ext}`,
+          mimeType: src.startsWith('data:image/jpeg') ? 'image/jpeg' : 'image/png',
+          kind: 'image',
+          sourceType: 'dom-image',
+          sourceURL: src,
+          url: src,
+          dataURI: dataUri,
+          availability: dataUri ? 'embedded' : 'referenced'
+        });
 
-        const container = h4.parentElement;
-        if (!container) return;
+        const mdImgNode = document.createTextNode('');
+        if (img.parentNode) {
+          img.parentNode.replaceChild(mdImgNode, img);
+        }
+      });
+      return attachments;
+    };
 
-        const clone = cleanMessageDom(container.cloneNode(true));
-        const h4InClone = clone.querySelector('h4');
-        if (h4InClone) h4InClone.remove();
+    // Enfoque 1 (Prioridad estructural): data-message-author-role
+    const messageNodes = root.querySelectorAll('[data-message-author-role]');
+    if (messageNodes && messageNodes.length > 0) {
+      messageNodes.forEach((node) => {
+        const rawRole = (node.getAttribute('data-message-author-role') || 'assistant').toLowerCase();
+        const role = rawRole === 'user' ? 'user' : 'assistant';
+        const msgId = node.getAttribute('data-message-id') || undefined;
+        const textContainer = node.querySelector('.markdown') || node.querySelector('.whitespace-pre-wrap') || node;
+
+        const clone = cleanMessageDom((textContainer || node).cloneNode(true));
         if (clone.querySelectorAll) {
           clone.querySelectorAll('.lossy-action-wrapper, .lossy-message-action-btn, .lossy-popover-menu, .lossy-toast-notice').forEach(el => el.remove());
         }
-
         const codeBlocks = [];
         const preNodes = clone.querySelectorAll('pre');
         preNodes.forEach((pre) => {
           const codeElem = pre.querySelector('code');
-          const code = cleanText(codeElem ? codeElem.textContent : pre.textContent);
+          const code = (codeElem ? codeElem.textContent : pre.textContent || '').replace(/\r\n/g, '\n').replace(/^\n+|\n+$/g, '');
           const langClass = codeElem ? Array.from(codeElem.classList).find(c => c.startsWith('language-')) : null;
           const language = langClass ? langClass.replace('language-', '') : 'plaintext';
 
           codeBlocks.push({ language, code });
 
-          const mdNode = document.createTextNode(`\n\n\`\`\`${language}\n${code}\n\`\`\`\n\n`);
+          const fence = code.includes('```') ? '````' : '```';
+          const mdNode = document.createTextNode(`\n\n${fence}${language}\n${code}\n${fence}\n\n`);
           if (pre.parentNode) {
             pre.parentNode.replaceChild(mdNode, pre);
           }
         });
 
-        const attachments = [];
-        const imgNodes = clone.querySelectorAll('img');
-        let imgIdx = 0;
-        imgNodes.forEach(img => {
-          const src = img.getAttribute('src');
-          if (!isContentImage(img)) return;
-          const widthAttr = parseInt(img.getAttribute('width') || '0', 10);
-          const heightAttr = parseInt(img.getAttribute('height') || '0', 10);
-          if ((widthAttr > 0 && widthAttr < 32) || (heightAttr > 0 && heightAttr < 32) || src.includes('avatar')) return;
-
-          const alt = img.getAttribute('alt') || 'imagen';
-          const ext = src.startsWith('data:image/jpeg') ? 'jpg' : 'png';
-          const dataUri = (typeof extractImageDataUri === 'function' ? extractImageDataUri(img) : null) || (src.startsWith('data:') ? src : null);
-          const attId = `dom_att_img_${turns.length}_${imgIdx++}`;
-          attachments.push({
-            id: attId,
-            assetId: attId,
-            name: `${alt.replace(/[^a-zA-Z0-9_\-]/g, '_').slice(0, 24)}.${ext}`,
-            filename: `${alt.replace(/[^a-zA-Z0-9_\-]/g, '_').slice(0, 24)}.${ext}`,
-            mimeType: src.startsWith('data:image/jpeg') ? 'image/jpeg' : 'image/png',
-            kind: 'image',
-            sourceType: 'dom-image',
-            sourceURL: src,
-            url: src,
-            dataURI: dataUri,
-            availability: dataUri ? 'embedded' : 'referenced'
-          });
-
-          const mdImgNode = document.createTextNode('');
-          if (img.parentNode) {
-            img.parentNode.replaceChild(mdImgNode, img);
-          }
-        });
+        const attachments = extractTurnAttachments(clone, msgId);
 
         let text = cleanText(messageDomText(clone));
         text = text.replace(/File\s+([a-zA-Z0-9_\-]{8,})/g, '[Archivo adjunto: $1]');
 
         if (text.length > 0 || attachments.length > 0) {
           turns.push({
-            id: container.querySelector('[data-message-id]')?.getAttribute('data-message-id') || container.getAttribute('data-message-id') || undefined,
+            id: msgId,
             role,
-            author,
+            author: role === 'user' ? 'Usuario' : 'ChatGPT',
             text,
             codeBlocks,
             attachments
@@ -409,76 +447,60 @@
       });
     }
 
-    // Enfoque 2 (Fallback): data-message-author-role
+    // Enfoque 2 (Fallback estricto para DOM con encabezados sr-only): solo marcadores exactos de turno
     if (turns.length === 0) {
-      const messageNodes = root.querySelectorAll('[data-message-author-role]');
-      if (messageNodes && messageNodes.length > 0) {
-        messageNodes.forEach((node) => {
-          const role = node.getAttribute('data-message-author-role') || 'assistant';
-          const textContainer = node.querySelector('.markdown') || node.querySelector('.whitespace-pre-wrap') || node;
+      const USER_MARKER_RE = /^(?:you said|tú dijiste|tu dijiste|dijiste|usuario dijo|user said)\s*:?$/i;
+      const ASSISTANT_MARKER_RE = /^(?:chatgpt said|chatgpt dijo|el asistente dijo|assistant said)\s*:?$/i;
+      const h4Nodes = Array.from(root.querySelectorAll('h4')).filter(h => {
+        const t = (h.textContent || h.innerText || '').trim();
+        return USER_MARKER_RE.test(t) || ASSISTANT_MARKER_RE.test(t);
+      });
 
-          const clone = cleanMessageDom((textContainer || node).cloneNode(true));
+      if (h4Nodes && h4Nodes.length > 0) {
+        h4Nodes.forEach((h4) => {
+          const markerText = (h4.textContent || h4.innerText || '').trim();
+          const isUser = USER_MARKER_RE.test(markerText);
+          const role = isUser ? 'user' : 'assistant';
+          const author = isUser ? 'Usuario' : 'ChatGPT';
+
+          const container = h4.parentElement;
+          if (!container) return;
+
+          const msgId = container.querySelector?.('[data-message-id]')?.getAttribute('data-message-id') || container.getAttribute?.('data-message-id') || undefined;
+          const clone = cleanMessageDom(container.cloneNode(true));
+          const h4InClone = clone.querySelector('h4');
+          if (h4InClone) h4InClone.remove();
           if (clone.querySelectorAll) {
             clone.querySelectorAll('.lossy-action-wrapper, .lossy-message-action-btn, .lossy-popover-menu, .lossy-toast-notice').forEach(el => el.remove());
           }
+
           const codeBlocks = [];
           const preNodes = clone.querySelectorAll('pre');
           preNodes.forEach((pre) => {
             const codeElem = pre.querySelector('code');
-            const code = cleanText(codeElem ? codeElem.textContent : pre.textContent);
+            const code = (codeElem ? codeElem.textContent : pre.textContent || '').replace(/\r\n/g, '\n').replace(/^\n+|\n+$/g, '');
             const langClass = codeElem ? Array.from(codeElem.classList).find(c => c.startsWith('language-')) : null;
             const language = langClass ? langClass.replace('language-', '') : 'plaintext';
 
             codeBlocks.push({ language, code });
 
-            const mdNode = document.createTextNode(`\n\n\`\`\`${language}\n${code}\n\`\`\`\n\n`);
+            const fence = code.includes('```') ? '````' : '```';
+            const mdNode = document.createTextNode(`\n\n${fence}${language}\n${code}\n${fence}\n\n`);
             if (pre.parentNode) {
               pre.parentNode.replaceChild(mdNode, pre);
             }
           });
 
-          const attachments = [];
-          const imgNodes = clone.querySelectorAll('img');
-          let imgIdx = 0;
-          imgNodes.forEach(img => {
-            const src = img.getAttribute('src');
-            if (!isContentImage(img)) return;
-            const widthAttr = parseInt(img.getAttribute('width') || '0', 10);
-            const heightAttr = parseInt(img.getAttribute('height') || '0', 10);
-            if ((widthAttr > 0 && widthAttr < 32) || (heightAttr > 0 && heightAttr < 32) || src.includes('avatar')) return;
-
-            const alt = img.getAttribute('alt') || 'imagen';
-            const ext = src.startsWith('data:image/jpeg') ? 'jpg' : 'png';
-            const dataUri = (typeof extractImageDataUri === 'function' ? extractImageDataUri(img) : null) || (src.startsWith('data:') ? src : null);
-            const attId = `dom_att_img_${turns.length}_${imgIdx++}`;
-            attachments.push({
-              id: attId,
-              assetId: attId,
-              name: `${alt.replace(/[^a-zA-Z0-9_\-]/g, '_').slice(0, 24)}.${ext}`,
-              filename: `${alt.replace(/[^a-zA-Z0-9_\-]/g, '_').slice(0, 24)}.${ext}`,
-              mimeType: src.startsWith('data:image/jpeg') ? 'image/jpeg' : 'image/png',
-              kind: 'image',
-              sourceType: 'dom-image',
-              sourceURL: src,
-              url: src,
-              dataURI: dataUri,
-              availability: dataUri ? 'embedded' : 'referenced'
-            });
-
-            const mdImgNode = document.createTextNode('');
-            if (img.parentNode) {
-              img.parentNode.replaceChild(mdImgNode, img);
-            }
-          });
+          const attachments = extractTurnAttachments(clone, msgId);
 
           let text = cleanText(messageDomText(clone));
           text = text.replace(/File\s+([a-zA-Z0-9_\-]{8,})/g, '[Archivo adjunto: $1]');
 
           if (text.length > 0 || attachments.length > 0) {
             turns.push({
-              id: node.getAttribute('data-message-id') || undefined,
+              id: msgId,
               role,
-              author: role === 'user' ? 'Usuario' : 'ChatGPT',
+              author,
               text,
               codeBlocks,
               attachments
@@ -657,9 +679,9 @@
       } catch (_) {}
     }
 
-    // Caso 1: Chat corto sin virtualización activa (cabe completo en pantalla y está al inicio)
-    if (!isScrollable || (initialScrollTop === 0 && initialVisible.length <= 4)) {
-      diagnostics.terminationReason = !isScrollable ? 'EARLY_EXIT_NOT_SCROLLABLE' : 'EARLY_EXIT_SHORT_CHAT_AT_TOP';
+    // Caso 1: Solo salir anticipadamente si el contenedor NO es desplazable (sin virtualización pendiente)
+    if (!isScrollable) {
+      diagnostics.terminationReason = 'EARLY_EXIT_NOT_SCROLLABLE';
       diagnostics.finalAccumulatedCount = initialVisible.length;
       diagnostics.durationMs = Date.now() - startTime;
       diagnostics.firstTurnExtracted = formatSnippet(initialVisible[0]);
@@ -725,6 +747,21 @@
         currentPos = Math.min(currentPos + step, dynamicMaxScroll);
         container.scrollTop = currentPos;
         await waitMs(100);
+
+        // Verificar cancelación o navegación ANTES de leer e incorporar snapshots (evita mezcla A→inicio / A→B→A)
+        if (activeHarvestCancelled) {
+          break;
+        }
+        if (startEpoch !== null && checkNavigationEpoch() !== startEpoch) {
+          diagnostics.terminationReason = 'ABORT_NAVIGATION_EPOCH_CHANGED';
+          activeHarvestCancelled = true;
+          break;
+        }
+        if (expectedConvId && detectActiveConversationId() !== expectedConvId) {
+          diagnostics.terminationReason = 'ABORT_CONVERSATION_ID_CHANGED';
+          activeHarvestCancelled = true;
+          break;
+        }
 
         const currentSnapshot = extractVisibleTurns(document);
         const currentSnapshotSignatures = currentSnapshot.map(t => `${t.role}:::${t.text}`);
@@ -1193,25 +1230,38 @@
         const token = await getEphemeralSessionToken();
         assertCaptureCurrent();
         const controller = typeof AbortController !== 'undefined' ? new AbortController() : null;
-        const timer = controller ? setTimeout(() => controller.abort(), 2500) : null;
+        const timer = controller ? setTimeout(() => controller.abort(), 5000) : null;
         if(controller)activeAssetControllers.add(controller);
-        const res = await fetch(`/backend-api/conversation/${convId}`, {
-          method: 'GET',
-          credentials: 'include',
-          headers: {
-            'Authorization': `Bearer ${token}`,
-            'Accept': 'application/json'
-          },
-          signal: controller?.signal
-        }).finally(() => {
+        let rawTree = null;
+        try {
+          const res = await fetch(`/backend-api/conversation/${convId}`, {
+            method: 'GET',
+            credentials: 'include',
+            headers: {
+              'Authorization': `Bearer ${token}`,
+              'Accept': 'application/json'
+            },
+            signal: controller?.signal
+          });
+          assertCaptureCurrent();
+          if (res.ok) {
+            rawTree = await new Promise((resolve, reject) => {
+              const onAbort = () => reject(new Error('Captura cancelada'));
+              if (controller?.signal?.aborted) return onAbort();
+              controller?.signal?.addEventListener('abort', onAbort, { once: true });
+              res.json().then(
+                data => { controller?.signal?.removeEventListener('abort', onAbort); resolve(data); },
+                err => { controller?.signal?.removeEventListener('abort', onAbort); reject(err); }
+              );
+            });
+          }
+        } finally {
           if (timer) clearTimeout(timer);
           if(controller)activeAssetControllers.delete(controller);
-        });
+        }
         assertCaptureCurrent();
 
-        if (res.ok) {
-          const rawTree = await res.json();
-          assertCaptureCurrent();
+        if (rawTree) {
           let parsed = parseChatGPTConversationTreeDirect(rawTree, { conversationId: convId, title: rawTree.title || title });
           if (parsed && parsed.source && parsed.source.conversationId === convId) {
             parsed = await resolveCapturedAssets(parsed, options);
@@ -1257,10 +1307,11 @@
       throw new Error('NAVIGATION_ABORT: Se detectó navegación entre conversaciones durante el barrido DOM.');
     }
 
-    // Verificación posterior al barrido: asegurar que el chat no cambió durante el proceso
+    // Verificación posterior al barrido: cualquier navegación (incluyendo A→inicio o A→B→A) descarta el resultado
+    assertCaptureCurrent();
     const postHarvestConvId = detectActiveConversationId();
-    if (convId && postHarvestConvId && postHarvestConvId !== convId) {
-      throw new Error(`SOURCE_IDENTITY_MISMATCH: La conversación cambió durante la recolección DOM (de ${convId} a ${postHarvestConvId}). Resultado descartado.`);
+    if (convId && postHarvestConvId !== convId) {
+      throw new Error(`SOURCE_IDENTITY_MISMATCH: La conversación cambió durante la recolección DOM (de ${convId} a ${postHarvestConvId || 'inicio'}). Resultado descartado.`);
     }
 
     lastHarvestedConversationId = convId;

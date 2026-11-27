@@ -30,8 +30,20 @@
 
   function retainLocalCapture(incoming, existing) {
     if (!existing || existing.canonicalId !== incoming.canonicalId) return incoming;
-    if (!(incoming.messages || []).length && incoming.integrity?.status === 'uncaptured' && (existing.messages || []).length) {
-      return { ...existing, title: incoming.title || existing.title, updatedAt: incoming.updatedAt || existing.updatedAt };
+    const isCompleteStatus = s => ['captured', 'harvested', 'complete'].includes(String(s || '').toLowerCase());
+    const isPartialStatus = s => ['partial', 'uncaptured'].includes(String(s || '').toLowerCase());
+    const existingCount = (existing.messages || []).length;
+    const incomingCount = (incoming.messages || []).length;
+    if (!incoming.forceOverwrite && existingCount > 0) {
+      if (incomingCount === 0 && isPartialStatus(incoming.integrity?.status)) {
+        return { ...existing, title: incoming.title || existing.title, updatedAt: incoming.updatedAt || existing.updatedAt };
+      }
+      if (isCompleteStatus(existing.integrity?.status) && isPartialStatus(incoming.integrity?.status)) {
+        return { ...existing, title: incoming.title || existing.title, updatedAt: incoming.updatedAt || existing.updatedAt };
+      }
+      if (isPartialStatus(incoming.integrity?.status) && incomingCount < existingCount) {
+        return { ...existing, title: incoming.title || existing.title, updatedAt: incoming.updatedAt || existing.updatedAt };
+      }
     }
     const fileIdentity = asset => {
       for (const value of [asset.fileId, asset.assetPointer, asset.id, asset.assetId]) {

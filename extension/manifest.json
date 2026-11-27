@@ -71,8 +71,7 @@
     "https://claude.ai/*",
     "https://gemini.google.com/*",
     "https://*.googleusercontent.com/*",
-    "https://*.oaiusercontent.com/*",
-    "https://files.oaiusercontent.com/*"
+    "https://*.oaiusercontent.com/*"
   ],
   "web_accessible_resources": [
     {

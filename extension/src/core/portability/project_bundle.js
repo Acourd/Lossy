@@ -12,10 +12,19 @@
   for(const[key,limit]of Object.entries(contextLimits)){const value=context[key]??'';if(typeof value!=='string'||value.length>limit)throw Error('Campo de proyecto inválido: '+key);result[key]=value;}
   result.status=context.status||'active';if(!['active','paused','completed'].includes(result.status))throw Error('Estado de proyecto inválido');return result;
  }
+ const ALLOWED_PLATFORMS=new Set(['chatgpt','gemini','claude','unknown']);
+ const isSafeCount=v=>v===undefined||v===null||(typeof v==='number'&&Number.isFinite(v)&&v>=0&&v<=10000000);
  function validateEntity(entity){
   if(!entity||typeof entity!=='object'||typeof entity.canonicalId!=='string'||!entity.canonicalId||entity.canonicalId.length>300)throw Error('Una fuente del proyecto no tiene un identificador válido');
   const messages=entity.selectedMessages||entity.messages;if(!Array.isArray(messages)||messages.some(m=>!m||typeof m!=='object'||typeof m.role!=='string'||(m.content?.text!==undefined&&typeof m.content.text!=='string')))throw Error('Una fuente del proyecto contiene mensajes inválidos');
   if(entity.entityType==='clip'&&!Array.isArray(entity.selectedMessages))throw Error('Clip sin selección de mensajes');
+  const plat=entity.source?.platform??entity.sourcePlatform;
+  if(plat!==undefined&&plat!==null&&(typeof plat!=='string'||!ALLOWED_PLATFORMS.has(plat.toLowerCase())))throw Error('Plataforma de fuente inválida');
+  for(const k of ['conversationMessageCount','visibleMessageCount','sourceNodeCount'])if(!isSafeCount(entity[k]))throw Error('Métrica numérica inválida: '+k);
+  if(entity.nodeMetrics!==undefined&&entity.nodeMetrics!==null){
+   if(typeof entity.nodeMetrics!=='object'||Array.isArray(entity.nodeMetrics))throw Error('Métricas de nodo inválidas');
+   for(const [mk,mv] of Object.entries(entity.nodeMetrics))if(!isSafeCount(mv))throw Error('Métrica de nodo inválida: '+mk);
+  }
   return entity;
  }
  function cleanOrganization(value, sourceIds){

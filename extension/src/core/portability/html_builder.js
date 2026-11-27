@@ -26,12 +26,16 @@
 
   const SAFE_RASTER_DATA_URI_RE = /^data:image\/(?:png|jpe?g|gif|webp|avif);base64,[A-Za-z0-9+/=\s]+$/i;
 
-  function renderInline(raw) {
+  function renderInline(raw, opts = {}) {
     let s = escapeHtml(raw);
     // Inline code
     s = s.replace(/`([^`]+)`/g, '<code>$1</code>');
-    // Images (strict raster data URI only; rejects svg+xml)
-    s = s.replace(/!\[([^\]]*)\]\((?:&lt;)?(data:image\/(?:png|jpe?g|gif|webp|avif);base64,[A-Za-z0-9+/=]+)(?:&gt;)?\)/gi, '<figure class="l-fig"><img src="$2" alt="$1"><figcaption>$1</figcaption></figure>');
+    // Images (strict raster data URI only; rejects svg+xml; strips completely when omitImages is true)
+    if (opts.omitImages) {
+      s = s.replace(/!\[([^\]]*)\]\((?:&lt;)?(?:data:image\/[^)\s]+|https?:\/\/[^)\s]+)(?:&gt;)?\)/gi, '');
+    } else {
+      s = s.replace(/!\[([^\]]*)\]\((?:&lt;)?(data:image\/(?:png|jpe?g|gif|webp|avif);base64,[A-Za-z0-9+/=]+)(?:&gt;)?\)/gi, '<figure class="l-fig"><img src="$2" alt="$1"><figcaption>$1</figcaption></figure>');
+    }
     // Links (preserves &amp; query parameters safely since escapeHtml already ran)
     s = s.replace(/\[([^\]]+)\]\((?:&lt;)?(https?:\/\/(?:&amp;|[^)\s"'<>])+)(?:&gt;)?\)/g, '<a href="$2" target="_blank" rel="noopener noreferrer">$1</a>');
     // Bold & italic
@@ -59,7 +63,7 @@
     return cells;
   }
 
-  function renderSimpleMarkdownToHtml(text) {
+  function renderSimpleMarkdownToHtml(text, opts = {}) {
     const src = String(text || '').replace(/\r\n/g, '\n');
     const blocks = [];
     const codeSlots = [];
@@ -166,17 +170,25 @@
         continue;
       }
 
-      // Paragraph
+      // Paragraph (only stops at '|' if it starts a real Markdown table, plus mandatory progress guard)
+      const prevI = i;
       const pLines = [];
+      const isTableAt = idx => idx + 1 < lines.length && lines[idx].trim().startsWith('|') && /^\|[\s:|-]+\|/.test(lines[idx + 1].trim());
       while (
         i < lines.length &&
         lines[i].trim() &&
-        !/^(#{1,4}\s+|[-*]\s+|>|\||@@CODE\d+@@|@@WIDGET\d+@@|---+$)/.test(lines[i].trim())
+        !/^(#{1,4}\s+|[-*]\s+|\d+\.\s+|>|@@CODE\d+@@|@@WIDGET\d+@@|---+$)/.test(lines[i].trim()) &&
+        !isTableAt(i)
       ) {
-        pLines.push(renderInline(lines[i].trim()));
+        pLines.push(renderInline(lines[i].trim(), opts));
         i++;
       }
-      if (pLines.length) blocks.push(`<p>${pLines.join('<br>')}</p>`);
+      if (pLines.length) {
+        blocks.push(`<p>${pLines.join('<br>')}</p>`);
+      } else if (i === prevI) {
+        blocks.push(`<p>${renderInline(trimmed, opts)}</p>`);
+        i++;
+      }
     }
 
     return blocks.join('\n');
@@ -229,7 +241,7 @@
       const isUser = msg.role === 'user';
       const roleLabel = isUser ? 'USUARIO' : (msg.author || platform);
       const text = typeof msg.text === 'string' ? msg.text : (msg.content?.text || '');
-      let bodyHtml = renderSimpleMarkdownToHtml(text);
+      let bodyHtml = renderSimpleMarkdownToHtml(text, { omitImages: options.imageStrategy === 'omit' });
 
       // Embedded images for this turn (prefer options.assets, fall back to msg.attachments)
       const fromOptions = allAssets.filter(a => (a.sourceMessageId === msg.id || a.messageIndex === idx) && (a.mimeType?.startsWith('image/') || a.kind === 'image'));
@@ -237,7 +249,9 @@
       if (options.imageStrategy !== 'omit' && msgAssets.length) {
         const imgs = msgAssets.map(a => {
           const uri = resolveSafeImageDataUri(a, assetBinaryMap);
-          if (!uri) return '';
+          if (!uri) {
+            return `<div class="l-missing-img">[Imagen no disponible localmente: ${escapeHtml(a.filename || 'Imagen')}]</div>`;
+          }
           return `<figure class="l-fig"><img src="${escapeHtml(uri)}" alt="${escapeHtml(a.filename || 'Imagen')}"><figcaption>${escapeHtml(a.filename || 'Imagen')}</figcaption></figure>`;
         }).filter(Boolean).join('');
         bodyHtml += imgs;

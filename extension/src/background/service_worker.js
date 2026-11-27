@@ -13,7 +13,7 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
   if (sender?.id && sender.id !== chrome.runtime.id) return false;
   if (!request || typeof request !== 'object') return false;
   if(request.action==='SAVE_CLIP'){
-    if(!request.clip?.canonicalId?.startsWith('clip_')){sendResponse({success:false,error:'Clip inválido'});return false;}
+    if(typeof request.clip?.canonicalId !== 'string' || !request.clip.canonicalId.startsWith('clip_')){sendResponse({success:false,error:'Clip inválido'});return false;}
     const write=()=>new LinerDB().saveClip(request.clip);
     const job=clipWriteQueue.then(write,write);clipWriteQueue=job;
     job.then(id=>sendResponse({success:true,id})).catch(error=>sendResponse({success:false,error:error.message}));

@@ -1516,21 +1516,22 @@
         ? `<button id="btn-inspector-open-origin" class="btn btn-secondary btn-sm" type="button" data-url="${escapeHtml(originUrl)}" style="display: inline-flex; align-items: center; gap: 4px;">Abrir origen &rarr;</button>`
         : `<button id="btn-inspector-open-origin" class="btn btn-secondary btn-sm" type="button" disabled title="Sin URL de origen">Abrir origen</button>`;
 
+      const safeNum = v => (typeof v === 'number' && Number.isFinite(v) && v >= 0) ? Math.floor(v) : 0;
       const convMsgCount = conv.conversationMessageCount !== undefined
-        ? conv.conversationMessageCount
-        : (conv.visibleMessageCount !== undefined ? conv.visibleMessageCount : (conv.messages?.length || 0));
-      const sourceNodes = conv.sourceNodeCount || conv.messages?.length || 0;
+        ? safeNum(conv.conversationMessageCount)
+        : (conv.visibleMessageCount !== undefined ? safeNum(conv.visibleMessageCount) : (conv.messages?.length || 0));
+      const sourceNodes = safeNum(conv.sourceNodeCount) || (conv.messages?.length || 0);
       const nodesBreakdown = conv.nodeMetrics ? `
-        <div><span style="color: var(--text-tertiary)">Nodos de Usuario:</span> <span>${conv.nodeMetrics.userNodes || 0}</span></div>
-        <div><span style="color: var(--text-tertiary)">Nodos de Asistente:</span> <span>${conv.nodeMetrics.assistantNodes || 0}</span></div>
-        <div><span style="color: var(--text-tertiary)">Nodos de Herramientas/Acciones:</span> <span>${conv.nodeMetrics.toolNodes || 0}</span></div>
-        <div><span style="color: var(--text-tertiary)">Nodos de Sistema:</span> <span>${conv.nodeMetrics.systemNodes || 0}</span></div>
+        <div><span style="color: var(--text-tertiary)">Nodos de Usuario:</span> <span>${safeNum(conv.nodeMetrics.userNodes ?? conv.nodeMetrics.userMessageCount)}</span></div>
+        <div><span style="color: var(--text-tertiary)">Nodos de Asistente:</span> <span>${safeNum(conv.nodeMetrics.assistantNodes ?? conv.nodeMetrics.assistantMessageCount)}</span></div>
+        <div><span style="color: var(--text-tertiary)">Nodos de Herramientas/Acciones:</span> <span>${safeNum(conv.nodeMetrics.toolNodes ?? conv.nodeMetrics.toolEventCount)}</span></div>
+        <div><span style="color: var(--text-tertiary)">Nodos de Sistema:</span> <span>${safeNum(conv.nodeMetrics.systemNodes ?? conv.nodeMetrics.systemNodeCount)}</span></div>
       ` : '';
 
       const rawMessages = conv.messages || [];
       const technicalNodesCount = rawMessages.filter(m => m.isConversational === false || m.nodeCategory === 'tool' || m.nodeCategory === 'system' || m.role === 'tool' || m.role === 'system').length;
 
-      const platformDisplay = (conv.source?.platform || 'ChatGPT').toUpperCase();
+      const platformDisplay = escapeHtml(String(conv.source?.platform || 'ChatGPT').toUpperCase());
       const modelDisplay = conv.model ? escapeHtml(conv.model) : '—';
 
       body.innerHTML = `
@@ -1538,7 +1539,7 @@
           <div><span style="color: var(--text-tertiary)">Plataforma · Modelo:</span> <strong>${platformDisplay} · <code>${modelDisplay}</code></strong></div>
           <div><span style="color: var(--text-tertiary)">Mensajes:</span> <strong>${convMsgCount} de conversación</strong> ${sourceNodes > convMsgCount ? `<span style="color: var(--text-tertiary); font-size: 11px;">(${sourceNodes} nodos en árbol)</span>` : ''}</div>
           <div><span style="color: var(--text-tertiary)">Integridad:</span> <span class="badge ${getBadgeClass(conv.integrity?.status)}">${escapeHtml(formatIntegrity(conv.integrity?.status))}</span></div>
-          <div><span style="color: var(--text-tertiary)">Actualizado:</span> <span>${updatedDisplay}</span></div>
+          <div><span style="color: var(--text-tertiary)">Actualizado:</span> <span>${escapeHtml(updatedDisplay)}</span></div>
           <div class="inspector-collections-card">
             <div class="inspector-collections-header">Proyectos</div>
             ${collectionsSectionHtml}

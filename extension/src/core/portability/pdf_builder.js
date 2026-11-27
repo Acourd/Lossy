@@ -66,13 +66,16 @@
       } else if (WIN_ANSI_MAP[ch]) {
         res += WIN_ANSI_MAP[ch];
       } else {
-        const code = ch.charCodeAt(0);
-        if (code >= 32 && code <= 126) {
+        const cp = str.codePointAt(i);
+        if (cp > 0xFFFF) i++; // advance past surrogate pair
+        if (cp >= 32 && cp <= 126) {
           res += ch;
-        } else if (code >= 160 && code <= 255) {
-          res += '\\' + code.toString(8).padStart(3, '0');
+        } else if (cp >= 160 && cp <= 255) {
+          res += '\\' + cp.toString(8).padStart(3, '0');
+        } else if (cp > 255) {
+          // Preservar explícitamente caracteres fuera de WinAnsi (CJK, griego, emoji) sin pérdida silenciosa
+          res += `[U+${cp.toString(16).toUpperCase().padStart(4, '0')}]`;
         } else {
-          // Carácter fuera del rango WinAnsi estándar -> reemplazar por aproximación ASCII segura
           res += ' ';
         }
       }
@@ -351,9 +354,8 @@
       const roleLabel = isUser ? 'USUARIO' : (isAssistant ? platform : (isTool ? 'HERRAMIENTA' : (msg.role || 'SISTEMA').toUpperCase()));
 
       const originalText = typeof msg.text === 'string' ? msg.text : (msg.content?.text || '');
-      const text = originalText.replace(/\uE200[\s\S]*?\uE201/g, '').replace(/!\[[^\]]*\]\(<?[^)>]+>?\)/g, '').replace(/\x60\x60\x60[^\n]*\n[\s\S]*?\x60\x60\x60/g, '');
+      const cleanSource = originalText.replace(/\uE200[\s\S]*?\uE201/g, '');
       const storedCode = Array.isArray(msg.codeBlocks) ? msg.codeBlocks : (Array.isArray(msg.content?.codeBlocks) ? msg.content.codeBlocks : []);
-      const codeBlocks = storedCode.length ? storedCode : Array.from(originalText.matchAll(/\x60\x60\x60([^\n]*)\n([\s\S]*?)\x60\x60\x60/g), match => ({language:match[1].trim(),code:match[2].replace(/\n$/, '')}));
 
       ensureVerticalSpace(45);
 
@@ -383,78 +385,83 @@
 
       currentY -= 22;
 
-      // Párrafos del mensaje
-      const bodyLines = wrapText(text, CONTENT_WIDTH - 12, 10, false);
-      for (const line of bodyLines) {
-        ensureVerticalSpace(14);
-        if (line) {
-          currentStreams.push('q');
-          currentStreams.push('0.12 0.12 0.14 rg');
-          currentStreams.push('BT /F1 10 Tf');
-          currentStreams.push(`${MARGIN_LEFT + 6} ${currentY - 10} Td (${sanitizePdfText(line)}) Tj ET`);
-          currentStreams.push('Q');
-        }
-        currentY -= 13.5;
-      }
-
-      // Bloques de código adjuntos
-      if (codeBlocks.length > 0) {
-        codeBlocks.forEach(cb => {
-          const lang = cb.language ? ` [${cb.language.toUpperCase()}]` : '';
-          const codeText = typeof cb.code === 'string' ? cb.code : '';
-          const codeLines = wrapText(codeText, CONTENT_WIDTH - 24, 8.5, true);
-
-          if (codeLines.length === 0) return;
-
-          let lineIdx = 0;
-          while (lineIdx < codeLines.length) {
-            // Asegurar espacio para al menos cabecera + 1 línea en la página actual
-            if (currentY - MARGIN_BOTTOM < 45) {
-              startNewPage();
-            }
-
-            const isFirstChunk = (lineIdx === 0);
-            const headerSpace = isFirstChunk ? 16 : 12;
-            const availablePts = currentY - MARGIN_BOTTOM - headerSpace - 10;
-            const maxLinesThisPage = Math.max(1, Math.floor(availablePts / 11));
-            const linesThisChunk = codeLines.slice(lineIdx, lineIdx + maxLinesThisPage);
-            const isLastChunk = (lineIdx + linesThisChunk.length >= codeLines.length);
-            const chunkHeight = (linesThisChunk.length * 11) + headerSpace + (isLastChunk ? 8 : 4);
-
-            // Fondo caja de código para el fragmento de la página actual
+      const renderProseChunk = (proseChunk) => {
+        const cleaned = proseChunk.replace(/!\[[^\]]*\]\(<?[^)>]+>?\)/g, '');
+        if (!cleaned.trim()) return;
+        const bodyLines = wrapText(cleaned, CONTENT_WIDTH - 12, 10, false);
+        for (const line of bodyLines) {
+          ensureVerticalSpace(14);
+          if (line) {
             currentStreams.push('q');
-            currentStreams.push('0.12 0.13 0.15 rg'); // Gris oscuro
-            currentStreams.push(`${MARGIN_LEFT + 6} ${(currentY - chunkHeight).toFixed(2)} ${CONTENT_WIDTH - 12} ${chunkHeight.toFixed(2)} re f`);
-            currentStreams.push('0.25 0.26 0.3 RG 0.5 w');
-            currentStreams.push(`${MARGIN_LEFT + 6} ${(currentY - chunkHeight).toFixed(2)} ${CONTENT_WIDTH - 12} ${chunkHeight.toFixed(2)} re S`);
-
-            // Cabecera del bloque de código
-            currentStreams.push(isFirstChunk ? '0.6 0.65 0.7 rg' : '0.45 0.5 0.55 rg');
-            currentStreams.push('BT /F3 7.5 Tf');
-            const headerLabel = isFirstChunk ? ('CODIGO' + lang) : ('CODIGO' + lang + ' (cont.)');
-            currentStreams.push(`${MARGIN_LEFT + 12} ${(currentY - (isFirstChunk ? 9 : 8)).toFixed(2)} Td (${sanitizePdfText(headerLabel)}) Tj ET`);
+            currentStreams.push('0.12 0.12 0.14 rg');
+            currentStreams.push('BT /F1 10 Tf');
+            currentStreams.push(`${MARGIN_LEFT + 6} ${currentY - 10} Td (${sanitizePdfText(line)}) Tj ET`);
             currentStreams.push('Q');
-
-            let codeY = currentY - (isFirstChunk ? 18 : 14);
-            for (const cLine of linesThisChunk) {
-              if (cLine) {
-                currentStreams.push('q');
-                currentStreams.push('0.85 0.9 0.95 rg'); // Texto claro en caja oscura
-                currentStreams.push('BT /F3 8.5 Tf');
-                currentStreams.push(`${MARGIN_LEFT + 12} ${(codeY - 8).toFixed(2)} Td (${sanitizePdfText(cLine)}) Tj ET`);
-                currentStreams.push('Q');
-              }
-              codeY -= 11;
-            }
-
-            currentY -= (chunkHeight + (isLastChunk ? 8 : 0));
-            lineIdx += linesThisChunk.length;
-
-            if (!isLastChunk) {
-              startNewPage();
-            }
           }
-        });
+          currentY -= 13.5;
+        }
+      };
+
+      const renderCodeChunk = (cb) => {
+        const lang = cb.language ? ` [${cb.language.toUpperCase()}]` : '';
+        const codeText = typeof cb.code === 'string' ? cb.code : '';
+        const codeLines = wrapText(codeText, CONTENT_WIDTH - 24, 8.5, true);
+        if (codeLines.length === 0) return;
+
+        let lineIdx = 0;
+        while (lineIdx < codeLines.length) {
+          if (currentY - MARGIN_BOTTOM < 45) startNewPage();
+          const isFirstChunk = (lineIdx === 0);
+          const headerSpace = isFirstChunk ? 16 : 12;
+          const availablePts = currentY - MARGIN_BOTTOM - headerSpace - 10;
+          const maxLinesThisPage = Math.max(1, Math.floor(availablePts / 11));
+          const linesThisChunk = codeLines.slice(lineIdx, lineIdx + maxLinesThisPage);
+          const isLastChunk = (lineIdx + linesThisChunk.length >= codeLines.length);
+          const chunkHeight = (linesThisChunk.length * 11) + headerSpace + (isLastChunk ? 8 : 4);
+
+          currentStreams.push('q');
+          currentStreams.push('0.12 0.13 0.15 rg');
+          currentStreams.push(`${MARGIN_LEFT + 6} ${(currentY - chunkHeight).toFixed(2)} ${CONTENT_WIDTH - 12} ${chunkHeight.toFixed(2)} re f`);
+          currentStreams.push('0.25 0.26 0.3 RG 0.5 w');
+          currentStreams.push(`${MARGIN_LEFT + 6} ${(currentY - chunkHeight).toFixed(2)} ${CONTENT_WIDTH - 12} ${chunkHeight.toFixed(2)} re S`);
+          currentStreams.push(isFirstChunk ? '0.6 0.65 0.7 rg' : '0.45 0.5 0.55 rg');
+          currentStreams.push('BT /F3 7.5 Tf');
+          const headerLabel = isFirstChunk ? ('CODIGO' + lang) : ('CODIGO' + lang + ' (cont.)');
+          currentStreams.push(`${MARGIN_LEFT + 12} ${(currentY - (isFirstChunk ? 9 : 8)).toFixed(2)} Td (${sanitizePdfText(headerLabel)}) Tj ET`);
+          currentStreams.push('Q');
+
+          let codeY = currentY - (isFirstChunk ? 18 : 14);
+          for (const cLine of linesThisChunk) {
+            if (cLine) {
+              currentStreams.push('q');
+              currentStreams.push('0.85 0.9 0.95 rg');
+              currentStreams.push('BT /F3 8.5 Tf');
+              currentStreams.push(`${MARGIN_LEFT + 12} ${(codeY - 8).toFixed(2)} Td (${sanitizePdfText(cLine)}) Tj ET`);
+              currentStreams.push('Q');
+            }
+            codeY -= 11;
+          }
+
+          currentY -= (chunkHeight + (isLastChunk ? 8 : 0));
+          lineIdx += linesThisChunk.length;
+          if (!isLastChunk) startNewPage();
+        }
+      };
+
+      // Renderizar prosa y bloques de código en su orden exacto original
+      const fenceRe = /(`{3,})([^\n]*)\n([\s\S]*?)\1/g;
+      let lastIdx = 0;
+      let foundInlineFences = false;
+      let fm;
+      while ((fm = fenceRe.exec(cleanSource)) !== null) {
+        foundInlineFences = true;
+        if (fm.index > lastIdx) renderProseChunk(cleanSource.slice(lastIdx, fm.index));
+        renderCodeChunk({ language: fm[2].trim(), code: fm[3].replace(/\n$/, '') });
+        lastIdx = fm.index + fm[0].length;
+      }
+      if (lastIdx < cleanSource.length) renderProseChunk(cleanSource.slice(lastIdx));
+      if (!foundInlineFences && storedCode.length > 0) {
+        storedCode.forEach(renderCodeChunk);
       }
 
       // 4. Recursos visuales e imágenes asociadas (ASSET-RED-001)

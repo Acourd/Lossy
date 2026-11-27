@@ -36,6 +36,8 @@
   function escapeXml(str) {
     if (typeof str !== 'string') return '';
     return str
+      // Strip XML 1.0 forbidden control characters (preserve TAB 0x09, LF 0x0A, CR 0x0D)
+      .replace(/[\x00-\x08\x0B\x0C\x0E-\x1F\uFFFE\uFFFF]/g, '')
       .replace(/&/g, '&amp;')
       .replace(/</g, '&lt;')
       .replace(/>/g, '&gt;')
@@ -97,7 +99,7 @@
    */
   function buildDocumentRelsXml(images = []) {
     const imgRels = (Array.isArray(images) ? images : []).map(img =>
-      `  <Relationship Id="${img.rId}" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/image" Target="media/${img.filename}"/>`
+      `  <Relationship Id="${escapeXml(img.rId)}" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/image" Target="media/${escapeXml(img.filename)}"/>`
     ).join('\n');
 
     return (
@@ -298,9 +300,7 @@
       const roleLabel = isUser ? 'USUARIO' : (isAssistant ? platform : (isTool ? 'HERRAMIENTA' : (msg.role || 'SISTEMA').toUpperCase()));
 
       const originalText = typeof msg.text === 'string' ? msg.text : (msg.content?.text || '');
-      const text=originalText.replace(/\x60\x60\x60[^\n]*\n[\s\S]*?\x60\x60\x60/g,'').replace(/!\[[^\]]*\]\(<?[^)>]+>?\)/g,'');
-      const storedCode=Array.isArray(msg.codeBlocks) ? msg.codeBlocks : (Array.isArray(msg.content?.codeBlocks) ? msg.content.codeBlocks : []);
-      const codeBlocks=storedCode.length?storedCode:Array.from(originalText.matchAll(/\x60\x60\x60([^\n]*)\n([\s\S]*?)\x60\x60\x60/g),match=>({language:match[1].trim(),code:match[2].replace(/\n$/,'')}));
+      const storedCode = Array.isArray(msg.codeBlocks) ? msg.codeBlocks : (Array.isArray(msg.content?.codeBlocks) ? msg.content.codeBlocks : []);
 
       // Encabezado de Turno
       bodyParagraphs.push(
@@ -310,61 +310,65 @@
         '  </w:p>'
       );
 
-      // Párrafos de texto
-      const paragraphs = text.split(/\n\s*\n/);
-      paragraphs.forEach(pText => {
-        const trimmed = pText.trim();
-        if (!trimmed) return;
-
-        // Dividir saltos de línea suaves dentro del párrafo
-        const lines = trimmed.split('\n');
-        const runs = lines.map((line, lIdx) => {
-          const runXml = `<w:r><w:t xml:space="preserve">${escapeXml(line)}</w:t></w:r>`;
-          if (lIdx < lines.length - 1) {
-            return `${runXml}<w:r><w:br/></w:r>`;
-          }
-          return runXml;
-        }).join('');
-
-        bodyParagraphs.push(
-          '  <w:p>\n' +
-          '    <w:pPr><w:pStyle w:val="Normal"/></w:pPr>\n' +
-          `    ${runs}\n` +
-          '  </w:p>'
-        );
-      });
-
-      // Bloques de código
-      if (codeBlocks.length > 0) {
-        codeBlocks.forEach(cb => {
-          const lang = cb.language ? ` [${cb.language.toUpperCase()}]` : '';
-          const codeText = typeof cb.code === 'string' ? cb.code : '';
-          const lines = codeText.split('\n');
-
-          // Etiqueta del bloque
+      // Renderizar prosa y bloques de código en su orden exacto original
+      const pushProse = (proseChunk) => {
+        const cleaned = proseChunk.replace(/!\[[^\]]*\]\(<?[^)>]+>?\)/g, '');
+        cleaned.split(/\n\s*\n/).forEach(pText => {
+          const trimmed = pText.trim();
+          if (!trimmed) return;
+          const lines = trimmed.split('\n');
+          const runs = lines.map((line, lIdx) => {
+            const runXml = `<w:r><w:t xml:space="preserve">${escapeXml(line)}</w:t></w:r>`;
+            return lIdx < lines.length - 1 ? `${runXml}<w:r><w:br/></w:r>` : runXml;
+          }).join('');
           bodyParagraphs.push(
             '  <w:p>\n' +
-            '    <w:pPr>\n' +
-            '      <w:spacing w:before="120" w:after="20"/>\n' +
-            '      <w:ind w:left="200"/>\n' +
-            '    </w:pPr>\n' +
-            '    <w:r>\n' +
-            '      <w:rPr><w:b/><w:sz w:val="16"/><w:color w:val="4B5563"/></w:rPr>\n' +
-            `      <w:t>${escapeXml('CÓDIGO' + lang)}</w:t>\n` +
-            '    </w:r>\n' +
+            '    <w:pPr><w:pStyle w:val="Normal"/></w:pPr>\n' +
+            `    ${runs}\n` +
             '  </w:p>'
           );
-
-          // Líneas de código en párrafo monospace
-          lines.forEach(codeLine => {
-            bodyParagraphs.push(
-              '  <w:p>\n' +
-              '    <w:pPr><w:pStyle w:val="CodeBlock"/></w:pPr>\n' +
-              `    <w:r><w:t xml:space="preserve">${escapeXml(codeLine || ' ')}</w:t></w:r>\n` +
-              '  </w:p>'
-            );
-          });
         });
+      };
+
+      const pushCodeBlock = (cb) => {
+        const lang = cb.language ? ` [${cb.language.toUpperCase()}]` : '';
+        const codeText = typeof cb.code === 'string' ? cb.code : '';
+        const lines = codeText.split('\n');
+        bodyParagraphs.push(
+          '  <w:p>\n' +
+          '    <w:pPr>\n' +
+          '      <w:spacing w:before="120" w:after="20"/>\n' +
+          '      <w:ind w:left="200"/>\n' +
+          '    </w:pPr>\n' +
+          '    <w:r>\n' +
+          '      <w:rPr><w:b/><w:sz w:val="16"/><w:color w:val="4B5563"/></w:rPr>\n' +
+          `      <w:t>${escapeXml('CÓDIGO' + lang)}</w:t>\n` +
+          '    </w:r>\n' +
+          '  </w:p>'
+        );
+        lines.forEach(codeLine => {
+          bodyParagraphs.push(
+            '  <w:p>\n' +
+            '    <w:pPr><w:pStyle w:val="CodeBlock"/></w:pPr>\n' +
+            `    <w:r><w:t xml:space="preserve">${escapeXml(codeLine || ' ')}</w:t></w:r>\n` +
+            '  </w:p>'
+          );
+        });
+      };
+
+      const fenceRe = /(`{3,})([^\n]*)\n([\s\S]*?)\1/g;
+      let lastIdx = 0;
+      let foundInlineFences = false;
+      let fm;
+      while ((fm = fenceRe.exec(originalText)) !== null) {
+        foundInlineFences = true;
+        if (fm.index > lastIdx) pushProse(originalText.slice(lastIdx, fm.index));
+        pushCodeBlock({ language: fm[2].trim(), code: fm[3].replace(/\n$/, '') });
+        lastIdx = fm.index + fm[0].length;
+      }
+      if (lastIdx < originalText.length) pushProse(originalText.slice(lastIdx));
+      if (!foundInlineFences && storedCode.length > 0) {
+        storedCode.forEach(pushCodeBlock);
       }
 
       // 4. Recursos visuales e imágenes asociadas (ASSET-RED-001)
@@ -400,10 +404,12 @@
 
         if (isBinaryAvailable) {
           imageCounter++;
-          const rawExt = (img.filename && img.filename.includes('.'))
-            ? img.filename.split('.').pop().toLowerCase()
-            : (img.mimeType && (img.mimeType.includes('jpeg') || img.mimeType.includes('jpg')) ? 'jpeg' : 'png');
-          const ext = (rawExt === 'jpg' || rawExt === 'jpeg') ? 'jpeg' : rawExt;
+          const mime = String(img.mimeType || '').toLowerCase();
+          const ALLOWED_EXTS = { 'image/jpeg': 'jpeg', 'image/jpg': 'jpeg', 'image/png': 'png', 'image/gif': 'gif', 'image/webp': 'webp' };
+          const extFromMime = ALLOWED_EXTS[mime.split(';')[0].trim()];
+          const rawExt = (img.filename && img.filename.includes('.')) ? img.filename.split('.').pop().toLowerCase() : '';
+          const safeFileExt = rawExt === 'jpg' ? 'jpeg' : (['png', 'jpeg', 'gif', 'webp'].includes(rawExt) ? rawExt : null);
+          const ext = extFromMime || safeFileExt || 'png';
           const docxFilename = `image${imageCounter}.${ext}`;
           const rId = `rIdImg${imageCounter}`;
 

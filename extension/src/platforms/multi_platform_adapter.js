@@ -55,29 +55,40 @@
   }
 
   function serializeTableToMarkdown(tableNode) {
-    const rows = [];
     const trNodes = tableNode.querySelectorAll ? Array.from(tableNode.querySelectorAll('tr')) : [];
     if (!trNodes.length) return '';
 
-    for (const tr of trNodes) {
+    const grid = [];
+    for (let rIdx = 0; rIdx < trNodes.length; rIdx++) {
+      const tr = trNodes[rIdx];
       const cellNodes = tr.querySelectorAll ? Array.from(tr.querySelectorAll('th, td')) : [];
       if (!cellNodes.length) continue;
-      const cells = cellNodes.map(cell => {
+      if (!grid[rIdx]) grid[rIdx] = [];
+      let colCursor = 0;
+      for (const cell of cellNodes) {
+        while (grid[rIdx][colCursor] !== undefined) colCursor++;
         const raw = serializeDomToMarkdown(cell)
           .replace(/\r?\n+/g, ' ')
           .replace(/\s+/g, ' ')
           .replace(/\|/g, '\\|')
           .trim();
-        return raw;
-      });
-      rows.push(cells);
+        const colspan = Math.max(1, Math.min(20, parseInt(cell.getAttribute?.('colspan') || '1', 10) || 1));
+        const rowspan = Math.max(1, Math.min(50, parseInt(cell.getAttribute?.('rowspan') || '1', 10) || 1));
+        for (let dr = 0; dr < rowspan; dr++) {
+          if (!grid[rIdx + dr]) grid[rIdx + dr] = [];
+          for (let dc = 0; dc < colspan; dc++) {
+            grid[rIdx + dr][colCursor + dc] = (dr === 0 && dc === 0) ? raw : '';
+          }
+        }
+        colCursor += colspan;
+      }
     }
 
+    const rows = grid.filter(r => Array.isArray(r) && r.length > 0);
     if (!rows.length) return '';
     const colCount = Math.max(...rows.map(r => r.length));
     const padRow = r => {
-      const out = r.slice();
-      while (out.length < colCount) out.push('');
+      const out = Array.from({ length: colCount }, (_, idx) => r[idx] ?? '');
       return `| ${out.join(' | ')} |`;
     };
     const header = padRow(rows[0]);
@@ -101,8 +112,9 @@
       const code = node.querySelector ? node.querySelector('code') : null;
       const cls = code?.className || '';
       const lang = (cls.match(/language-([\w+-]+)/) || [])[1] || '';
-      const rawCode = (code ? code.textContent : node.textContent) || '';
-      return `\n\n\`\`\`${lang}\n${rawCode.trim()}\n\`\`\`\n\n`;
+      const rawCode = ((code ? code.textContent : node.textContent) || '').replace(/\r\n/g, '\n').replace(/^\n+|\n+$/g, '');
+      const fence = rawCode.includes('```') ? '````' : '```';
+      return `\n\n${fence}${lang}\n${rawCode}\n${fence}\n\n`;
     }
 
     if (tag === 'ol') {

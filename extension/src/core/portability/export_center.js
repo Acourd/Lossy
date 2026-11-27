@@ -168,6 +168,7 @@
         : (Array.isArray(entity.messages) ? entity.messages : []);
 
       const seenKeys = new Set();
+      const seenMsgAssetIds = new Set();
       let activeMessageIndex = null;
       const addAsset = asset => {
         records.push(asset);
@@ -209,8 +210,10 @@
             if (!existing.dataURI && dataURI) { existing.dataURI=dataURI;existing.availability='embedded';index.locations.add(dataURI); }
             return;
           }
-          if (seenKeys.has(assetId)) return;
-          seenKeys.add(assetId);
+          const scopedKey = `${msgId}::${assetId}`;
+          if (seenKeys.has(scopedKey)) return;
+          seenKeys.add(scopedKey);
+          seenMsgAssetIds.add(assetId);
 
           const mimeType = att.mimeType || (att.kind === 'image' ? 'image/png' : 'application/octet-stream');
           const ext = mimeType.includes('jpeg') || mimeType.includes('jpg') ? 'jpg' : (mimeType.includes('png') ? 'png' : 'bin');
@@ -279,8 +282,10 @@
           if (index.locations.has(imgUrl)) continue;
           const isInlineData = imgUrl.startsWith('data:');
           const assetId = `md_img_${mIdx}_${imgIdx++}`;
-          if (seenKeys.has(assetId)) return;
-          seenKeys.add(assetId);
+          const scopedKey = `${msgId}::${assetId}`;
+          if (seenKeys.has(scopedKey)) return;
+          seenKeys.add(scopedKey);
+          seenMsgAssetIds.add(assetId);
 
           const mimeType = isInlineData ? (imgUrl.split(';')[0].replace('data:', '') || 'image/png') : 'image/png';
           const ext = mimeType.includes('jpeg') || mimeType.includes('jpg') ? 'jpg' : 'png';
@@ -311,7 +316,7 @@
       const topAtts = Array.isArray(entity.attachments) ? entity.attachments : [];
       topAtts.forEach((att, aIdx) => {
         const assetId = att.assetId || att.id || `top_asset_${aIdx}`;
-        if (seenKeys.has(assetId)) return;
+        if (seenKeys.has(assetId) || seenMsgAssetIds.has(assetId)) return;
         seenKeys.add(assetId);
 
         const remoteURL = att.sourceURL || att.url || null;
@@ -444,6 +449,8 @@
 
 
   function isInternalToolPayload(msg) {
+    if (!msg || msg.role === 'user') return false;
+    if (msg.isConversational === false || msg.role === 'tool' || msg.nodeCategory === 'tool') return true;
     const t = String(msg?.text ?? msg?.content?.text ?? '').trim();
     return /^\{[\s\S]*"path"\s*:\s*"\/Automations\//i.test(t);
   }

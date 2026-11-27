@@ -1,0 +1,49 @@
+name: Lossy Enterprise CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js 22
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
+      - name: Verify Zero External Dependencies
+        run: |
+          node -e "const p=require('./package.json'); if(Object.keys(p.dependencies||{}).length||Object.keys(p.devDependencies||{}).length){console.error('External deps detected'); process.exit(1);} console.log('ZERO_DEPS_OK');"
+
+      - name: Static MV3 CSP, Zero-Stub & PNG Integrity Gate
+        run: |
+          node -e "
+            const fs=require('fs'), path=require('path');
+            const walk=d=>fs.readdirSync(d,{withFileTypes:true}).flatMap(e=>e.isDirectory()?walk(path.join(d,e.name)):path.join(d,e.name));
+            const srcFiles=walk('extension/src').filter(f=>/\.(js|html)$/.test(f));
+            for(const f of srcFiles){
+              const c=fs.readFileSync(f,'utf8');
+              if(/\beval\s*\(|new Function\s*\(/.test(c)) throw new Error('Forbidden dynamic code in '+f);
+              if(/\b(?:TODO|FIXME)\b/.test(c)) throw new Error('Stub marker in '+f);
+              if(f.endsWith('.html') && /\bon(?:click|error|load|change|input|mouseover)\s*=/i.test(c)) throw new Error('Inline HTML handler in '+f);
+            }
+            const dims={'icon16.png':16,'icon32.png':32,'icon48.png':48,'icon128.png':128,'logo-lossy.png':512};
+            for(const [name,d] of Object.entries(dims)){
+              const b=fs.readFileSync(path.join('extension/icons',name));
+              if(b.subarray(0,8).toString('hex')!=='89504e470d0a1a0a'||b.readUInt32BE(16)!==d||b.readUInt32BE(20)!==d) throw new Error('Invalid PNG '+name);
+            }
+            console.log('STATIC_GATE_OK:', srcFiles.length, 'source files + 5 icon PNGs verified');
+          "
+
+      - name: Run Full Deterministic Test Suite
+        run: node tests/run_all.js

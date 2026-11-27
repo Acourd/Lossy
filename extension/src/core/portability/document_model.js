@@ -12,6 +12,8 @@
   return{title:String(options.title||'Documento Lossy').trim().slice(0,500)||'Documento Lossy',pageSize:size,orientation,margin,font,fontSize,includeImages:options.includeImages!==false,includeSources:options.includeSources!==false,pageBreaks:options.pageBreaks===true,includeProject:options.includeProject!==false};
  }
  const isInternalToolPayload=msg=>{
+  if(!msg||msg.role==='user')return false;
+  if(msg.isConversational===false||msg.role==='tool'||msg.nodeCategory==='tool')return true;
   const t=String(msg?.text??msg?.content?.text??'').trim();
   return /^\{[\s\S]*"path"\s*:\s*"\/Automations\//i.test(t);
  };

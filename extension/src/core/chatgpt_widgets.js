@@ -222,13 +222,19 @@
 
     function parseOr() {
       let left = parseAnd();
-      while (matchOp('||')) left = left || parseAnd();
+      while (matchOp('||')) {
+        const right = parseAnd();
+        left = left || right;
+      }
       return left;
     }
 
     function parseAnd() {
       let left = parseEq();
-      while (matchOp('&&')) left = left && parseEq();
+      while (matchOp('&&')) {
+        const right = parseEq();
+        left = left && right;
+      }
       return left;
     }
 
@@ -389,7 +395,9 @@
     }
 
     try {
-      return parseTernary();
+      const result = parseTernary();
+      if (pos !== tokens.length) return undefined;
+      return result;
     } catch (_) {
       return undefined;
     }
@@ -488,8 +496,8 @@
       });
     }
 
-    // 3. Evaluar interpolaciones restantes con las variables de {@body}
-    if (Object.keys(env).length > 0) {
+    // 3. Evaluar interpolaciones restantes (incluyendo expresiones sin @body)
+    if (text.includes('{')) {
       text = interpolateBraces(text, env);
     }
 
