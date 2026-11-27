@@ -316,16 +316,28 @@
           const assetId = allocateUniqueAssetId(rawAssetId, mIdx, aIdx);
 
           const rawMime = normMime(att.mimeType);
+          const extMime = mimeFromFilename(att.filename || att.name);
           const blobMime = normMime(localBlob?.type);
           const uriMime = parseDataUriMime(dataURI);
           const magicMime = detectMagicMime(toRawBytes(localBlob, dataURI));
-          const resolvedAttMime = (blobMime && !isGenericMime(blobMime) ? blobMime : '')
-            || (magicMime && !isGenericMime(magicMime) ? magicMime : '')
-            || (uriMime && !isGenericMime(uriMime) ? uriMime : '')
-            || rawMime;
+          const resolvedAttMime =
+            (!att.filename && !dataURI && blobMime && !isGenericMime(blobMime) ? blobMime : '')
+            || (rawMime && !isGenericMime(rawMime) ? rawMime : '')
+            || rawMime
+            || extMime
+            || (blobMime && !isGenericMime(blobMime) ? blobMime : '')
+            || (uriMime && !isGenericMime(uriMime) ? uriMime : '');
           const mimeType = resolvedAttMime || (att.kind === 'image' ? 'image/png' : 'application/octet-stream');
           const ext = mimeType.includes('jpeg') || mimeType.includes('jpg') ? 'jpg' : (mimeType.includes('png') ? 'png' : (mimeType.includes('pdf') ? 'pdf' : 'bin'));
           const filename = att.filename || att.name || `image_${mIdx}_${aIdx}.${ext}`;
+          const declaredConflicts = [rawMime, extMime, uriMime, normMime(mimeType)].filter(m => m && !isGenericMime(m));
+          const hasBinaryConflict = Boolean(magicMime && declaredConflicts.some(c => c !== magicMime));
+          if (hasBinaryConflict) {
+            availability = ASSET_AVAILABILITY.UNAVAILABLE;
+            warnings.push(`Firma binaria incompatible (${magicMime})`);
+            dataURI = null;
+            localBlob = null;
+          }
 
           addAsset({
             assetId,
@@ -591,9 +603,14 @@
       const idKeys = new Set(assets.map(a => a.assetId).filter(Boolean));
       const bind = (asset, bytes, availability) => {
         const magicMime = detectMagicMimeType(bytes);
-        const declaredMime = normMimeType(asset.mimeType) || mimeFromAssetFilename(asset.filename);
-        if (magicMime && declaredMime && !isGenericMimeType(declaredMime) && magicMime !== declaredMime) {
-          asset.warnings = [...(asset.warnings || []), `Firma binaria incompatible (${magicMime} != ${declaredMime})`];
+        const expectedMimes = [
+          normMimeType(asset.mimeType),
+          mimeFromAssetFilename(asset.filename),
+          parseDataUriMimeType(asset.dataURI)
+        ].filter(m => m && !isGenericMimeType(m));
+        if (magicMime && expectedMimes.some(expected => magicMime !== expected)) {
+          const expectedSummary = expectedMimes.find(m => m !== magicMime) || 'desconocido';
+          asset.warnings = [...(asset.warnings || []), `Firma binaria incompatible (${magicMime} != ${expectedSummary})`];
           asset.error = asset.warnings[asset.warnings.length - 1];
           asset.data = null;
           asset.dataURI = null;
@@ -622,8 +639,15 @@
         if (asset.sourceURL && fetchFn) {
           try {
             const { readBytes, mimeType } = await download(asset.sourceURL);
-            if (asset.mimeType?.startsWith('image/') && mimeType && !mimeType.startsWith('image/')) throw new Error('La respuesta no contiene una imagen');
-            if (mimeType?.startsWith('image/')) asset.mimeType = mimeType;
+            const respMime = normMimeType(mimeType);
+            const extMime = mimeFromAssetFilename(asset.filename);
+            if (asset.mimeType?.startsWith('image/') && respMime && !respMime.startsWith('image/')) {
+              throw new Error('La respuesta no contiene una imagen');
+            }
+            if (respMime === 'application/pdf' && extMime?.startsWith('image/')) {
+              throw new Error('La respuesta PDF es incompatible con una imagen declarada');
+            }
+            if (isGenericMimeType(normMimeType(asset.mimeType)) && respMime?.startsWith('image/')) asset.mimeType = respMime;
             bind(asset, await readBytes(), ASSET_AVAILABILITY.DOWNLOADED);
           } catch (error) {
             asset.warnings.push('Error al obtener recurso: ' + error.message);

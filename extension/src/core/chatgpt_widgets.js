@@ -1110,15 +1110,20 @@
     let widgetDepth = 0;
 
     const updateWidgetDepth = (s) => {
-      const openRe = /<(grid|card|row|col|stack|box|flex|svg)\b[^>]*>/gi;
-      const closeRe = /<\/(grid|card|row|col|stack|box|flex|svg)\s*>/gi;
-      let m;
-      while ((m = openRe.exec(s)) !== null) {
-        if (!/\/>\s*$/.test(m[0])) widgetDepth++;
-      }
-      while ((m = closeRe.exec(s)) !== null) {
-        if (widgetDepth > 0) widgetDepth--;
-      }
+      transformOutsideInlineCode(s, plain => {
+        const openRe = /<(grid|card|row|col|stack|box|flex|svg)\b[^>]*>/gi;
+        const closeRe = /<\/(grid|card|row|col|stack|box|flex|svg)\s*>/gi;
+        let m;
+        while ((m = openRe.exec(plain)) !== null) {
+          if (m.index > 0 && plain[m.index - 1] === '\\') continue;
+          if (!/\/>\s*$/.test(m[0])) widgetDepth++;
+        }
+        while ((m = closeRe.exec(plain)) !== null) {
+          if (m.index > 0 && plain[m.index - 1] === '\\') continue;
+          if (widgetDepth > 0) widgetDepth--;
+        }
+        return plain;
+      });
     };
 
     const flush = isCode => {
