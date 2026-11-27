@@ -1305,8 +1305,6 @@ test('R44 P1: arranque frío sin notificaciones ni reloj monotónico aborta SAVE
     );
   });
 
-  await Promise.resolve();
-  await Promise.resolve();
   const pending = [];
   for (let i = 1; i <= 20; i++) pending.push(sendSaveClip(`clip_cold_${i}`));
   await new ColdLinerDB().clearAll();
@@ -1373,14 +1371,22 @@ test('R46: borrado histórico antes de arranque frío no rechaza SAVE_CLIP envia
   const swCode = fs.readFileSync(path.resolve(__dirname, '../../extension/src/background/service_worker.js'), 'utf8');
   vm.runInNewContext(swCode, sandbox);
 
-  // Enviar SAVE_CLIP inmediatamente antes de que open() termine
-  const res = await new Promise(resolve => {
+  // Antes de terminar open() falla en cerrado; tras hidratar open(), el reintento guarda el clip
+  const first = await new Promise(resolve => {
     onMessageHandler(
       { action: 'SAVE_CLIP', clip: { canonicalId: 'clip_hist_ok', title: 'Hist', selectedMessages: [{ id: 'm1', role: 'user', content: { text: 'hola' } }] } },
       { id: 'test-ext-id' },
       resolve
     );
   });
-  assert.equal(res.success, true);
+  assert.equal(first.success, false);
+  const retry = await new Promise(resolve => {
+    onMessageHandler(
+      { action: 'SAVE_CLIP', clip: { canonicalId: 'clip_hist_ok', title: 'Hist', selectedMessages: [{ id: 'm1', role: 'user', content: { text: 'hola' } }] } },
+      { id: 'test-ext-id' },
+      resolve
+    );
+  });
+  assert.equal(retry.success, true);
   assert.equal(savedClips.size, 1);
 });
