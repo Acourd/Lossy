@@ -6,10 +6,43 @@ const vm = require('node:vm');
 const fs = require('node:fs');
 const path = require('node:path');
 
+const zlib = require('node:zlib');
 const { LinerDB } = require('../../extension/src/core/storage/liner_db');
 const { JobEngine, JOB_STATUS, ITEM_STATUS } = require('../../extension/src/core/jobs/job_engine');
 const HtmlBuilder = require('../../extension/src/core/portability/html_builder');
 const MarkdownIt = require('../../extension/vendor/markdown-it.min.js');
+
+function crc32(buf) {
+  let c = 0xFFFFFFFF;
+  for (let i = 0; i < buf.length; i++) {
+    c ^= buf[i];
+    for (let k = 0; k < 8; k++) c = (c & 1) ? (0xEDB88320 ^ (c >>> 1)) : (c >>> 1);
+  }
+  return (c ^ 0xFFFFFFFF) >>> 0;
+}
+
+function pngChunk(type, data) {
+  const t = Buffer.from(type, 'ascii');
+  const len = Buffer.alloc(4);
+  len.writeUInt32BE(data.length, 0);
+  const body = Buffer.concat([t, data]);
+  const crc = Buffer.alloc(4);
+  crc.writeUInt32BE(crc32(body), 0);
+  return Buffer.concat([len, body, crc]);
+}
+
+function makeSolidPngDataUri(r, g, b) {
+  const sig = Buffer.from([0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A]);
+  const ihdr = Buffer.alloc(13);
+  ihdr.writeUInt32BE(1, 0);
+  ihdr.writeUInt32BE(1, 4);
+  ihdr[8] = 8; // bit depth
+  ihdr[9] = 2; // RGB
+  const rawScanline = Buffer.from([0, r, g, b]);
+  const idat = zlib.deflateSync(rawScanline, { level: 0 });
+  const png = Buffer.concat([sig, pngChunk('IHDR', ihdr), pngChunk('IDAT', idat), pngChunk('IEND', Buffer.alloc(0))]);
+  return `data:image/png;base64,${png.toString('base64')}`;
+}
 
 function makeElement(tag, attrs = {}, children = []) {
   const normalizedTag = String(tag || 'div').toUpperCase();
@@ -650,14 +683,13 @@ test('R34 P1-3: primera captura tras navegación SPA A->B en Claude y Gemini rec
     assert.equal(freshImgOnly.success, true, `${spec.platform}: imagen nueva exclusiva sin texto debe aceptarse`);
     assert.equal(freshImgOnly.data.messages[1].attachments[0].sourceURL, 'https://cdn.test/roma.png');
 
-    // R38 P1/P2: DataURI con igual prefijo (64+ chars) y longitud pero píxeles distintos (rojo vs azul)
-    const pngPrefix = 'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8';
-    const redDataUri = `${pngPrefix}z8Dw/wAAAP//AwAI/AL+X5a1AAAAAElFTkSuQmCC`;
-    const blueDataUri = `${pngPrefix}AAAAAP8A/wAAAwAC/AL+Y9b2AAAAAElFTkSuQmCC`;
+    const makeCustomUrl = (hexTag) => spec.urlB.replace(/(?:22222222-2222-2222-2222-222222222222|bbbbbbbbbbbb)/, hexTag);
+    // R38 & R39 P1/P2: PNG válidos decodificables rojo vs azul con igual prefijo (64+ chars) y longitud
+    const redDataUri = makeSolidPngDataUri(255, 0, 0);
+    const blueDataUri = makeSolidPngDataUri(0, 0, 255);
     assert.equal(redDataUri.length, blueDataUri.length);
     assert.equal(redDataUri.slice(0, 64), blueDataUri.slice(0, 64));
 
-    const makeCustomUrl = (hexTag) => spec.urlB.replace(/(?:22222222-2222-2222-2222-222222222222|bbbbbbbbbbbb)/, hexTag);
     historyObj.pushState({}, '', makeCustomUrl('deadbeef0001'));
     multiTurns = [
       { id: 'u_col', role: 'user', text: 'Genera cuadrado de color', attachments: [] },
@@ -665,7 +697,7 @@ test('R34 P1-3: primera captura tras navegación SPA A->B en Claude y Gemini rec
     ];
     assert.equal((await callMsg({ action: 'ACQUIRE_CONVERSATION' })).success, true);
 
-    // P1 R38: Misma imagen DataURI anterior pero URL mutada (?w=512 -> ?w=1024) y pregunta nueva -> RECHAZA STALE
+    // P1 R38/R39: Misma imagen DataURI anterior pero URL mutada (?w=512 -> ?w=1024) y pregunta nueva -> RECHAZA STALE
     historyObj.pushState({}, '', makeCustomUrl('deadbeef0002'));
     multiTurns = [
       { id: 'u_w1024', role: 'user', text: 'Otra pregunta totalmente distinta', attachments: [] },
@@ -685,6 +717,51 @@ test('R34 P1-3: primera captura tras navegación SPA A->B en Claude y Gemini rec
     const freshBlueImg = await callMsg({ action: 'ACQUIRE_CONVERSATION' });
     assert.equal(freshBlueImg.success, true, `${spec.platform}: PNG distinto con igual prefijo/longitud no debe colisionar`);
     assert.equal(freshBlueImg.data.messages[1].attachments[0].dataURI, blueDataUri);
+
+    // P2 R39: Reutilización legítima de la misma imagen (mismos bytes) con pregunta Y respuesta textual nuevas -> ACEPTA
+    historyObj.pushState({}, '', makeCustomUrl('deadbeef0003'));
+    multiTurns = [
+      { id: 'u_reuse_legit', role: 'user', text: 'Haz un nuevo análisis cromático de esta textura azul', attachments: [] },
+      { id: 'a_reuse_legit', role: 'assistant', text: 'Análisis completamente nuevo y válido de D.', attachments: [{ kind: 'image', sourceURL: 'https://cdn.test/mirror/blue_copy.png', dataURI: blueDataUri }] }
+    ];
+    const legitReuse = await callMsg({ action: 'ACQUIRE_CONVERSATION' });
+    assert.equal(legitReuse.success, true, `${spec.platform}: pregunta y respuesta textual nuevas que reutilizan la imagen deben aceptarse`);
+
+    // P1 R39: CORS impide leer DataURI pre-hidratación y URL muta ?w=512 -> ?w=1024; la validación post-hidratación compara bytes descargados y rechaza
+    const redPngBytes = Buffer.from(redDataUri.split(',')[1], 'base64');
+    sandbox.fetch = async (reqUrl) => {
+      if (String(reqUrl).includes('cors_pixel.png')) {
+        return {
+          ok: true,
+          headers: { get: () => String(redPngBytes.length) },
+          blob: async () => new Blob([redPngBytes], { type: 'image/png' })
+        };
+      }
+      return { ok: false };
+    };
+    sandbox.FileReader = class {
+      readAsDataURL(blob) {
+        blob.arrayBuffer().then(ab => {
+          this.result = `data:${blob.type};base64,${Buffer.from(ab).toString('base64')}`;
+          this.onloadend?.();
+        });
+      }
+    };
+
+    historyObj.pushState({}, '', makeCustomUrl('deadbeef0004'));
+    multiTurns = [
+      { id: 'u_cors_c', role: 'user', text: 'Primera captura CORS', attachments: [] },
+      { id: 'a_cors_c', role: 'assistant', text: '', attachments: [{ kind: 'image', sourceURL: 'https://cdn.test/cors_pixel.png?w=512' }] }
+    ];
+    // Navega C -> D sin captura previa en C, y en D cambia solo ?w=512 -> ?w=1024 (sin dataURI pre-hidratación)
+    historyObj.pushState({}, '', makeCustomUrl('deadbeef0005'));
+    multiTurns = [
+      { id: 'u_cors_d', role: 'user', text: 'Nueva pregunta con CORS', attachments: [] },
+      { id: 'a_cors_d', role: 'assistant', text: '', attachments: [{ kind: 'image', sourceURL: 'https://cdn.test/cors_pixel.png?w=1024' }] }
+    ];
+    const staleCorsRehosted = await callMsg({ action: 'ACQUIRE_CONVERSATION' });
+    assert.equal(staleCorsRehosted.success, false, `${spec.platform}: imagen bloqueada por CORS con query ?w mutado debe rechazarse tras hidratar bytes`);
+    assert.match(staleCorsRehosted.error, /STALE_DOM/);
   }
 });
 

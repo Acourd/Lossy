@@ -29,6 +29,15 @@
   let domObserverInitialized = false;
   const foreignSignaturesByConv = new Map(); // convId -> Set<string>
   const foreignTurnsByConv = new Map();      // convId -> Set<string>
+  const hydratedUrlHashCache = new Map();    // url -> 'd:...'
+
+  function cacheHydratedUrlHash(url, dataUri) {
+    if (!url || !dataUri || /^data:/i.test(url)) return;
+    hydratedUrlHashCache.set(url, `d:${hashFullString64(dataUri)}`);
+    if (hydratedUrlHashCache.size > 100) {
+      hydratedUrlHashCache.delete(hydratedUrlHashCache.keys().next().value);
+    }
+  }
 
   function hashFullString64(str) {
     const s = String(str || '');
@@ -50,7 +59,12 @@
     const rawData = typeof att.dataURI === 'string' && att.dataURI.trim()
       ? att.dataURI.trim()
       : (/^data:/i.test(rawUrl) ? rawUrl : '');
-    const d = rawData ? `d:${hashFullString64(rawData)}` : '';
+    let d = rawData ? `d:${hashFullString64(rawData)}` : '';
+    if (rawUrl && d) {
+      cacheHydratedUrlHash(rawUrl, rawData);
+    } else if (!d && rawUrl && hydratedUrlHashCache.has(rawUrl)) {
+      d = hydratedUrlHashCache.get(rawUrl);
+    }
     const u = (!/^data:/i.test(rawUrl) && rawUrl) ? `u:${rawUrl}` : '';
     const fallback = String(att.assetId || att.id || att.filename || att.name || '').trim();
     const f = (!d && !u && fallback) ? `f:${fallback}` : '';
@@ -156,41 +170,105 @@
       if (idx === -1) return { r: '', b: String(entry || '').trim(), a: [] };
       return { r: entry.slice(0, idx).toLowerCase(), b: entry.slice(idx + 1).trim(), a: [] };
     };
-    const isStaleTurnAgainst = (curParsed, prevSet) => {
-      if (!curParsed.b && curParsed.a.length === 0) return false;
+    const classifyTurnAgainst = (curParsed, prevSet) => {
+      let textMatch = false;
+      let attMatch = false;
+      if (!curParsed.b && curParsed.a.length === 0) return { textMatch, attMatch };
       for (const prevRaw of prevSet) {
         const prevParsed = parseEntry(prevRaw);
         if (curParsed.r && prevParsed.r && curParsed.r !== prevParsed.r) continue;
-        if (curParsed.a.length > 0 && prevParsed.a.length > 0 &&
+        if (!attMatch && curParsed.a.length > 0 && prevParsed.a.length > 0 &&
             curParsed.a.some(ca => prevParsed.a.some(pa => isSameAttachmentDescriptor(ca, pa)))) {
-          return true;
+          attMatch = true;
         }
-        if (curParsed.b && prevParsed.b && curParsed.b === prevParsed.b) {
-          return true;
+        if (!textMatch && curParsed.b && prevParsed.b) {
+          if (curParsed.b === prevParsed.b ||
+              (curParsed.b.length >= 10 && prevParsed.b.length >= 10 &&
+               (prevParsed.b.includes(curParsed.b) || curParsed.b.includes(prevParsed.b)))) {
+            textMatch = true;
+          }
         }
-        if (curParsed.b.length >= 10 && prevParsed.b.length >= 10 &&
-            (prevParsed.b.includes(curParsed.b) || curParsed.b.includes(prevParsed.b))) {
-          return true;
-        }
+        if (textMatch && attMatch) break;
       }
-      return false;
+      return { textMatch, attMatch };
     };
     const parsedTurns = turns.map(parseEntry);
     for (const [cid, tSet] of foreignTurnsByConv.entries()) {
       if (targetConvId && cid === targetConvId) continue;
       if (!tSet || tSet.size === 0) continue;
-      const staleFlags = parsedTurns.map(pt => isStaleTurnAgainst(pt, tSet));
-      if (!staleFlags.some(Boolean)) continue;
-      const hasStaleAiResponse = parsedTurns.some((pt, i) => staleFlags[i] && pt.r !== 'user');
-      if (hasStaleAiResponse) {
+      const matches = parsedTurns.map(pt => classifyTurnAgainst(pt, tSet));
+      if (!matches.some(m => m.textMatch || m.attMatch)) continue;
+      // Texto AI coincidente OR respuesta AI exclusivamente de imagen con bytes idénticos -> obsoleto.
+      // Texto AI distinto acompañado de imagen reutilizada -> contenido legítimo nuevo.
+      const hasStaleAiContent = parsedTurns.some((pt, i) => {
+        if (pt.r === 'user') return false;
+        return matches[i].textMatch || (!pt.b && matches[i].attMatch);
+      });
+      if (hasStaleAiContent) {
         return true;
       }
-      const hasDistinctFreshTurn = parsedTurns.some((pt, i) => !staleFlags[i] && (pt.b.length > 0 || pt.a.length > 0));
+      const hasDistinctFreshTurn = parsedTurns.some((pt, i) =>
+        (pt.b.length > 0 && !matches[i].textMatch) ||
+        (pt.a.length > 0 && !matches[i].attMatch)
+      );
       if (!hasDistinctFreshTurn) {
         return true;
       }
     }
     return false;
+  }
+
+  async function resolveMissingForeignAttachmentHashes(targetConvId, turns, signal) {
+    if (!Array.isArray(turns) || turns.length === 0) return;
+    const hasHydratedImageOnlyAi = turns.some(entry => {
+      try {
+        const p = typeof entry === 'string' && entry.startsWith('{') ? JSON.parse(entry) : null;
+        return p && p.r !== 'user' && !p.b && Array.isArray(p.a) && p.a.some(att => att?.d);
+      } catch (_) {
+        return false;
+      }
+    });
+    if (!hasHydratedImageOnlyAi) return;
+
+    for (const [cid, tSet] of foreignTurnsByConv.entries()) {
+      if (targetConvId && cid === targetConvId) continue;
+      const updatedEntries = [];
+      let changedSet = false;
+      for (const prevRaw of tSet) {
+        let p = null;
+        try { if (typeof prevRaw === 'string' && prevRaw.startsWith('{')) p = JSON.parse(prevRaw); } catch (_) {}
+        if (!p || !Array.isArray(p.a) || p.a.length === 0) {
+          updatedEntries.push(prevRaw);
+          continue;
+        }
+        let entryUpdated = false;
+        for (const pa of p.a) {
+          if (pa && !pa.d && pa.u && pa.u.startsWith('u:')) {
+            const rawUrl = pa.u.slice(2);
+            if (hydratedUrlHashCache.has(rawUrl)) {
+              pa.d = hydratedUrlHashCache.get(rawUrl);
+              entryUpdated = true;
+            } else {
+              const res = await fetchAsDataUri(rawUrl, signal);
+              if (res && res.dataURI) {
+                cacheHydratedUrlHash(rawUrl, res.dataURI);
+                pa.d = hydratedUrlHashCache.get(rawUrl) || `d:${hashFullString64(res.dataURI)}`;
+                entryUpdated = true;
+              }
+            }
+          }
+        }
+        if (entryUpdated) {
+          changedSet = true;
+          updatedEntries.push(JSON.stringify(p));
+        } else {
+          updatedEntries.push(prevRaw);
+        }
+      }
+      if (changedSet) {
+        foreignTurnsByConv.set(cid, new Set(updatedEntries));
+      }
+    }
   }
 
   function recordCurrentDomBaseline() {
@@ -470,6 +548,17 @@
 
             await hydrateConversationImages(data, controller?.signal);
 
+            for (const m of (data.messages || [])) {
+              for (const att of (m.attachments || [])) {
+                if (att && att.sourceURL && att.dataURI) {
+                  cacheHydratedUrlHash(att.sourceURL, att.dataURI);
+                }
+              }
+            }
+            turns = extractTurnEntries(data);
+            sig = turns.join('\n---\n');
+            await resolveMissingForeignAttachmentHashes(startConvId, turns, controller?.signal);
+
             const afterHref = window.location?.href || '';
             const afterInfo = adapter.detectPlatform(afterHref);
             if (
@@ -484,6 +573,14 @@
               domDeclMismatch()
             ) {
               sendResponse({ success: false, error: 'NAVIGATION_ABORT: La conversación cambió durante la captura.' });
+              return;
+            }
+
+            if (isStaleFromOtherConv()) {
+              sendResponse({
+                success: false,
+                error: 'SOURCE_IDENTITY_STALE_DOM: Los recursos hidratados aún pertenecen a una conversación anterior tras navegación SPA.'
+              });
               return;
             }
 
