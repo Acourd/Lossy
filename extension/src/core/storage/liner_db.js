@@ -96,46 +96,67 @@
     const mergeMonotonicCodeBlocks = (oldBlocks, newBlocks) => {
       const a = Array.isArray(oldBlocks) ? oldBlocks : [];
       const b = Array.isArray(newBlocks) ? newBlocks : [];
-      if (!a.length) return newBlocks;
-      if (!b.length) return a;
+      if (!a.length) return b.slice();
+      if (!b.length) return a.slice();
       const result = a.slice();
       const matchedOld = new Set();
-      const unmatchedNew = [];
+      const matchedNew = new Set();
+      // Pass 1: exact matches across the entire array first (preferring matching language)
       for (let j = 0; j < b.length; j++) {
-        const next = b[j];
-        const nextCode = typeof next?.code === 'string' ? next.code : '';
-        const nextLang = typeof next?.language === 'string' ? next.language : '';
-        // 1. Prefer exact code match
-        let matchIdx = -1;
+        const nextCode = typeof b[j]?.code === 'string' ? b[j].code : '';
+        const nextLang = typeof b[j]?.language === 'string' ? b[j].language : '';
+        let exactIdx = -1;
         for (let i = 0; i < a.length; i++) {
           if (matchedOld.has(i)) continue;
           const prevCode = typeof a[i]?.code === 'string' ? a[i].code : '';
-          if (prevCode === nextCode) { matchIdx = i; break; }
+          if (prevCode !== nextCode) continue;
+          const prevLang = typeof a[i]?.language === 'string' ? a[i].language : '';
+          if (prevLang === nextLang) { exactIdx = i; break; }
+          if (exactIdx === -1) exactIdx = i;
         }
-        // 2. Containment/prefix match (same language when both present)
-        if (matchIdx === -1 && nextCode.length > 0) {
-          for (let i = 0; i < a.length; i++) {
-            if (matchedOld.has(i)) continue;
-            const prevCode = typeof a[i]?.code === 'string' ? a[i].code : '';
-            const prevLang = typeof a[i]?.language === 'string' ? a[i].language : '';
-            if (prevLang && nextLang && prevLang !== nextLang) continue;
-            if (prevCode.length > 0 && (prevCode.includes(nextCode) || nextCode.includes(prevCode))) {
-              matchIdx = i;
-              break;
-            }
+        if (exactIdx !== -1) {
+          matchedOld.add(exactIdx);
+          matchedNew.add(j);
+        }
+      }
+      // Pass 2: strictly 1-to-1 unambiguous containment/prefix matches
+      const edgesByNew = new Map();
+      const degOld = new Map();
+      for (let j = 0; j < b.length; j++) {
+        if (matchedNew.has(j)) continue;
+        const nextCode = typeof b[j]?.code === 'string' ? b[j].code : '';
+        const nextLang = typeof b[j]?.language === 'string' ? b[j].language : '';
+        if (!nextCode.length) continue;
+        const cands = [];
+        for (let i = 0; i < a.length; i++) {
+          if (matchedOld.has(i)) continue;
+          const prevCode = typeof a[i]?.code === 'string' ? a[i].code : '';
+          const prevLang = typeof a[i]?.language === 'string' ? a[i].language : '';
+          if (prevLang && nextLang && prevLang !== nextLang) continue;
+          if (prevCode.length > 0 && (prevCode.includes(nextCode) || nextCode.includes(prevCode))) {
+            cands.push(i);
+            degOld.set(i, (degOld.get(i) || 0) + 1);
           }
         }
-        // 3. Positional fallback only when counts are identical and slot is unmatched
-        if (matchIdx === -1 && a.length === b.length && !matchedOld.has(j)) {
-          matchIdx = j;
-        }
-        if (matchIdx !== -1) {
-          matchedOld.add(matchIdx);
-          const prev = a[matchIdx];
-          const prevCode = typeof prev?.code === 'string' ? prev.code : '';
-          result[matchIdx] = prevCode.length > nextCode.length ? prev : next;
+        edgesByNew.set(j, cands);
+      }
+      const unmatchedNew = [];
+      for (let j = 0; j < b.length; j++) {
+        if (matchedNew.has(j)) continue;
+        const cands = edgesByNew.get(j) || [];
+        const nextCode = typeof b[j]?.code === 'string' ? b[j].code : '';
+        if (cands.length === 1 && degOld.get(cands[0]) === 1) {
+          const idx = cands[0];
+          matchedOld.add(idx);
+          matchedNew.add(j);
+          const prevCode = typeof a[idx]?.code === 'string' ? a[idx].code : '';
+          result[idx] = prevCode.length >= nextCode.length ? a[idx] : b[j];
+        } else if (cands.length > 0 && cands.every(i => (typeof a[i]?.code === 'string' ? a[i].code : '').length > nextCode.length)) {
+          // Shorter ambiguous fragment already contained in multiple fuller persisted blocks: keep fuller blocks without duplicating stub
+          continue;
         } else {
-          unmatchedNew.push(next);
+          // Distinct or genuinely longer block without unambiguous target: preserve existing and append
+          unmatchedNew.push(b[j]);
         }
       }
       return result.concat(unmatchedNew);

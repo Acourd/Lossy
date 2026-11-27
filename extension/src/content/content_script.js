@@ -203,37 +203,57 @@
     if (!b.length) return a.slice();
     const result = a.slice();
     const matchedOld = new Set();
-    const unmatchedNew = [];
+    const matchedNew = new Set();
     for (let j = 0; j < b.length; j++) {
-      const next = b[j];
-      const nextCode = String(next?.code || '');
-      const nextLang = String(next?.language || '');
-      let matchIdx = -1;
+      const nextCode = String(b[j]?.code || '');
+      const nextLang = String(b[j]?.language || '');
+      let exactIdx = -1;
       for (let i = 0; i < a.length; i++) {
         if (matchedOld.has(i)) continue;
-        if (String(a[i]?.code || '') === nextCode) { matchIdx = i; break; }
+        if (String(a[i]?.code || '') !== nextCode) continue;
+        if (String(a[i]?.language || '') === nextLang) { exactIdx = i; break; }
+        if (exactIdx === -1) exactIdx = i;
       }
-      if (matchIdx === -1 && nextCode.length > 0) {
-        for (let i = 0; i < a.length; i++) {
-          if (matchedOld.has(i)) continue;
-          const prevCode = String(a[i]?.code || '');
-          const prevLang = String(a[i]?.language || '');
-          if (prevLang && nextLang && prevLang !== nextLang) continue;
-          if (prevCode.length > 0 && (prevCode.includes(nextCode) || nextCode.includes(prevCode))) {
-            matchIdx = i;
-            break;
-          }
+      if (exactIdx !== -1) {
+        matchedOld.add(exactIdx);
+        matchedNew.add(j);
+      }
+    }
+    const edgesByNew = new Map();
+    const degOld = new Map();
+    for (let j = 0; j < b.length; j++) {
+      if (matchedNew.has(j)) continue;
+      const nextCode = String(b[j]?.code || '');
+      const nextLang = String(b[j]?.language || '');
+      if (!nextCode.length) continue;
+      const cands = [];
+      for (let i = 0; i < a.length; i++) {
+        if (matchedOld.has(i)) continue;
+        const prevCode = String(a[i]?.code || '');
+        const prevLang = String(a[i]?.language || '');
+        if (prevLang && nextLang && prevLang !== nextLang) continue;
+        if (prevCode.length > 0 && (prevCode.includes(nextCode) || nextCode.includes(prevCode))) {
+          cands.push(i);
+          degOld.set(i, (degOld.get(i) || 0) + 1);
         }
       }
-      if (matchIdx === -1 && a.length === b.length && !matchedOld.has(j)) {
-        matchIdx = j;
-      }
-      if (matchIdx !== -1) {
-        matchedOld.add(matchIdx);
-        const prev = a[matchIdx];
-        result[matchIdx] = nextCode.length >= String(prev?.code || '').length ? next : prev;
+      edgesByNew.set(j, cands);
+    }
+    const unmatchedNew = [];
+    for (let j = 0; j < b.length; j++) {
+      if (matchedNew.has(j)) continue;
+      const cands = edgesByNew.get(j) || [];
+      const nextCode = String(b[j]?.code || '');
+      if (cands.length === 1 && degOld.get(cands[0]) === 1) {
+        const idx = cands[0];
+        matchedOld.add(idx);
+        matchedNew.add(j);
+        const prevCode = String(a[idx]?.code || '');
+        result[idx] = nextCode.length >= prevCode.length ? b[j] : a[idx];
+      } else if (cands.length > 0 && cands.every(i => String(a[i]?.code || '').length > nextCode.length)) {
+        continue;
       } else {
-        unmatchedNew.push(next);
+        unmatchedNew.push(b[j]);
       }
     }
     return result.concat(unmatchedNew);

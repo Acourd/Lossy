@@ -181,13 +181,13 @@
       };
       let activeMessageIndex = null;
       const emittedMsgExplicitIds = new Set();
-      const emittedGlobalLocations = new Set();
+      const emittedByLocation = { fid: new Map(), ptr: new Map(), url: new Map(), uri: new Map() };
       const addAsset = asset => {
         records.push(asset);
-        if (asset.fileId) emittedGlobalLocations.add('fid:' + asset.fileId);
-        if (asset.assetPointer) emittedGlobalLocations.add('ptr:' + asset.assetPointer);
-        if (asset.sourceURL) emittedGlobalLocations.add('url:' + asset.sourceURL);
-        if (asset.dataURI) emittedGlobalLocations.add('uri:' + asset.dataURI);
+        if (asset.fileId && !emittedByLocation.fid.has(asset.fileId)) emittedByLocation.fid.set(asset.fileId, asset);
+        if (asset.assetPointer && !emittedByLocation.ptr.has(asset.assetPointer)) emittedByLocation.ptr.set(asset.assetPointer, asset);
+        if (asset.sourceURL && !emittedByLocation.url.has(asset.sourceURL)) emittedByLocation.url.set(asset.sourceURL, asset);
+        if (asset.dataURI && !emittedByLocation.uri.has(asset.dataURI)) emittedByLocation.uri.set(asset.dataURI, asset);
         const index = asset.messageIndex == null ? null : activeMessageIndex;
         if (!index) return;
         if (asset.fileId != null && !index.fileIds.has(asset.fileId)) index.fileIds.set(asset.fileId, asset);
@@ -223,15 +223,16 @@
           const rawAssetId = att.assetId || att.id || `asset_${mIdx}_${aIdx}`;
           const safePtr = typeof att.assetPointer === 'string' ? att.assetPointer : null;
           const resolvedFileId = (typeof att.fileId === 'string' && att.fileId) || safePtr?.replace(/^(?:sediment|file-service):\/\//, '') || null;
+          const isBareHydrationStub = !att.assetId && !att.filename && !att.name && !remoteURL && !att.fileId && !att.assetPointer && !att.kind && Boolean(dataURI) && !localBlob;
           let existing = resolvedFileId ? index.fileIds.get(resolvedFileId) : index.assetIds.get(rawAssetId);
-          if (!existing && !resolvedFileId && index.fileIds.has(rawAssetId)) {
+          if (!existing && isBareHydrationStub && index.fileIds.has(rawAssetId)) {
             const candidate = index.fileIds.get(rawAssetId);
-            if (candidate && !candidate.dataURI && !candidate.data && (dataURI || localBlob)) {
+            if (candidate && !candidate.dataURI && !candidate.data) {
               existing = candidate;
             }
           }
           if (existing) {
-            if (!existing.dataURI && dataURI) { existing.dataURI = dataURI; existing.availability = 'embedded'; index.locations.add(dataURI); }
+            if (!existing.dataURI && dataURI) { existing.dataURI = dataURI; existing.availability = 'embedded'; index.locations.add(dataURI); emittedByLocation.uri.set(dataURI, existing); }
             if (!existing.data && localBlob) { existing.data = localBlob; existing.availability = 'embedded'; }
             return;
           }
@@ -302,16 +303,22 @@
           });
         }
 
-        // 3. Detección de imágenes Markdown inline ![alt](url) (excluyendo bloques cercados y código inline)
+        // 3. Detección de imágenes Markdown inline ![alt](url) (excluyendo bloques cercados, código inline y escapes)
         const text = typeof msg.text === 'string' ? msg.text : (msg.content?.text || '');
         const nonCodeText = splitFencedCodeSegments(text)
           .filter(seg => !seg.isCode)
-          .map(seg => stripInlineCodeSpans(seg.text))
+          .map(seg => maskInlineCodeSpans(seg.text))
           .join('\n');
+        const isEscapedBackslash = (str, idx) => {
+          let bs = 0;
+          for (let k = idx - 1; k >= 0 && str[k] === '\\'; k--) bs++;
+          return (bs % 2) === 1;
+        };
         const mdImgRegex = /!\[([^\]]*)\]\(([^)]+)\)/g;
         let match;
         let imgIdx = 0;
         while ((match = mdImgRegex.exec(nonCodeText)) !== null) {
+          if (isEscapedBackslash(nonCodeText, match.index) || isEscapedBackslash(match[1], match[1].length)) continue;
           const imgUrl = match[2].replace(/^<|>$/g, '');
           if (index.locations.has(imgUrl)) continue;
           const isInlineData = imgUrl.startsWith('data:');
@@ -357,17 +364,46 @@
         const safePtr = typeof att.assetPointer === 'string' ? att.assetPointer : null;
         const topFileId = (typeof att.fileId === 'string' && att.fileId) || safePtr?.replace(/^(?:sediment|file-service):\/\//, '') || null;
 
-        // Omitir únicamente si es un espejo del mismo adjunto ya emitido a nivel de mensaje
-        if (att.sourceMessageId && (seenKeys.has(`${att.sourceMessageId}::${rawTopId}`) || emittedMsgExplicitIds.has(rawTopId))) return;
+        const hydrateMirror = (target) => {
+          if (!target) return false;
+          if (!target.dataURI && dataURI) {
+            target.dataURI = dataURI;
+            target.availability = ASSET_AVAILABILITY.EMBEDDED;
+            emittedByLocation.uri.set(dataURI, target);
+          }
+          if (!target.data && localBlob) {
+            target.data = localBlob;
+            target.availability = ASSET_AVAILABILITY.EMBEDDED;
+          }
+          if (!target.data && dataURI) {
+            const decoded = dataUriToUint8Array(dataURI);
+            if (decoded) target.data = decoded;
+          }
+          return true;
+        };
+
+        const exactMirror = (topFileId && emittedByLocation.fid.get(topFileId)) ||
+          (safePtr && emittedByLocation.ptr.get(safePtr)) ||
+          (dataURI && emittedByLocation.uri.get(dataURI)) ||
+          (remoteURL && emittedByLocation.url.get(remoteURL)) ||
+          (att.sourceMessageId && records.find(r => r.sourceMessageId === att.sourceMessageId && (r.id === rawTopId || r.assetId === rawTopId))) ||
+          null;
+
+        if (exactMirror) {
+          const mirrorHasBinary = Boolean(exactMirror.data || exactMirror.dataURI);
+          const topHasDistinctBinary = mirrorHasBinary && (
+            (dataURI && exactMirror.dataURI && dataURI !== exactMirror.dataURI) ||
+            (localBlob && !dataURI)
+          );
+          if (!topHasDistinctBinary) {
+            hydrateMirror(exactMirror);
+            return;
+          }
+        }
+        if (att.sourceMessageId && (seenKeys.has(`${att.sourceMessageId}::${rawTopId}`) || emittedMsgExplicitIds.has(rawTopId)) && !localBlob && !dataURI) return;
+
         const topKey = `top::${rawTopId}::${aIdx}`;
         if (seenKeys.has(topKey)) return;
-        const isExactLocationMirror = (
-          (topFileId && emittedGlobalLocations.has('fid:' + topFileId)) ||
-          (safePtr && emittedGlobalLocations.has('ptr:' + safePtr)) ||
-          (dataURI && emittedGlobalLocations.has('uri:' + dataURI)) ||
-          (remoteURL && emittedGlobalLocations.has('url:' + remoteURL))
-        );
-        if (isExactLocationMirror && !localBlob) return;
         seenKeys.add(topKey);
         const assetId = allocateUniqueAssetId(rawTopId, 'top', aIdx);
 
@@ -549,8 +585,8 @@
     return parts;
   }
 
-  function stripInlineCodeSpans(str) {
-    return splitInlineCodeSpans(str).filter(p => !p.isCode).map(p => p.text).join('');
+  function maskInlineCodeSpans(str) {
+    return splitInlineCodeSpans(str).map(p => p.isCode ? '\u0000CODE\u0000' : p.text).join('');
   }
 
   function transformOutsideInlineCode(str, fn) {
@@ -567,6 +603,7 @@
     let fenceChar = '';
     let fenceLen = 0;
     let fenceBqDepth = 0;
+    let fenceListIndent = 0;
     let prevLineBlank = true;
 
     const flush = isCode => {
@@ -579,6 +616,7 @@
       let rest = line;
       let bqDepth = 0;
       let hadList = false;
+      let listIndent = 0;
       while (true) {
         const bq = rest.match(/^ {0,3}>[ \t]?/);
         if (bq) {
@@ -589,40 +627,61 @@
         const lst = rest.match(/^ {0,3}(?:[-*+]|\d{1,9}[.)])[ \t]+/);
         if (lst) {
           hadList = true;
+          listIndent += lst[0].length;
           rest = rest.slice(lst[0].length);
           continue;
         }
         break;
       }
-      return { bqDepth, hadList, rest };
+      return { bqDepth, hadList, listIndent, rest };
+    };
+    const stripExactBq = (line, targetDepth) => {
+      let rest = line;
+      let depth = 0;
+      while (depth < targetDepth) {
+        const bq = rest.match(/^ {0,3}>[ \t]?/);
+        if (!bq) break;
+        depth++;
+        rest = rest.slice(bq[0].length);
+      }
+      return { depth, rest };
     };
 
     for (const line of lines) {
-      const { bqDepth, hadList, rest } = stripContainers(line);
-      const isBlank = rest.trim().length === 0;
       if (inFence) {
-        if (fenceBqDepth > 0 && bqDepth < fenceBqDepth) {
+        const { depth, rest } = stripExactBq(line, fenceBqDepth);
+        const isBlank = rest.trim().length === 0;
+        if (fenceBqDepth > 0 && depth < fenceBqDepth) {
           flush(true);
           inFence = false;
           fenceChar = '';
           fenceLen = 0;
           fenceBqDepth = 0;
+          fenceListIndent = 0;
+          // Fall through cleanly to process `line` outside the closed blockquote fence
+        } else {
           buf.push(line);
-          prevLineBlank = isBlank;
+          const closeRe = fenceListIndent > 0
+            ? new RegExp('^ {0,' + (fenceListIndent + 3) + '}(`{3,}|~{3,})[ \\t]*$')
+            : /^ {0,3}(`{3,}|~{3,})[ \t]*$/;
+          const closeM = rest.match(closeRe);
+          if (closeM && closeM[1][0] === fenceChar && closeM[1].length >= fenceLen) {
+            flush(true);
+            inFence = false;
+            fenceChar = '';
+            fenceLen = 0;
+            fenceBqDepth = 0;
+            fenceListIndent = 0;
+            prevLineBlank = false;
+          } else {
+            prevLineBlank = isBlank;
+          }
           continue;
         }
-        buf.push(line);
-        const closeM = rest.match(/^[ \t]*(`{3,}|~{3,})[ \t]*$/);
-        if (closeM && closeM[1][0] === fenceChar && closeM[1].length >= fenceLen) {
-          flush(true);
-          inFence = false;
-          fenceChar = '';
-          fenceLen = 0;
-          fenceBqDepth = 0;
-          prevLineBlank = false;
-        }
-        continue;
       }
+
+      const { bqDepth, hadList, listIndent, rest } = stripContainers(line);
+      const isBlank = rest.trim().length === 0;
 
       if (inIndented) {
         if (/^(?: {4}|\t)/.test(rest) || isBlank) {
@@ -635,7 +694,7 @@
       }
 
       const openM = hadList
-        ? rest.match(/^[ \t]*(`{3,}|~{3,})(.*)$/)
+        ? rest.match(/^ {0,3}(`{3,}|~{3,})(.*)$/)
         : rest.match(/^ {0,3}(`{3,}|~{3,})(.*)$/);
       if (openM && !(openM[1][0] === '`' && openM[2].includes('`'))) {
         flush(false);
@@ -643,6 +702,7 @@
         fenceChar = openM[1][0];
         fenceLen = openM[1].length;
         fenceBqDepth = bqDepth;
+        fenceListIndent = listIndent;
         buf.push(line);
         prevLineBlank = false;
         continue;
@@ -699,7 +759,13 @@
     if (!options.preserveRawWidgets && widgets && typeof widgets.renderWidgetsToMarkdown === 'function') {
       text = widgets.renderWidgetsToMarkdown(text);
     }
-    const body = splitFencedCodeSegments(text).map(seg => seg.isCode ? seg.text : transformOutsideInlineCode(seg.text, s => s.replace(/!\[([^\]]*)\]\(<?([^)>]+)>?\)/g, (original, alt, url) => {
+    const isEscapedBackslash = (str, idx) => {
+      let bs = 0;
+      for (let k = idx - 1; k >= 0 && str[k] === '\\'; k--) bs++;
+      return (bs % 2) === 1;
+    };
+    const body = splitFencedCodeSegments(text).map(seg => seg.isCode ? seg.text : transformOutsideInlineCode(seg.text, s => s.replace(/!\[([^\]]*)\]\(<?([^)>]+)>?\)/g, (original, alt, url, offset) => {
+      if (isEscapedBackslash(s, offset) || isEscapedBackslash(alt, alt.length)) return original;
       const found = images.find(a => a.sourceURL === url || a.url === url || a.dataURI === url);
       return found ? render(found, alt) : (strategy === 'omit' ? '' : original);
     }))).join('\n');
