@@ -717,22 +717,26 @@
     return { ok: true, rest, col: startCol + targetCols };
   }
 
-  function matchBqPrefixMd(str, startCol) {
+  function matchBqPrefixMd(str, bsCol, sCol = 0) {
+    const startCol = bsCol + sCol;
     const lead = measureLeadColsMd(str, startCol);
     if (lead.cols > 3 || str[lead.idx] !== '>') return { ok: false };
     let i = lead.idx + 1;
     let col = lead.endCol + 1;
+    let optCols = 0;
     let pad = '';
     if (i < str.length) {
-      if (str[i] === ' ') { i++; col += 1; }
+      if (str[i] === ' ') { i++; col += 1; optCols = 1; }
       else if (str[i] === '\t') {
         const adv = 4 - (col % 4);
         i++;
         col += 1;
+        optCols = 1;
         if (adv > 1) pad = ' '.repeat(adv - 1);
       }
     }
-    return { ok: true, rest: pad + str.slice(i), col };
+    const nextBsCol = sCol + lead.cols + 1 + optCols;
+    return { ok: true, rest: pad + str.slice(i), col: nextBsCol, bsCol: nextBsCol };
   }
 
   function matchListPrefixMd(str, startCol, canInterruptPara = true, allowEmptyInterrupt = false) {
@@ -767,25 +771,27 @@
       set inParagraph(v) { inParagraph = Boolean(v); },
       step(line) {
         let rest = line;
-        let col = 0;
+        let bsCol = 0;
+        let sCol = 0;
         let matched = 0;
         while (matched < containers.length) {
           const c = containers[matched];
           if (c.type === 'bq') {
-            const m = matchBqPrefixMd(rest, col);
+            const m = matchBqPrefixMd(rest, bsCol, sCol);
             if (!m.ok) break;
             rest = m.rest;
-            col = m.col;
+            bsCol = m.bsCol;
+            sCol = 0;
             matched++;
           } else {
             if (rest.trim().length === 0) {
               matched++;
               continue;
             }
-            const s = stripIndentColsMd(rest, col, c.indent);
+            const s = stripIndentColsMd(rest, bsCol + sCol, c.indent);
             if (!s.ok) break;
             rest = s.rest;
-            col = s.col;
+            sCol += c.indent;
             matched++;
           }
         }
@@ -793,11 +799,11 @@
         const listExited = containers.slice(matched).some(c => c.type === 'list');
         let lazyKeep = false;
         if (exitedAnyContainer && inParagraph && rest.trim().length > 0) {
-          const tailLead = measureLeadColsMd(rest, col);
+          const tailLead = measureLeadColsMd(rest, bsCol + sCol);
           const tailTrim = rest.slice(tailLead.idx);
           const tailInterrupts =
             isSingleLineNonParaBlockMd(tailLead.cols, tailTrim, false) ||
-            matchBqPrefixMd(rest, col).ok ||
+            matchBqPrefixMd(rest, bsCol, sCol).ok ||
             (tailLead.cols <= 3 && /^(`{3,}[^`]*|~{3,}.*)$/.test(tailTrim)) ||
             (tailLead.cols <= 3 && /^(?:[-+*]|\d{1,9}[.)])(?:[ \t]|$)/.test(tailTrim));
           if (!tailInterrupts) lazyKeep = true;
@@ -805,25 +811,27 @@
         if (!lazyKeep) containers.length = matched;
         let hadMarker = false;
         while (!lazyKeep && rest.trim().length > 0) {
-          const bq = matchBqPrefixMd(rest, col);
+          const bq = matchBqPrefixMd(rest, bsCol, sCol);
           if (bq.ok) {
             containers.push({ type: 'bq' });
             rest = bq.rest;
-            col = bq.col;
+            bsCol = bq.bsCol;
+            sCol = 0;
             hadMarker = true;
             continue;
           }
           const allowEmpty = !inParagraph || exitedAnyContainer || hadMarker;
-          const lst = matchListPrefixMd(rest, col, !inParagraph || listExited || exitedAnyContainer || hadMarker, allowEmpty);
+          const lst = matchListPrefixMd(rest, bsCol + sCol, !inParagraph || listExited || exitedAnyContainer || hadMarker, allowEmpty);
           if (lst.ok) {
             containers.push({ type: 'list', indent: lst.indent });
             rest = lst.rest;
-            col = lst.col;
+            sCol += lst.indent;
             hadMarker = true;
             continue;
           }
           break;
         }
+        const col = bsCol + sCol;
         const lead = measureLeadColsMd(rest, col);
         const curBqCount = containers.filter(c => c.type === 'bq').length;
         const isBlank = rest.trim().length === 0;
