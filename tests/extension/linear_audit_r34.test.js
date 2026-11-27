@@ -1236,3 +1236,39 @@ test('R43 P2: project_bundle rechaza content.citations no-array en importación 
   const md = MarkdownSerializer.serializeToMarkdown(badConv);
   assert.match(md, /Citas inválidas/);
 });
+
+test('R44 P1: _runGuardedTx aborta en arranque frío si enqueuedAt <= wipedAt aunque baselineIdbEpoch haya leído post-wipe', async () => {
+  const { LinerDB } = require('../../extension/src/core/storage/liner_db.js');
+  const db = new LinerDB();
+  db.useMemoryFallback = false;
+  const wipedAt = Date.now() + 50;
+  db.db = {
+    objectStoreNames: { contains: name => name === 'diagnostics' },
+    transaction() {
+      const tx = {
+        oncomplete: null,
+        onerror: null,
+        onabort: null,
+        abort() { queueMicrotask(() => tx.onabort && tx.onabort()); },
+        objectStore(name) {
+          return {
+            get() {
+              const req = { result: name === 'diagnostics' ? { id: '__lossy_wipe_epoch__', epoch: 1, wipedAt } : null, onsuccess: null, onerror: null };
+              queueMicrotask(() => req.onsuccess && req.onsuccess());
+              return req;
+            },
+            put() { return {}; }
+          };
+        }
+      };
+      return tx;
+    }
+  };
+  await assert.rejects(
+    () => db.saveClip(
+      { canonicalId: 'clip_cold', title: 'Cold', selectedMessages: [{ id: 'm1', role: 'user', content: { text: 'x' } }] },
+      { expectedIdbWipeEpoch: 1, enqueuedAt: wipedAt - 10 }
+    ),
+    /WRITE_ABORTED_BY_CLEAR_ALL/
+  );
+});

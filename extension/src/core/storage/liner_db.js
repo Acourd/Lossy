@@ -503,7 +503,7 @@
       return Boolean(this.db && this.db.objectStoreNames && typeof this.db.objectStoreNames.contains === 'function' && this.db.objectStoreNames.contains('diagnostics'));
     }
 
-    _runGuardedTx(storeNames, writeEpoch, baselineIdbEpoch, execInTx, resolveValue) {
+    _runGuardedTx(storeNames, writeEpoch, baselineIdbEpoch, execInTx, resolveValue, options = {}) {
       return new Promise((resolve, reject) => {
         try { this._assertWriteEpoch(writeEpoch); } catch (e) { reject(e); return; }
         const useDiag = this._hasDiagStore();
@@ -540,7 +540,8 @@
             const diagReq = tx.objectStore('diagnostics').get(WIPE_EPOCH_KEY);
             diagReq.onsuccess = () => {
               const persisted = Number(diagReq.result?.epoch || 0);
-              if (persisted > baselineIdbEpoch) {
+              const wipedAt = Number(diagReq.result?.wipedAt || 0);
+              if (persisted > baselineIdbEpoch || (options?.enqueuedAt && wipedAt && options.enqueuedAt <= wipedAt)) {
                 failAbort(new Error('WRITE_ABORTED_BY_CLEAR_ALL'));
                 return;
               }
@@ -817,7 +818,9 @@
           tx.objectStore('conversations').put(clip);
           tx.objectStore('metadata_index').put(metaRecord);
           setResult(canonicalId);
-        }
+        },
+        undefined,
+        options
       );
     }
 
@@ -1620,7 +1623,7 @@
             tx.objectStore('transfers').clear();
             tx.objectStore('jobs').clear();
             diagStore.clear();
-            diagStore.put({ id: WIPE_EPOCH_KEY, epoch: writtenEpoch });
+            diagStore.put({ id: WIPE_EPOCH_KEY, epoch: writtenEpoch, wipedAt: Date.now() });
           };
           const curReq = diagStore.get(WIPE_EPOCH_KEY);
           curReq.onsuccess = () => finishClear(Number(curReq.result?.epoch || 0));
