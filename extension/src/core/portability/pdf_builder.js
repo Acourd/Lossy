@@ -478,14 +478,14 @@
       };
 
       // Renderizar prosa y bloques de código en su orden exacto original
-      const fenceRe = /(`{3,})([^\n]*)\n([\s\S]*?)\1/g;
+      const fenceRe = /(?:^|\n)(`{3,})([^\n]*)\n([\s\S]*?)\n\1`*(?=\n|$)/g;
       let lastIdx = 0;
       let foundInlineFences = false;
       let fm;
       while ((fm = fenceRe.exec(cleanSource)) !== null) {
         foundInlineFences = true;
         if (fm.index > lastIdx) renderProseChunk(cleanSource.slice(lastIdx, fm.index));
-        renderCodeChunk({ language: fm[2].trim(), code: fm[3].replace(/\n$/, '') });
+        renderCodeChunk({ language: fm[2].trim(), code: fm[3] });
         lastIdx = fm.index + fm[0].length;
       }
       if (lastIdx < cleanSource.length) renderProseChunk(cleanSource.slice(lastIdx));
@@ -507,7 +507,7 @@
         a.sourceMessageId === msg.id || a.messageIndex === idx
       );
 
-      const allMsgImages = (options.imageStrategy === 'omit' ? [] : [...associatedAssets, ...msgAttachments]).filter(att =>
+      const allMsgImages = (options.imageStrategy === 'omit' ? [] : (associatedAssets.length ? associatedAssets : msgAttachments)).filter(att =>
         att && (att.kind === 'image' || (att.mimeType && att.mimeType.startsWith('image/')) || (att.sourceType && att.sourceType.includes('image')))
       );
 

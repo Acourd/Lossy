@@ -50,10 +50,12 @@
       }
       return '';
     };
+    const getUrl = a => (typeof a?.sourceURL === 'string' && a.sourceURL) || (typeof a?.url === 'string' && a.url) || '';
     const fileIdentity = asset => {
       const fid = stableFileId(asset);
       if (fid) return 'fid:' + fid;
-      if (typeof asset.sourceURL === 'string' && /^https?:\/\//i.test(asset.sourceURL)) return 'url:' + asset.sourceURL;
+      const u = getUrl(asset);
+      if (u && /^https?:\/\//i.test(u)) return 'url:' + u;
       for (const value of [asset.id, asset.assetId]) {
         if (typeof value === 'string' && /^att[_-][\w-]+$/.test(value)) return 'att:' + value;
       }
@@ -66,7 +68,8 @@
         const old = known.get(fileIdentity(asset));
         if (!old || asset.dataURI || asset.data || asset.blob) return asset;
         if (!old.dataURI && !old.data && !old.blob) return asset;
-        if (old.sourceURL && asset.sourceURL && old.sourceURL !== asset.sourceURL) return asset;
+        const oldUrl = getUrl(old), newUrl = getUrl(asset);
+        if (oldUrl && newUrl && oldUrl !== newUrl) return asset;
         const restored = { ...asset };
         for (const key of ['dataURI', 'data', 'blob', 'mimeType', 'width', 'height']) if (old[key]) restored[key] = old[key];
         restored.availability = 'embedded';
@@ -74,11 +77,21 @@
         return restored;
       });
     };
+    const msgTextOf = m => (typeof m?.text === 'string' ? m.text : (typeof m?.content?.text === 'string' ? m.content.text : ''));
     const messages = (incoming.messages || []).map(message => {
       const old = oldMessages.get(message.id);
       if (!old) return message;
       const previous = [...(old.attachments || []), ...(old.content?.attachments || [])];
-      return { ...message, attachments: hydrate(message.attachments, previous), content: { ...message.content, attachments: hydrate(message.content?.attachments, previous) } };
+      const mergedMsg = { ...message, attachments: hydrate(message.attachments, previous), content: { ...message.content, attachments: hydrate(message.content?.attachments, previous) } };
+      if (!incoming.forceOverwrite) {
+        const oldText = msgTextOf(old);
+        const newText = msgTextOf(message);
+        if (oldText.length > newText.length) {
+          if (typeof old.text === 'string' || typeof mergedMsg.text === 'string') mergedMsg.text = oldText;
+          if (old.content?.text !== undefined || mergedMsg.content?.text !== undefined) mergedMsg.content = { ...mergedMsg.content, text: oldText };
+        }
+      }
+      return mergedMsg;
     });
     return { ...incoming, messages, attachments: hydrate(incoming.attachments, existing.attachments || []) };
   }

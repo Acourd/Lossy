@@ -1093,20 +1093,56 @@
     return rebuilt;
   }
 
+  function splitFencedCodeSegments(text) {
+    const src = String(text || '').replace(/\r\n/g, '\n');
+    const lines = src.split('\n');
+    const segments = [];
+    let buf = [];
+    let inFence = false;
+    let fenceLen = 0;
+
+    const flush = isCode => {
+      if (buf.length) {
+        segments.push({ isCode, text: buf.join('\n') });
+        buf = [];
+      }
+    };
+
+    for (const line of lines) {
+      if (!inFence) {
+        const openM = line.match(/^(`{3,})[^`]*$/);
+        if (openM) {
+          flush(false);
+          inFence = true;
+          fenceLen = openM[1].length;
+          buf.push(line);
+          continue;
+        }
+        buf.push(line);
+      } else {
+        buf.push(line);
+        const closeM = line.match(/^(`{3,})\s*$/);
+        if (closeM && closeM[1].length >= fenceLen) {
+          flush(true);
+          inFence = false;
+          fenceLen = 0;
+        }
+      }
+    }
+    flush(inFence);
+    return segments;
+  }
+
   function transformOutsideCodeFences(text, blockRenderer, mode) {
     const input = String(text || '');
     if (!input) return '';
-    return input.split(/(```[\s\S]*?```)/g).map((part, idx) => {
-      if (idx % 2 === 1) return part;
-      return transformSegment(part, blockRenderer, mode);
-    }).join('');
+    return splitFencedCodeSegments(input).map(seg => seg.isCode ? seg.text : transformSegment(seg.text, blockRenderer, mode)).join('\n');
   }
 
   function hasVisualWidgets(text) {
     const input = String(text || '');
-    const parts = input.split(/(```[\s\S]*?```)/g);
-    for (let i = 0; i < parts.length; i += 2) {
-      if (findTopLevelWidgetRanges(parts[i]).length > 0) return true;
+    for (const seg of splitFencedCodeSegments(input)) {
+      if (!seg.isCode && findTopLevelWidgetRanges(seg.text).length > 0) return true;
     }
     return false;
   }
@@ -1126,13 +1162,13 @@
   function stripControlTokensOnly(text) {
     const input = String(text || '');
     if (!input) return '';
-    return input.split(/(```[\s\S]*?```)/g).map((part, idx) => {
-      if (idx % 2 === 1) return part;
-      return part
+    return splitFencedCodeSegments(input).map(seg => {
+      if (seg.isCode) return seg.text;
+      return seg.text
         .replace(/<Cite\b[^>]*\/>/gi, '')
         .replace(/<SuggestAutomation\b[^>]*\/>/gi, '')
         .replace(/<DisplayAutomation\b[^>]*\/>/gi, '');
-    }).join('');
+    }).join('\n');
   }
 
   const WIDGET_PRINT_CSS =

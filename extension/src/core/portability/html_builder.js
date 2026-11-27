@@ -68,15 +68,51 @@
     const blocks = [];
     const codeSlots = [];
 
-    // 1. Preserve fenced code blocks
-    let work = src.replace(/```([a-zA-Z0-9_\-+.]*)\n([\s\S]*?)```/g, (_, lang, code) => {
+    // 1. Preserve fenced code blocks (CommonMark-compliant 3+ backtick fences with >= opening length closing fence)
+    const srcLines = src.split('\n');
+    const outLines = [];
+    let inFence = false;
+    let fenceLen = 0;
+    let fenceLang = '';
+    let fenceBuf = [];
+    for (const line of srcLines) {
+      if (!inFence) {
+        const openM = line.match(/^(`{3,})([a-zA-Z0-9_\-+.]*)\s*$/);
+        if (openM) {
+          inFence = true;
+          fenceLen = openM[1].length;
+          fenceLang = openM[2] || 'text';
+          fenceBuf = [];
+          continue;
+        }
+        outLines.push(line);
+      } else {
+        const closeM = line.match(/^(`{3,})\s*$/);
+        if (closeM && closeM[1].length >= fenceLen) {
+          const idx = codeSlots.length;
+          codeSlots.push(
+            `<div class="l-code-wrap"><div class="l-code-head"><span>${escapeHtml(fenceLang)}</span></div>` +
+            `<pre><code>${escapeHtml(fenceBuf.join('\n'))}</code></pre></div>`
+          );
+          outLines.push('', `@@CODE${idx}@@`, '');
+          inFence = false;
+          fenceLen = 0;
+          fenceLang = '';
+          fenceBuf = [];
+          continue;
+        }
+        fenceBuf.push(line);
+      }
+    }
+    if (inFence) {
       const idx = codeSlots.length;
       codeSlots.push(
-        `<div class="l-code-wrap"><div class="l-code-head"><span>${escapeHtml(lang || 'text')}</span></div>` +
-        `<pre><code>${escapeHtml(code.replace(/\n$/, ''))}</code></pre></div>`
+        `<div class="l-code-wrap"><div class="l-code-head"><span>${escapeHtml(fenceLang)}</span></div>` +
+        `<pre><code>${escapeHtml(fenceBuf.join('\n'))}</code></pre></div>`
       );
-      return `\n\n@@CODE${idx}@@\n\n`;
-    });
+      outLines.push('', `@@CODE${idx}@@`, '');
+    }
+    let work = outLines.join('\n');
 
     // 2. Render DIL visual widgets into safe HTML slots
     const widgetSlots = [];

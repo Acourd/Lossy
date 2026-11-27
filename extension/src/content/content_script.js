@@ -186,8 +186,33 @@
     return true;
   }
 
+  function isTurnCompatibleForOverlap(accItem, snapItem) {
+    if (areTurnsEqual(accItem, snapItem)) return true;
+    if (!accItem || !snapItem || accItem.role !== snapItem.role) return false;
+    if (accItem.id && snapItem.id) return accItem.id === snapItem.id;
+    if (!accItem.id && !snapItem.id && accItem.text && snapItem.text) {
+      return snapItem.text.startsWith(accItem.text) || accItem.text.startsWith(snapItem.text);
+    }
+    return false;
+  }
+
+  function mergeMonotonicTurn(existing, incoming) {
+    if (!existing) return incoming;
+    if (!incoming) return existing;
+    const oldText = String(existing.text || '');
+    const newText = String(incoming.text || '');
+    const bestText = newText.length >= oldText.length ? newText : oldText;
+    const bestCode = (incoming.codeBlocks?.length || 0) >= (existing.codeBlocks?.length || 0)
+      ? (incoming.codeBlocks || existing.codeBlocks || [])
+      : (existing.codeBlocks || []);
+    const bestAtts = (incoming.attachments?.length || 0) >= (existing.attachments?.length || 0)
+      ? (incoming.attachments || existing.attachments || [])
+      : (existing.attachments || []);
+    return { ...existing, ...incoming, text: bestText, codeBlocks: bestCode, attachments: bestAtts };
+  }
+
   /**
-   * Calcula el grado de solapamiento contiguo exacto entre dos secuencias de turnos.
+   * Calcula el grado de solapamiento contiguo exacto (o monotónico por ID/crecimiento) entre dos secuencias de turnos.
    */
   function computeOverlap(accumulator, newSnapshot) {
     if (!accumulator || accumulator.length === 0 || !newSnapshot || newSnapshot.length === 0) {
@@ -199,7 +224,7 @@
       for (let i = 0; i < k; i++) {
         const accItem = accumulator[accumulator.length - k + i];
         const snapItem = newSnapshot[i];
-        if (!areTurnsEqual(accItem, snapItem)) {
+        if (!isTurnCompatibleForOverlap(accItem, snapItem)) {
           match = false;
           break;
         }
@@ -208,7 +233,7 @@
         return k;
       }
     }
-    if (areTurnsEqual(accumulator[accumulator.length - 1], newSnapshot[0])) {
+    if (isTurnCompatibleForOverlap(accumulator[accumulator.length - 1], newSnapshot[0])) {
       return 1;
     }
     return 0;
@@ -216,8 +241,7 @@
 
   /**
    * Alinea dos secuencias contiguas de turnos mediante su solapamiento posicional máximo (cola de accumulator vs cabeza de newSnapshot).
-   * Erradica por diseño el riesgo de colisión de firmas globales: turnos legítimos repetidos (ej. "Sí", "Gracias")
-   * se preservan con total integridad porque sólo se dedupican los turnos que forman parte del solapamiento físico en la ventana de scroll.
+   * Preserva turnos legítimos repetidos y actualiza de forma monotónica turnos en crecimiento sin duplicar ni truncar texto.
    */
   function alignAndAppendTurns(accumulator, newSnapshot) {
     if (!accumulator || accumulator.length === 0) {
@@ -229,24 +253,11 @@
 
     const overlap = computeOverlap(accumulator, newSnapshot);
     if (overlap > 0) {
-      return accumulator.concat(newSnapshot.slice(overlap));
-    }
-
-    if (areTurnsEqual(accumulator[accumulator.length - 1], newSnapshot[0])) {
-      return accumulator.concat(newSnapshot.slice(1));
-    }
-
-    // Handle streaming/growing turn with identical ID or prefix growth at boundary
-    const tail = accumulator[accumulator.length - 1];
-    const head = newSnapshot[0];
-    if (tail && head && tail.role === head.role) {
-      const sameId = Boolean(tail.id && head.id && tail.id === head.id);
-      const grewInPlace = !tail.id && !head.id && tail.text && head.text && head.text.length > tail.text.length && head.text.startsWith(tail.text);
-      if (sameId || grewInPlace) {
-        const merged = accumulator.slice(0, -1);
-        merged.push(head);
-        return merged.concat(newSnapshot.slice(1));
+      const merged = accumulator.slice(0, accumulator.length - overlap);
+      for (let i = 0; i < overlap; i++) {
+        merged.push(mergeMonotonicTurn(accumulator[accumulator.length - overlap + i], newSnapshot[i]));
       }
+      return merged.concat(newSnapshot.slice(overlap));
     }
 
     return accumulator.concat(newSnapshot);
@@ -402,7 +413,7 @@
 
     const extractTurnAttachments = (clone, msgIdSeed) => {
       const attachments = [];
-      const imgNodes = clone.querySelectorAll('img');
+      const imgNodes = clone && typeof clone.querySelectorAll === 'function' ? clone.querySelectorAll('img') : [];
       let imgIdx = 0;
       imgNodes.forEach(img => {
         const src = img.getAttribute('src');
@@ -559,16 +570,20 @@
         if (clone.querySelectorAll) {
           clone.querySelectorAll('.lossy-action-wrapper, .lossy-message-action-btn, .lossy-popover-menu, .lossy-toast-notice').forEach(el => el.remove && el.remove());
         }
+        const msgId = art.getAttribute?.('data-message-id') || undefined;
+        const attachments = extractTurnAttachments(clone, msgId);
         const isAssistant = clone.querySelector ? clone.querySelector('.markdown') !== null : false;
         const role = isAssistant ? 'assistant' : 'user';
         const text = cleanText(messageDomText(clone));
 
-        if (text.length > 0) {
+        if (text.length > 0 || attachments.length > 0) {
           turns.push({
+            id: msgId,
             role,
             author: role === 'user' ? 'Usuario' : 'ChatGPT',
             text,
-            codeBlocks: []
+            codeBlocks: [],
+            attachments
           });
         }
       });

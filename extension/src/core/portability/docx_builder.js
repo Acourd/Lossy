@@ -356,7 +356,7 @@
         });
       };
 
-      const fenceRe = /(?:^|\n)(`{3,})([^\n]*)\n([\s\S]*?)\n\1(?=\n|$)/g;
+      const fenceRe = /(?:^|\n)(`{3,})([^\n]*)\n([\s\S]*?)\n\1`*(?=\n|$)/g;
       let lastIdx = 0;
       let foundInlineFences = false;
       let fm;
@@ -377,7 +377,7 @@
         a.sourceMessageId === msg.id || a.messageIndex === idx
       );
 
-      const allMsgImages = [...msgAttachments, ...associatedAssets].filter(att =>
+      const allMsgImages = (associatedAssets.length ? associatedAssets : msgAttachments).filter(att =>
         att && (att.kind === 'image' || (att.mimeType && att.mimeType.startsWith('image/')) || (att.sourceType && att.sourceType.includes('image')))
       );
 

@@ -213,7 +213,11 @@
           const scopedKey = `${msgId}::${rawAssetId}`;
           if (seenKeys.has(scopedKey)) return;
           seenKeys.add(scopedKey);
-          const assetId = seenMsgAssetIds.has(rawAssetId) ? `${rawAssetId}__m${mIdx}_${aIdx}` : rawAssetId;
+          let assetId = rawAssetId;
+          let disambig = 1;
+          while (seenMsgAssetIds.has(assetId)) {
+            assetId = `${rawAssetId}__u${mIdx}_${aIdx}_${disambig++}`;
+          }
           seenMsgAssetIds.add(rawAssetId);
           seenMsgAssetIds.add(assetId);
 
@@ -457,15 +461,55 @@
     return /^\{[\s\S]*"path"\s*:\s*"\/Automations\//i.test(t);
   }
 
+  function splitFencedCodeSegments(text) {
+    const src = String(text || '').replace(/\r\n/g, '\n');
+    const lines = src.split('\n');
+    const segments = [];
+    let buf = [];
+    let inFence = false;
+    let fenceLen = 0;
+
+    const flush = isCode => {
+      if (buf.length) {
+        segments.push({ isCode, text: buf.join('\n') });
+        buf = [];
+      }
+    };
+
+    for (const line of lines) {
+      if (!inFence) {
+        const openM = line.match(/^(`{3,})[^`]*$/);
+        if (openM) {
+          flush(false);
+          inFence = true;
+          fenceLen = openM[1].length;
+          buf.push(line);
+          continue;
+        }
+        buf.push(line);
+      } else {
+        buf.push(line);
+        const closeM = line.match(/^(`{3,})\s*$/);
+        if (closeM && closeM[1].length >= fenceLen) {
+          flush(true);
+          inFence = false;
+          fenceLen = 0;
+        }
+      }
+    }
+    flush(inFence);
+    return segments;
+  }
+
   function cleanExportText(text) {
-    // Preserve literal examples in fenced code; remove only ChatGPT control tokens.
-    return String(text || '').split(/(```[\s\S]*?```)/g).map((part, i) => i % 2 ? part : part
+    // Preserve literal examples in fenced code (including 4+ backtick nested fences); remove only ChatGPT control tokens.
+    return splitFencedCodeSegments(text).map(seg => seg.isCode ? seg.text : seg.text
       .replace(/\uE200[\s\S]*?\uE201/g, '')
       .replace(/<Cite\b[^>]*\/>/gi, '')
       .replace(/<SuggestAutomation\b[^>]*\/>/gi, '')
       .replace(/<DisplayAutomation\b[^>]*\/>/gi, '')
       .replace(/!?\[([^\]]*)\]\(<?app:\/\/[^)>]+>?\)/g, (_, label) => label.replace(/^\$/, ''))
-      .replace(/\[Imagen: (?:sediment:\/\/|file-)[^\]]*\]/g, '')).join('');
+      .replace(/\[Imagen: (?:sediment:\/\/|file-)[^\]]*\]/g, '')).join('\n');
   }
 
   function markdownResources(msg, index, options) {
@@ -493,10 +537,10 @@
     if (!options.preserveRawWidgets && widgets && typeof widgets.renderWidgetsToMarkdown === 'function') {
       text = widgets.renderWidgetsToMarkdown(text);
     }
-    const body = text.split(/(```[\s\S]*?```)/g).map((part,i) => i % 2 ? part : part.replace(/!\[([^\]]*)\]\(<?([^)>]+)>?\)/g, (original, alt, url) => {
+    const body = splitFencedCodeSegments(text).map(seg => seg.isCode ? seg.text : seg.text.replace(/!\[([^\]]*)\]\(<?([^)>]+)>?\)/g, (original, alt, url) => {
       const found = images.find(a => a.sourceURL === url || a.url === url || a.dataURI === url);
       return found ? render(found, alt) : (strategy === 'omit' ? '' : original);
-    })).join('');
+    })).join('\n');
     return body + images.map(a => { const image = render(a); return image ? '\n\n' + image : ''; }).join('');
   }
 

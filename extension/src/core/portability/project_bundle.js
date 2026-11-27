@@ -26,7 +26,8 @@
  }
  function validateEntity(entity){
   if(!entity||typeof entity!=='object'||typeof entity.canonicalId!=='string'||!entity.canonicalId||entity.canonicalId.length>300)throw Error('Una fuente del proyecto no tiene un identificador válido');
-  const messages=entity.selectedMessages||entity.messages;if(!Array.isArray(messages)||messages.some(m=>!m||typeof m!=='object'||typeof m.role!=='string'||(m.content?.text!==undefined&&typeof m.content.text!=='string')))throw Error('Una fuente del proyecto contiene mensajes inválidos');
+  if(entity.title!==undefined&&entity.title!==null&&(typeof entity.title!=='string'||entity.title.length>2000))throw Error('Título de fuente inválido');
+  const messages=entity.selectedMessages||entity.messages;if(!Array.isArray(messages)||messages.some(m=>!m||typeof m!=='object'||typeof m.role!=='string'||(m.text!==undefined&&m.text!==null&&typeof m.text!=='string')||(m.content?.text!==undefined&&typeof m.content.text!=='string')))throw Error('Una fuente del proyecto contiene mensajes inválidos');
   if(entity.entityType==='clip'&&!Array.isArray(entity.selectedMessages))throw Error('Clip sin selección de mensajes');
   for(const plat of [entity.source?.platform, entity.sourcePlatform]){
    if(plat!==undefined&&plat!==null&&(typeof plat!=='string'||!ALLOWED_PLATFORMS.has(plat.toLowerCase())))throw Error('Plataforma de fuente inválida');

@@ -2138,7 +2138,7 @@
         if (!m) return false;
         if (includeTechnical) return true;
         const rawT = String(m.text ?? m.content?.text ?? '').trim();
-        if (msg.role !== 'user' && /^\{[\s\S]*"path"\s*:\s*"\/Automations\//i.test(rawT)) return false;
+        if (m.role !== 'user' && /^\{[\s\S]*"path"\s*:\s*"\/Automations\//i.test(rawT)) return false;
         return m.isConversational !== false && m.nodeCategory !== 'tool' && m.nodeCategory !== 'system' && m.role !== 'tool' && m.role !== 'system';
       });
 
