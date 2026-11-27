@@ -976,11 +976,12 @@
     return (bs % 2) === 1;
   }
 
-  function isSingleLineNonParaBlock(cols, trimmed) {
+  function isSingleLineNonParaBlock(cols, trimmed, inPara = false) {
     if (cols > 3) return false;
     if (/^#{1,6}(?:[ \t]|$)/.test(trimmed)) return true;
     if (/^(?:(?:\*[ \t]*){3,}|(?:-[ \t]*){3,}|(?:_[ \t]*){3,})$/.test(trimmed)) return true;
     if (/^=+ *$/.test(trimmed)) return true;
+    if (inPara && /^-+[ \t]*$/.test(trimmed)) return true;
     return false;
   }
 
@@ -1027,11 +1028,11 @@
     return { ok: true, rest: pad + str.slice(i), col };
   }
 
-  function matchListPrefix(str, startCol, canInterruptPara = true) {
+  function matchListPrefix(str, startCol, canInterruptPara = true, allowEmptyInterrupt = false) {
     const lead = measureLeadCols(str, startCol);
     if (lead.cols > 3) return { ok: false };
     const after = str.slice(lead.idx);
-    const m = after.match(/^([-*+]|\d{1,9}[.)])([ \t]+)/);
+    const m = after.match(/^([-*+]|\d{1,9}[.)])([ \t]+|$)/);
     if (!m) return { ok: false };
     const markerLen = m[1].length;
     const wsStartCol = lead.endCol + markerLen;
@@ -1040,6 +1041,8 @@
     if (!canInterruptPara) {
       if (isEmptyItem) return { ok: false };
       if (/^\d/.test(m[1]) && m[1] !== '1.' && m[1] !== '1)') return { ok: false };
+    } else if (isEmptyItem && !allowEmptyInterrupt) {
+      return { ok: false };
     }
     const wsCols = isEmptyItem ? 1 : (wsLead.cols >= 5 ? 1 : wsLead.cols);
     const targetIndent = lead.cols + markerLen + wsCols;
@@ -1059,7 +1062,6 @@
         let rest = line;
         let col = 0;
         let matched = 0;
-        const hadActiveList = containers.some(c => c.type === 'list');
         while (matched < containers.length) {
           const c = containers[matched];
           if (c.type === 'bq') {
@@ -1087,10 +1089,10 @@
           const tailLead = measureLeadCols(rest, col);
           const tailTrim = rest.slice(tailLead.idx);
           const tailInterrupts =
-            isSingleLineNonParaBlock(tailLead.cols, tailTrim) ||
+            isSingleLineNonParaBlock(tailLead.cols, tailTrim, inParagraph) ||
+            matchBqPrefix(rest, col).ok ||
             (tailLead.cols <= 3 && /^(`{3,}[^`]*|~{3,}.*)$/.test(tailTrim)) ||
-            (tailLead.cols <= 3 && /^(?:[-+*][ \t]+\S|1[.)][ \t]+\S)/.test(tailTrim)) ||
-            ((hadActiveList || exitedAnyContainer) && tailLead.cols <= 3 && /^\d{1,9}[.)][ \t]+\S/.test(tailTrim));
+            (tailLead.cols <= 3 && /^(?:[-+*]|\d{1,9}[.)])(?:[ \t]|$)/.test(tailTrim));
           if (!tailInterrupts) lazyKeep = true;
         }
         if (!lazyKeep) containers.length = matched;
@@ -1104,7 +1106,8 @@
             hadMarker = true;
             continue;
           }
-          const lst = matchListPrefix(rest, col, !inParagraph || listExited || exitedAnyContainer || hadMarker);
+          const allowEmpty = !inParagraph || exitedAnyContainer || hadMarker;
+          const lst = matchListPrefix(rest, col, !inParagraph || listExited || exitedAnyContainer || hadMarker, allowEmpty);
           if (lst.ok) {
             containers.push({ type: 'list', indent: lst.indent });
             rest = lst.rest;
@@ -1128,8 +1131,9 @@
     if (/^[ \t]*$/.test(ln)) return true;
     if (/^ {0,3}(?:#{1,6}(?:[ \t]|$)|>|`{3,}[^`]*$|~{3,}.*$|==* *$)/.test(ln)) return true;
     if (/^ {0,3}(?:(?:\*[ \t]*){3,}|(?:-[ \t]*){3,}|(?:_[ \t]*){3,})$/.test(ln)) return true;
+    if (inPara && /^ {0,3}-+[ \t]*$/.test(ln)) return true;
     if (/^ {0,3}(?:[-+*][ \t]+\S|1[.)][ \t]+\S)/.test(ln)) return true;
-    if ((!inPara || inList) && /^ {0,3}\d{1,9}[.)][ \t]+\S/.test(ln)) return true;
+    if ((!inPara || inList) && /^ {0,3}\d{1,9}[.)](?:[ \t]|$)/.test(ln)) return true;
     return false;
   }
 
@@ -1150,8 +1154,9 @@
     const stepper = createContainerStepper(initialContainers);
     for (let li = 0; li <= closeLineIdx; li++) {
       const rawLine = lines[li].replace(/\r$/, '');
+      const prevPara = stepper.inParagraph;
       const { lead, hadMarker, isBlank, trimmedAfterLead } = stepper.step(rawLine);
-      const isNonPara = !isBlank && isSingleLineNonParaBlock(lead.cols, trimmedAfterLead);
+      const isNonPara = !isBlank && isSingleLineNonParaBlock(lead.cols, trimmedAfterLead, prevPara);
       const isFenceOpen = !isBlank && lead.cols <= 3 && /^(`{3,}[^`]*|~{3,}.*)$/.test(trimmedAfterLead);
       const isIndented = !isBlank && (hadMarker || !stepper.inParagraph) && lead.cols >= 4;
 
@@ -1547,6 +1552,7 @@
       }
 
       if (buf.length === 0) bufInitContainers = beforeLineContainers;
+      const prevPara = stepper.inParagraph;
       const { rest, lead, curBqCount, hadMarker, isBlank, trimmedAfterLead } = stepper.step(line);
 
       if (inIndented) {
@@ -1574,7 +1580,7 @@
         continue;
       }
 
-      const lineIsNonParaBlock = !isBlank && isSingleLineNonParaBlock(lead.cols, trimmedAfterLead);
+      const lineIsNonParaBlock = !isBlank && isSingleLineNonParaBlock(lead.cols, trimmedAfterLead, prevPara && !hadMarker && beforeLineContainers.length === stepper.containers.length);
       if (inlineOpenTicks > 0 && (isBlank || hadMarker || segments.length !== pendingSegCount || isBlockInterruptLine(rest, inlineOpenInList, true))) {
         flushPendingInline();
       }

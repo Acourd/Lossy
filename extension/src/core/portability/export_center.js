@@ -684,11 +684,12 @@
     return /^\{[\s\S]*"path"\s*:\s*"\/Automations\//i.test(t);
   }
 
-  function isSingleLineNonParaBlockMd(cols, trimmed) {
+  function isSingleLineNonParaBlockMd(cols, trimmed, inPara = false) {
     if (cols > 3) return false;
     if (/^#{1,6}(?:[ \t]|$)/.test(trimmed)) return true;
     if (/^(?:(?:\*[ \t]*){3,}|(?:-[ \t]*){3,}|(?:_[ \t]*){3,})$/.test(trimmed)) return true;
     if (/^=+ *$/.test(trimmed)) return true;
+    if (inPara && /^-+[ \t]*$/.test(trimmed)) return true;
     return false;
   }
 
@@ -735,11 +736,11 @@
     return { ok: true, rest: pad + str.slice(i), col };
   }
 
-  function matchListPrefixMd(str, startCol, canInterruptPara = true) {
+  function matchListPrefixMd(str, startCol, canInterruptPara = true, allowEmptyInterrupt = false) {
     const lead = measureLeadColsMd(str, startCol);
     if (lead.cols > 3) return { ok: false };
     const after = str.slice(lead.idx);
-    const m = after.match(/^([-*+]|\d{1,9}[.)])([ \t]+)/);
+    const m = after.match(/^([-*+]|\d{1,9}[.)])([ \t]+|$)/);
     if (!m) return { ok: false };
     const markerLen = m[1].length;
     const wsStartCol = lead.endCol + markerLen;
@@ -748,6 +749,8 @@
     if (!canInterruptPara) {
       if (isEmptyItem) return { ok: false };
       if (/^\d/.test(m[1]) && m[1] !== '1.' && m[1] !== '1)') return { ok: false };
+    } else if (isEmptyItem && !allowEmptyInterrupt) {
+      return { ok: false };
     }
     const wsCols = isEmptyItem ? 1 : (wsLead.cols >= 5 ? 1 : wsLead.cols);
     const targetIndent = lead.cols + markerLen + wsCols;
@@ -767,7 +770,6 @@
         let rest = line;
         let col = 0;
         let matched = 0;
-        const hadActiveList = containers.some(c => c.type === 'list');
         while (matched < containers.length) {
           const c = containers[matched];
           if (c.type === 'bq') {
@@ -795,10 +797,10 @@
           const tailLead = measureLeadColsMd(rest, col);
           const tailTrim = rest.slice(tailLead.idx);
           const tailInterrupts =
-            isSingleLineNonParaBlockMd(tailLead.cols, tailTrim) ||
+            isSingleLineNonParaBlockMd(tailLead.cols, tailTrim, inParagraph) ||
+            matchBqPrefixMd(rest, col).ok ||
             (tailLead.cols <= 3 && /^(`{3,}[^`]*|~{3,}.*)$/.test(tailTrim)) ||
-            (tailLead.cols <= 3 && /^(?:[-+*][ \t]+\S|1[.)][ \t]+\S)/.test(tailTrim)) ||
-            ((hadActiveList || exitedAnyContainer) && tailLead.cols <= 3 && /^\d{1,9}[.)][ \t]+\S/.test(tailTrim));
+            (tailLead.cols <= 3 && /^(?:[-+*]|\d{1,9}[.)])(?:[ \t]|$)/.test(tailTrim));
           if (!tailInterrupts) lazyKeep = true;
         }
         if (!lazyKeep) containers.length = matched;
@@ -812,7 +814,8 @@
             hadMarker = true;
             continue;
           }
-          const lst = matchListPrefixMd(rest, col, !inParagraph || listExited || exitedAnyContainer || hadMarker);
+          const allowEmpty = !inParagraph || exitedAnyContainer || hadMarker;
+          const lst = matchListPrefixMd(rest, col, !inParagraph || listExited || exitedAnyContainer || hadMarker, allowEmpty);
           if (lst.ok) {
             containers.push({ type: 'list', indent: lst.indent });
             rest = lst.rest;
@@ -848,8 +851,9 @@
     const stepper = createContainerStepperMd(initialContainers);
     for (let li = 0; li <= closeLineIdx; li++) {
       const rawLine = lines[li].replace(/\r$/, '');
+      const prevPara = stepper.inParagraph;
       const { lead, hadMarker, isBlank, trimmedAfterLead } = stepper.step(rawLine);
-      const isNonPara = !isBlank && isSingleLineNonParaBlockMd(lead.cols, trimmedAfterLead);
+      const isNonPara = !isBlank && isSingleLineNonParaBlockMd(lead.cols, trimmedAfterLead, prevPara);
       const isFenceOpen = !isBlank && lead.cols <= 3 && /^(`{3,}[^`]*|~{3,}.*)$/.test(trimmedAfterLead);
       const isIndented = !isBlank && (hadMarker || !stepper.inParagraph) && lead.cols >= 4;
 
@@ -1020,7 +1024,7 @@
         continue;
       }
 
-      const lineIsNonParaBlock = !isBlank && isSingleLineNonParaBlockMd(lead.cols, trimmedAfterLead);
+      const lineIsNonParaBlock = !isBlank && isSingleLineNonParaBlockMd(lead.cols, trimmedAfterLead, stepper.inParagraph && !hadMarker && beforeLineContainers.length === stepper.containers.length);
       buf.push(line);
       stepper.inParagraph = !isBlank && !lineIsNonParaBlock;
     }
