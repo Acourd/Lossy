@@ -98,22 +98,30 @@
         let part = seg.text;
         if (typeof widgets.findTopLevelWidgetRanges === 'function') {
           const initContainers = seg.initialContainers;
-          const ranges = widgets.findTopLevelWidgetRanges(part, initContainers);
-          if (ranges.length) {
-            let rebuilt = '';
-            let cursor = 0;
-            for (const r of ranges) {
-              rebuilt += widgets.stripControlTokensOnly(part.slice(cursor, r.start), cursor === 0 ? initContainers : undefined);
+          const widgetRanges = widgets.findTopLevelWidgetRanges(part, initContainers).map(r => ({ kind: 'widget', start: r.start, end: r.end, raw: r.raw }));
+          const inlineRanges = typeof widgets.findInlineCodeRanges === 'function'
+            ? widgets.findInlineCodeRanges(part, initContainers).map(r => ({ kind: 'inline', start: r.start, end: r.end }))
+            : [];
+          const events = [...widgetRanges, ...inlineRanges].sort((a, b) => a.start - b.start);
+          const stripPlain = typeof widgets.stripControlTokensPlain === 'function'
+            ? widgets.stripControlTokensPlain
+            : s => widgets.stripControlTokensOnly(s);
+          let rebuilt = '';
+          let cursor = 0;
+          for (const ev of events) {
+            if (ev.start < cursor) continue;
+            rebuilt += stripPlain(part.slice(cursor, ev.start));
+            if (ev.kind === 'inline') {
+              rebuilt += part.slice(ev.start, ev.end);
+            } else {
               const idx = widgetSlots.length;
-              widgetSlots.push(widgets.renderWidgetBlockToHtml(r.raw));
+              widgetSlots.push(widgets.renderWidgetBlockToHtml(ev.raw));
               rebuilt += `\n\n@@WIDGET${idx}@@\n\n`;
-              cursor = r.end;
             }
-            rebuilt += widgets.stripControlTokensOnly(part.slice(cursor));
-            part = rebuilt;
-          } else {
-            part = widgets.stripControlTokensOnly(part, initContainers);
+            cursor = ev.end;
           }
+          rebuilt += stripPlain(part.slice(cursor));
+          part = rebuilt;
         }
         return part;
       }).join('\n');

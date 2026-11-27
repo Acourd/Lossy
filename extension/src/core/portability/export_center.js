@@ -788,18 +788,17 @@
             matched++;
           }
         }
+        const exitedAnyContainer = matched < containers.length;
         const listExited = containers.slice(matched).some(c => c.type === 'list');
-        const unmatched = containers.slice(matched);
-        const onlyUnmatchedBq = unmatched.length > 0 && unmatched.every(c => c.type === 'bq');
         let lazyKeep = false;
-        if (onlyUnmatchedBq && inParagraph && rest.trim().length > 0) {
+        if (exitedAnyContainer && inParagraph && rest.trim().length > 0) {
           const tailLead = measureLeadColsMd(rest, col);
           const tailTrim = rest.slice(tailLead.idx);
           const tailInterrupts =
             isSingleLineNonParaBlockMd(tailLead.cols, tailTrim) ||
             (tailLead.cols <= 3 && /^(`{3,}[^`]*|~{3,}.*)$/.test(tailTrim)) ||
             (tailLead.cols <= 3 && /^(?:[-+*][ \t]+\S|1[.)][ \t]+\S)/.test(tailTrim)) ||
-            (hadActiveList && tailLead.cols <= 3 && /^\d{1,9}[.)][ \t]+\S/.test(tailTrim));
+            ((hadActiveList || exitedAnyContainer) && tailLead.cols <= 3 && /^\d{1,9}[.)][ \t]+\S/.test(tailTrim));
           if (!tailInterrupts) lazyKeep = true;
         }
         if (!lazyKeep) containers.length = matched;
@@ -813,7 +812,7 @@
             hadMarker = true;
             continue;
           }
-          const lst = matchListPrefixMd(rest, col, !inParagraph || listExited || hadMarker);
+          const lst = matchListPrefixMd(rest, col, !inParagraph || listExited || exitedAnyContainer || hadMarker);
           if (lst.ok) {
             containers.push({ type: 'list', indent: lst.indent });
             rest = lst.rest;
@@ -1310,19 +1309,19 @@
     };
     const widgets = deps.chatgptWidgets || (typeof globalThis !== 'undefined' ? globalThis.Lossy?.ChatGPTWidgets : null);
     let text = cleanExportText(typeof msg.text === 'string' ? msg.text : msg.content?.text);
-    if (!options.preserveRawWidgets && widgets && typeof widgets.renderWidgetsToMarkdown === 'function') {
-      text = widgets.renderWidgetsToMarkdown(text);
-    }
     const isEscapedBackslash = (str, idx) => {
       let bs = 0;
       for (let k = idx - 1; k >= 0 && str[k] === '\\'; k--) bs++;
       return (bs % 2) === 1;
     };
-    const body = splitFencedCodeSegments(text).map(seg => seg.isCode ? seg.text : transformOutsideInlineCode(seg.text, s => s.replace(/!\[([^\]]*)\]\(<?([^)>]+)>?\)/g, (original, alt, url, offset) => {
+    const imgReplaced = splitFencedCodeSegments(text).map(seg => seg.isCode ? seg.text : transformOutsideInlineCode(seg.text, s => s.replace(/!\[([^\]]*)\]\(<?([^)>]+)>?\)/g, (original, alt, url, offset) => {
       if (isEscapedBackslash(s, offset) || isEscapedBackslash(alt, alt.length)) return original;
       const found = images.find(a => a.sourceURL === url || a.url === url || a.dataURI === url);
       return found ? render(found, alt) : (strategy === 'omit' ? '' : original);
     }), seg.initialContainers)).join('\n');
+    const body = (!options.preserveRawWidgets && widgets && typeof widgets.renderWidgetsToMarkdown === 'function')
+      ? widgets.renderWidgetsToMarkdown(imgReplaced)
+      : imgReplaced;
     return body + images.map(a => { const image = render(a); return image ? '\n\n' + image : ''; }).join('');
   }
 

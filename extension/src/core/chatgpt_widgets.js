@@ -1080,18 +1080,17 @@
             matched++;
           }
         }
+        const exitedAnyContainer = matched < containers.length;
         const listExited = containers.slice(matched).some(c => c.type === 'list');
-        const unmatched = containers.slice(matched);
-        const onlyUnmatchedBq = unmatched.length > 0 && unmatched.every(c => c.type === 'bq');
         let lazyKeep = false;
-        if (onlyUnmatchedBq && inParagraph && rest.trim().length > 0) {
+        if (exitedAnyContainer && inParagraph && rest.trim().length > 0) {
           const tailLead = measureLeadCols(rest, col);
           const tailTrim = rest.slice(tailLead.idx);
           const tailInterrupts =
             isSingleLineNonParaBlock(tailLead.cols, tailTrim) ||
             (tailLead.cols <= 3 && /^(`{3,}[^`]*|~{3,}.*)$/.test(tailTrim)) ||
             (tailLead.cols <= 3 && /^(?:[-+*][ \t]+\S|1[.)][ \t]+\S)/.test(tailTrim)) ||
-            (hadActiveList && tailLead.cols <= 3 && /^\d{1,9}[.)][ \t]+\S/.test(tailTrim));
+            ((hadActiveList || exitedAnyContainer) && tailLead.cols <= 3 && /^\d{1,9}[.)][ \t]+\S/.test(tailTrim));
           if (!tailInterrupts) lazyKeep = true;
         }
         if (!lazyKeep) containers.length = matched;
@@ -1105,7 +1104,7 @@
             hadMarker = true;
             continue;
           }
-          const lst = matchListPrefix(rest, col, !inParagraph || listExited || hadMarker);
+          const lst = matchListPrefix(rest, col, !inParagraph || listExited || exitedAnyContainer || hadMarker);
           if (lst.ok) {
             containers.push({ type: 'list', indent: lst.indent });
             rest = lst.rest;
@@ -1208,9 +1207,9 @@
    * Construye una copia de longitud 1:1 donde los tramos de código inline (single o multi-línea,
    * sin cruzar líneas en blanco ni fronteras de bloque CommonMark) y las etiquetas escapadas con '\' (`\<`) quedan neutralizados con espacios.
    */
-  function sanitizeForWidgetScan(segment, initialContainers) {
+  function findInlineCodeRanges(segment, initialContainers) {
     const s = String(segment || '');
-    const chars = s.split('');
+    const ranges = [];
     let i = 0;
     while (i < s.length) {
       if (s[i] === '`' && !isEscapedAt(s, i)) {
@@ -1231,19 +1230,30 @@
           end = pos + 1;
         }
         if (found !== -1) {
-          for (let k = i; k < found + ticks; k++) {
-            if (chars[k] !== '\n') chars[k] = ' ';
-          }
+          ranges.push({ start: i, end: found + ticks });
           i = found + ticks;
           continue;
         }
         i += ticks;
         continue;
       }
+      i++;
+    }
+    return ranges;
+  }
+
+  function sanitizeForWidgetScan(segment, initialContainers) {
+    const s = String(segment || '');
+    const chars = s.split('');
+    for (const r of findInlineCodeRanges(s, initialContainers)) {
+      for (let k = r.start; k < r.end; k++) {
+        if (chars[k] !== '\n') chars[k] = ' ';
+      }
+    }
+    for (let i = 0; i < s.length; i++) {
       if (s[i] === '<' && isEscapedAt(s, i)) {
         chars[i] = ' ';
       }
-      i++;
     }
     return chars.join('');
   }
@@ -1325,16 +1335,22 @@
   }
 
   function transformSegment(segment, blockRenderer, mode, initialContainers) {
-    const ranges = findTopLevelWidgetRanges(segment, initialContainers);
-    const cleanNonWidget = (chunk, cInit) => transformOutsideInlineCode(chunk, s => stripInlineControlTags(s, mode), cInit);
+    const widgetRanges = findTopLevelWidgetRanges(segment, initialContainers).map(r => ({ kind: 'widget', start: r.start, end: r.end, raw: r.raw }));
+    const inlineRanges = findInlineCodeRanges(segment, initialContainers).map(r => ({ kind: 'inline', start: r.start, end: r.end }));
+    const events = [...widgetRanges, ...inlineRanges].sort((a, b) => a.start - b.start);
     let rebuilt = '';
     let cursor = 0;
-    for (const r of ranges) {
-      rebuilt += cleanNonWidget(segment.slice(cursor, r.start), cursor === 0 ? initialContainers : undefined);
-      rebuilt += blockRenderer(r.raw);
-      cursor = r.end;
+    for (const ev of events) {
+      if (ev.start < cursor) continue;
+      rebuilt += stripInlineControlTags(segment.slice(cursor, ev.start), mode);
+      if (ev.kind === 'inline') {
+        rebuilt += segment.slice(ev.start, ev.end);
+      } else {
+        rebuilt += blockRenderer(ev.raw);
+      }
+      cursor = ev.end;
     }
-    rebuilt += cleanNonWidget(segment.slice(cursor), cursor === 0 ? initialContainers : undefined);
+    rebuilt += stripInlineControlTags(segment.slice(cursor), mode);
     return rebuilt;
   }
 
@@ -1611,42 +1627,22 @@
     return transformOutsideCodeFences(text, renderWidgetBlockToHtml, 'html');
   }
 
+  function stripControlTokensPlain(str) {
+    return String(str || '').replace(/<(?:Cite|SuggestAutomation|DisplayAutomation)\b[^>]*\/>/gi, (m, offset, src) => (isEscapedAt(src, offset) ? m : ''));
+  }
+
   function transformOutsideInlineCode(str, fn, initialContainers) {
     const s = String(str || '');
+    const ranges = findInlineCodeRanges(s, initialContainers);
+    if (!ranges.length) return fn(s);
     let out = '';
-    let plainBuf = '';
-    let i = 0;
-    while (i < s.length) {
-      if (s[i] === '`' && !isEscapedAt(s, i)) {
-        let ticks = 0;
-        while (i + ticks < s.length && s[i + ticks] === '`') ticks++;
-        const delim = '`'.repeat(ticks);
-        let end = i + ticks;
-        let found = -1;
-        while (end < s.length) {
-          const pos = s.indexOf(delim, end);
-          if (pos === -1) break;
-          if (s[pos - 1] !== '`' && s[pos + ticks] !== '`') {
-            if (!inlineSpanCrossesBlockBreak(s, i + ticks, pos, initialContainers)) {
-              found = pos;
-            }
-            break;
-          }
-          end = pos + 1;
-        }
-        if (found !== -1) {
-          if (plainBuf) { out += fn(plainBuf); plainBuf = ''; }
-          out += s.slice(i, found + ticks);
-          i = found + ticks;
-          continue;
-        }
-        plainBuf += delim;
-        i += ticks;
-        continue;
-      }
-      plainBuf += s[i++];
+    let cursor = 0;
+    for (const r of ranges) {
+      if (r.start > cursor) out += fn(s.slice(cursor, r.start));
+      out += s.slice(r.start, r.end);
+      cursor = r.end;
     }
-    if (plainBuf) out += fn(plainBuf);
+    if (cursor < s.length) out += fn(s.slice(cursor));
     return out;
   }
 
@@ -1655,8 +1651,7 @@
     if (!input) return '';
     return splitFencedCodeSegments(input, initialContainers).map(seg => {
       if (seg.isCode) return seg.text;
-      return transformOutsideInlineCode(seg.text, s => s
-        .replace(/<(?:Cite|SuggestAutomation|DisplayAutomation)\b[^>]*\/>/gi, (m, offset, str) => (isEscapedAt(str, offset) ? m : '')), seg.initialContainers);
+      return transformOutsideInlineCode(seg.text, stripControlTokensPlain, seg.initialContainers);
     }).join('\n');
   }
 
@@ -1699,7 +1694,9 @@
     parseWidgetAst,
     splitFencedCodeSegments,
     transformOutsideInlineCode,
+    findInlineCodeRanges,
     findTopLevelWidgetRanges,
+    stripControlTokensPlain,
     stripControlTokensOnly,
     renderWidgetsToMarkdown,
     renderWidgetsToPlainText,

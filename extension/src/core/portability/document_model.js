@@ -56,45 +56,49 @@
    const processed=segs.map(seg=>{
     if(seg.isCode)return seg.text;
     const part=seg.text,initContainers=seg.initialContainers;
-    const ranges=widgets.findTopLevelWidgetRanges(part,initContainers);
-    let out='',cursor=0;
-    const transformPlain=(chunk,fn,cInit)=>typeof widgets.transformOutsideInlineCode==='function'?widgets.transformOutsideInlineCode(chunk,fn,cInit):fn(chunk);
-    const cleanInline=(segText,cInit)=>{
-     let s=widgets.stripControlTokensOnly(segText,cInit);
-     s=transformPlain(s,plain=>{
-      let p=plain.replace(/<text\b([^>]*)>([\s\S]*?)<\/text>/gi,(m,a,inner,offset,str)=>{
-       if(isEscaped(str,offset))return m;
-       const colorMatch=String(a||'').match(/color\s*=\s*["']([^"']+)["']/i);
-       const colorMap={success:'#15803d',warning:'#b45309',danger:'#b91c1c',error:'#b91c1c',secondary:'#5c7068',muted:'#6b7f77'};
-       const hex=colorMatch&&colorMap[colorMatch[1].toLowerCase()];
-       const id='LOSSYINLINE'+inlines.length+'END';
-       inlines.push(hex?'<span style="color:'+hex+';font-weight:600">'+escape(inner.trim())+'</span>':escape(inner.trim()));
-       return id;
-      });
-      p=p.replace(/<caption\b[^>]*>([\s\S]*?)<\/caption>/gi,(m,inner,offset,str)=>{
-       if(isEscaped(str,offset))return m;
-       const id='LOSSYBLOCK'+blocks.length+'END';
-       blocks.push('<p class="lossy-widget-caption">'+escape(widgets.stripControlTokensOnly(inner).trim())+'</p>');
-       return '\n\n'+id+'\n\n';
-      });
-      p=p.replace(/<Link\b[^>]*url\s*=\s*(?:"([^"]*)"|'([^']*)'|\{([^}]*)\})[^>]*>([\s\S]*?)<\/Link>/gi,(m,u1,u2,_u3,label,offset,str)=>{
-       if(isEscaped(str,offset))return m;
-       const url=u1||u2||'';
-       return /^https?:\/\//i.test(url)?'['+label.trim()+']('+url+')':label.trim();
-      });
-      p=p.replace(/<divider\s*\/>/gi,(m,offset,str)=>isEscaped(str,offset)?m:'\n\n---\n\n');
-      return p;
-     },cInit);
-     return s;
+    const widgetRanges=widgets.findTopLevelWidgetRanges(part,initContainers).map(r=>({kind:'widget',start:r.start,end:r.end,raw:r.raw}));
+    const inlineRanges=typeof widgets.findInlineCodeRanges==='function'?widgets.findInlineCodeRanges(part,initContainers).map(r=>({kind:'inline',start:r.start,end:r.end})):[];
+    const events=[...widgetRanges,...inlineRanges].sort((a,b)=>a.start-b.start);
+    const stripPlain=typeof widgets.stripControlTokensPlain==='function'?widgets.stripControlTokensPlain:s=>widgets.stripControlTokensOnly(s);
+    const cleanPlainChunk=plain=>{
+     let p=stripPlain(plain);
+     p=p.replace(/<text\b([^>]*)>([\s\S]*?)<\/text>/gi,(m,a,inner,offset,str)=>{
+      if(isEscaped(str,offset))return m;
+      const colorMatch=String(a||'').match(/color\s*=\s*["']([^"']+)["']/i);
+      const colorMap={success:'#15803d',warning:'#b45309',danger:'#b91c1c',error:'#b91c1c',secondary:'#5c7068',muted:'#6b7f77'};
+      const hex=colorMatch&&colorMap[colorMatch[1].toLowerCase()];
+      const id='LOSSYINLINE'+inlines.length+'END';
+      inlines.push(hex?'<span style="color:'+hex+';font-weight:600">'+escape(inner.trim())+'</span>':escape(inner.trim()));
+      return id;
+     });
+     p=p.replace(/<caption\b[^>]*>([\s\S]*?)<\/caption>/gi,(m,inner,offset,str)=>{
+      if(isEscaped(str,offset))return m;
+      const id='LOSSYBLOCK'+blocks.length+'END';
+      blocks.push('<p class="lossy-widget-caption">'+escape(widgets.stripControlTokensOnly(inner).trim())+'</p>');
+      return '\n\n'+id+'\n\n';
+     });
+     p=p.replace(/<Link\b[^>]*url\s*=\s*(?:"([^"]*)"|'([^']*)'|\{([^}]*)\})[^>]*>([\s\S]*?)<\/Link>/gi,(m,u1,u2,_u3,label,offset,str)=>{
+      if(isEscaped(str,offset))return m;
+      const url=u1||u2||'';
+      return /^https?:\/\//i.test(url)?'['+label.trim()+']('+url+')':label.trim();
+     });
+     p=p.replace(/<divider\s*\/>/gi,(m,offset,str)=>isEscaped(str,offset)?m:'\n\n---\n\n');
+     return p;
     };
-    for(const r of ranges){
-     out+=cleanInline(part.slice(cursor,r.start),cursor===0?initContainers:undefined);
-     const id='LOSSYBLOCK'+blocks.length+'END';
-     blocks.push(widgets.renderWidgetBlockToHtml(r.raw));
-     out+='\n\n'+id+'\n\n';
-     cursor=r.end;
+    let out='',cursor=0;
+    for(const ev of events){
+     if(ev.start<cursor)continue;
+     out+=cleanPlainChunk(part.slice(cursor,ev.start));
+     if(ev.kind==='inline'){
+      out+=part.slice(ev.start,ev.end);
+     }else{
+      const id='LOSSYBLOCK'+blocks.length+'END';
+      blocks.push(widgets.renderWidgetBlockToHtml(ev.raw));
+      out+='\n\n'+id+'\n\n';
+     }
+     cursor=ev.end;
     }
-    out+=cleanInline(part.slice(cursor),cursor===0?initContainers:undefined);
+    out+=cleanPlainChunk(part.slice(cursor));
     return out;
    }).join('\n');
    let html=rawRender(processed,env);
