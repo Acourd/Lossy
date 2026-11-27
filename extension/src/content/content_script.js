@@ -197,20 +197,46 @@
   }
 
   function mergeMonotonicCodeBlocks(existingBlocks, incomingBlocks) {
-    const oldArr = Array.isArray(existingBlocks) ? existingBlocks : [];
-    const newArr = Array.isArray(incomingBlocks) ? incomingBlocks : [];
-    const len = Math.max(oldArr.length, newArr.length);
-    const merged = [];
-    for (let i = 0; i < len; i++) {
-      const o = oldArr[i];
-      const n = newArr[i];
-      if (!o) { merged.push(n); continue; }
-      if (!n) { merged.push(o); continue; }
-      const oCode = String(o.code || '');
-      const nCode = String(n.code || '');
-      merged.push(nCode.length >= oCode.length ? n : o);
+    const a = Array.isArray(existingBlocks) ? existingBlocks : [];
+    const b = Array.isArray(incomingBlocks) ? incomingBlocks : [];
+    if (!a.length) return b.slice();
+    if (!b.length) return a.slice();
+    const result = a.slice();
+    const matchedOld = new Set();
+    const unmatchedNew = [];
+    for (let j = 0; j < b.length; j++) {
+      const next = b[j];
+      const nextCode = String(next?.code || '');
+      const nextLang = String(next?.language || '');
+      let matchIdx = -1;
+      for (let i = 0; i < a.length; i++) {
+        if (matchedOld.has(i)) continue;
+        if (String(a[i]?.code || '') === nextCode) { matchIdx = i; break; }
+      }
+      if (matchIdx === -1 && nextCode.length > 0) {
+        for (let i = 0; i < a.length; i++) {
+          if (matchedOld.has(i)) continue;
+          const prevCode = String(a[i]?.code || '');
+          const prevLang = String(a[i]?.language || '');
+          if (prevLang && nextLang && prevLang !== nextLang) continue;
+          if (prevCode.length > 0 && (prevCode.includes(nextCode) || nextCode.includes(prevCode))) {
+            matchIdx = i;
+            break;
+          }
+        }
+      }
+      if (matchIdx === -1 && a.length === b.length && !matchedOld.has(j)) {
+        matchIdx = j;
+      }
+      if (matchIdx !== -1) {
+        matchedOld.add(matchIdx);
+        const prev = a[matchIdx];
+        result[matchIdx] = nextCode.length >= String(prev?.code || '').length ? next : prev;
+      } else {
+        unmatchedNew.push(next);
+      }
     }
-    return merged;
+    return result.concat(unmatchedNew);
   }
 
   function mergeMonotonicTurn(existing, incoming) {

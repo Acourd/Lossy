@@ -1082,14 +1082,48 @@
 
   function transformSegment(segment, blockRenderer, mode) {
     const ranges = findTopLevelWidgetRanges(segment);
+    const cleanNonWidget = chunk => {
+      const lines = chunk.split('\n');
+      let prevBlank = true;
+      let inIndented = false;
+      const out = [];
+      let plainBuf = [];
+      const flushPlain = () => {
+        if (!plainBuf.length) return;
+        out.push(transformOutsideInlineCode(plainBuf.join('\n'), s => stripInlineControlTags(s, mode)));
+        plainBuf = [];
+      };
+      for (const line of lines) {
+        const isBlank = line.trim().length === 0;
+        if (inIndented) {
+          if (/^(?: {4}|\t)/.test(line) || isBlank) {
+            out.push(line);
+            prevBlank = isBlank;
+            continue;
+          }
+          inIndented = false;
+        }
+        if (prevBlank && /^(?: {4}|\t)/.test(line) && !isBlank) {
+          flushPlain();
+          inIndented = true;
+          out.push(line);
+          prevBlank = false;
+          continue;
+        }
+        plainBuf.push(line);
+        prevBlank = isBlank;
+      }
+      flushPlain();
+      return out.join('\n');
+    };
     let rebuilt = '';
     let cursor = 0;
     for (const r of ranges) {
-      rebuilt += stripInlineControlTags(segment.slice(cursor, r.start), mode);
+      rebuilt += cleanNonWidget(segment.slice(cursor, r.start));
       rebuilt += blockRenderer(r.raw);
       cursor = r.end;
     }
-    rebuilt += stripInlineControlTags(segment.slice(cursor), mode);
+    rebuilt += cleanNonWidget(segment.slice(cursor));
     return rebuilt;
   }
 
@@ -1099,9 +1133,11 @@
     const segments = [];
     let buf = [];
     let inFence = false;
+    let inIndented = false;
     let fenceChar = '';
     let fenceLen = 0;
     let fenceBqDepth = 0;
+    let prevLineBlank = true;
 
     const flush = isCode => {
       if (buf.length) {
@@ -1109,51 +1145,69 @@
         buf = [];
       }
     };
-    const stripBq = line => {
+    const stripContainers = line => {
       let rest = line;
-      let depth = 0;
+      let bqDepth = 0;
+      let hadList = false;
       while (true) {
-        const m = rest.match(/^ {0,3}>[ \t]?/);
-        if (!m) break;
-        depth++;
-        rest = rest.slice(m[0].length);
+        const bq = rest.match(/^ {0,3}>[ \t]?/);
+        if (bq) {
+          bqDepth++;
+          rest = rest.slice(bq[0].length);
+          continue;
+        }
+        const lst = rest.match(/^ {0,3}(?:[-*+]|\d{1,9}[.)])[ \t]+/);
+        if (lst) {
+          hadList = true;
+          rest = rest.slice(lst[0].length);
+          continue;
+        }
+        break;
       }
-      return { depth, rest };
+      return { bqDepth, hadList, rest };
     };
 
     for (const line of lines) {
-      const { depth, rest } = stripBq(line);
-      if (!inFence) {
-        const openM = rest.match(/^ {0,3}(`{3,}|~{3,})(.*)$/);
-        if (openM && !(openM[1][0] === '`' && openM[2].includes('`'))) {
-          flush(false);
-          inFence = true;
-          fenceChar = openM[1][0];
-          fenceLen = openM[1].length;
-          fenceBqDepth = depth;
-          buf.push(line);
-          continue;
-        }
-        buf.push(line);
-      } else {
-        if (fenceBqDepth > 0 && depth < fenceBqDepth) {
+      const { bqDepth, hadList, rest } = stripContainers(line);
+      const isBlank = rest.trim().length === 0;
+      if (inFence) {
+        if (fenceBqDepth > 0 && bqDepth < fenceBqDepth) {
           flush(true);
           inFence = false;
           fenceChar = '';
           fenceLen = 0;
           fenceBqDepth = 0;
           buf.push(line);
+          prevLineBlank = isBlank;
           continue;
         }
         buf.push(line);
-        const closeM = rest.match(/^ {0,3}(`{3,}|~{3,})[ \t]*$/);
+        const closeM = rest.match(/^[ \t]*(`{3,}|~{3,})[ \t]*$/);
         if (closeM && closeM[1][0] === fenceChar && closeM[1].length >= fenceLen) {
           flush(true);
           inFence = false;
           fenceChar = '';
           fenceLen = 0;
           fenceBqDepth = 0;
+          prevLineBlank = false;
         }
+        continue;
+      }
+
+      if (!inFence) {
+        const openM = hadList
+          ? rest.match(/^[ \t]*(`{3,}|~{3,})(.*)$/)
+          : rest.match(/^ {0,3}(`{3,}|~{3,})(.*)$/);
+        if (openM && !(openM[1][0] === '`' && openM[2].includes('`'))) {
+          flush(false);
+          inFence = true;
+          fenceChar = openM[1][0];
+          fenceLen = openM[1].length;
+          fenceBqDepth = bqDepth;
+          buf.push(line);
+          continue;
+        }
+        buf.push(line);
       }
     }
     flush(inFence);
@@ -1186,15 +1240,54 @@
     return transformOutsideCodeFences(text, renderWidgetBlockToHtml, 'html');
   }
 
+  function transformOutsideInlineCode(str, fn) {
+    const s = String(str || '');
+    let out = '';
+    let plainBuf = '';
+    let i = 0;
+    const isEscaped = idx => {
+      let bs = 0;
+      for (let k = idx - 1; k >= 0 && s[k] === '\\'; k--) bs++;
+      return (bs % 2) === 1;
+    };
+    while (i < s.length) {
+      if (s[i] === '`' && !isEscaped(i)) {
+        let ticks = 0;
+        while (i + ticks < s.length && s[i + ticks] === '`') ticks++;
+        const delim = '`'.repeat(ticks);
+        let end = i + ticks;
+        let found = -1;
+        while (end < s.length) {
+          const pos = s.indexOf(delim, end);
+          if (pos === -1) break;
+          if (s[pos - 1] !== '`' && s[pos + ticks] !== '`') { found = pos; break; }
+          end = pos + 1;
+        }
+        if (found !== -1) {
+          if (plainBuf) { out += fn(plainBuf); plainBuf = ''; }
+          out += s.slice(i, found + ticks);
+          i = found + ticks;
+          continue;
+        }
+        plainBuf += delim;
+        i += ticks;
+        continue;
+      }
+      plainBuf += s[i++];
+    }
+    if (plainBuf) out += fn(plainBuf);
+    return out;
+  }
+
   function stripControlTokensOnly(text) {
     const input = String(text || '');
     if (!input) return '';
     return splitFencedCodeSegments(input).map(seg => {
       if (seg.isCode) return seg.text;
-      return seg.text
+      return transformOutsideInlineCode(seg.text, s => s
         .replace(/<Cite\b[^>]*\/>/gi, '')
         .replace(/<SuggestAutomation\b[^>]*\/>/gi, '')
-        .replace(/<DisplayAutomation\b[^>]*\/>/gi, '');
+        .replace(/<DisplayAutomation\b[^>]*\/>/gi, ''));
     }).join('\n');
   }
 

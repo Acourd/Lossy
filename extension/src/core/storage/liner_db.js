@@ -74,7 +74,7 @@
         if (old) matchedPrevIds.add(key);
         if (!old || hasBinary(asset)) return asset;
         const oldUrl = getUrl(old), newUrl = getUrl(asset);
-        if (oldUrl && newUrl && oldUrl !== newUrl) return asset;
+        if (!key.startsWith('fid:') && oldUrl && newUrl && oldUrl !== newUrl) return asset;
         const restored = { ...asset };
         for (const k of ['dataURI', 'data', 'blob', 'mimeType', 'width', 'height']) if (old[k]) restored[k] = old[k];
         restored.availability = 'embedded';
@@ -98,18 +98,47 @@
       const b = Array.isArray(newBlocks) ? newBlocks : [];
       if (!a.length) return newBlocks;
       if (!b.length) return a;
-      const maxLen = Math.max(a.length, b.length);
-      const out = [];
-      for (let i = 0; i < maxLen; i++) {
-        const prev = a[i];
-        const next = b[i];
-        if (!prev) { out.push(next); continue; }
-        if (!next) { out.push(prev); continue; }
-        const prevCode = typeof prev.code === 'string' ? prev.code : '';
-        const nextCode = typeof next.code === 'string' ? next.code : '';
-        out.push(prevCode.length > nextCode.length ? prev : next);
+      const result = a.slice();
+      const matchedOld = new Set();
+      const unmatchedNew = [];
+      for (let j = 0; j < b.length; j++) {
+        const next = b[j];
+        const nextCode = typeof next?.code === 'string' ? next.code : '';
+        const nextLang = typeof next?.language === 'string' ? next.language : '';
+        // 1. Prefer exact code match
+        let matchIdx = -1;
+        for (let i = 0; i < a.length; i++) {
+          if (matchedOld.has(i)) continue;
+          const prevCode = typeof a[i]?.code === 'string' ? a[i].code : '';
+          if (prevCode === nextCode) { matchIdx = i; break; }
+        }
+        // 2. Containment/prefix match (same language when both present)
+        if (matchIdx === -1 && nextCode.length > 0) {
+          for (let i = 0; i < a.length; i++) {
+            if (matchedOld.has(i)) continue;
+            const prevCode = typeof a[i]?.code === 'string' ? a[i].code : '';
+            const prevLang = typeof a[i]?.language === 'string' ? a[i].language : '';
+            if (prevLang && nextLang && prevLang !== nextLang) continue;
+            if (prevCode.length > 0 && (prevCode.includes(nextCode) || nextCode.includes(prevCode))) {
+              matchIdx = i;
+              break;
+            }
+          }
+        }
+        // 3. Positional fallback only when counts are identical and slot is unmatched
+        if (matchIdx === -1 && a.length === b.length && !matchedOld.has(j)) {
+          matchIdx = j;
+        }
+        if (matchIdx !== -1) {
+          matchedOld.add(matchIdx);
+          const prev = a[matchIdx];
+          const prevCode = typeof prev?.code === 'string' ? prev.code : '';
+          result[matchIdx] = prevCode.length > nextCode.length ? prev : next;
+        } else {
+          unmatchedNew.push(next);
+        }
       }
-      return out;
+      return result.concat(unmatchedNew);
     };
     const msgTextOf = m => (typeof m?.text === 'string' ? m.text : (typeof m?.content?.text === 'string' ? m.content.text : ''));
     const mergeSingleMsg = (old, message) => {
@@ -194,8 +223,37 @@
           if (before) out.push(...before);
           out.push(mergedExisting[oldIdx]);
         }
-        if (trailing.length) out.push(...trailing);
-        messages = out;
+        if (trailing.length) {
+          if (overlaps.length === 0) {
+            const parseTs = m => {
+              const raw = m?.createdAt ?? m?.timestamp;
+              if (typeof raw === 'number' && Number.isFinite(raw)) return raw;
+              if (typeof raw === 'string' && raw.trim()) {
+                const t = Date.parse(raw);
+                if (Number.isFinite(t)) return t;
+              }
+              return NaN;
+            };
+            const oldTimes = out.map(parseTs);
+            const newTimes = trailing.map(parseTs);
+            if (oldTimes.every(Number.isFinite) && newTimes.every(Number.isFinite)) {
+              const tagged = [
+                ...out.map((m, i) => ({ m, ts: oldTimes[i], src: 0, i })),
+                ...trailing.map((m, i) => ({ m, ts: newTimes[i], src: 1, i }))
+              ];
+              tagged.sort((x, y) => (x.ts - y.ts) || (x.src - y.src) || (x.i - y.i));
+              messages = tagged.map(t => t.m);
+            } else {
+              out.push(...trailing);
+              messages = out;
+            }
+          } else {
+            out.push(...trailing);
+            messages = out;
+          }
+        } else {
+          messages = out;
+        }
       } else {
         messages = incomingMsgs.map(message => mergeSingleMsg(oldById.get(message?.id), message));
       }

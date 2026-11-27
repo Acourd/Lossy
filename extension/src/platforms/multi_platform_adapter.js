@@ -275,7 +275,7 @@
       const text = normalizeText(t.text);
       const codeBlocks = extractCodeBlocks(text);
       const attachments = Array.isArray(t.attachments) ? t.attachments : [];
-      const baseKey = `${t.role}|${text}|${attachments.map(a => a.sourceURL || a.url || a.filename || '').join(',')}`;
+      const baseKey = `${t.role}|${text}|${JSON.stringify(attachments.map(a => a.sourceURL || a.url || a.filename || ''))}`;
       const occ = (seenTurnKeys.get(baseKey) || 0) + 1;
       seenTurnKeys.set(baseKey, occ);
       const msgId = `msg_${platform}_${t.role}_${stableTurnHash(baseKey)}_${occ}`;

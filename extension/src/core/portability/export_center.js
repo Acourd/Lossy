@@ -180,11 +180,18 @@
         return candidate;
       };
       let activeMessageIndex = null;
+      const emittedMsgExplicitIds = new Set();
+      const emittedGlobalLocations = new Set();
       const addAsset = asset => {
         records.push(asset);
+        if (asset.fileId) emittedGlobalLocations.add('fid:' + asset.fileId);
+        if (asset.assetPointer) emittedGlobalLocations.add('ptr:' + asset.assetPointer);
+        if (asset.sourceURL) emittedGlobalLocations.add('url:' + asset.sourceURL);
+        if (asset.dataURI) emittedGlobalLocations.add('uri:' + asset.dataURI);
         const index = asset.messageIndex == null ? null : activeMessageIndex;
         if (!index) return;
-        for (const key of [asset.fileId, asset.assetId]) if (key != null && !index.identities.has(key)) index.identities.set(key, asset);
+        if (asset.fileId != null && !index.fileIds.has(asset.fileId)) index.fileIds.set(asset.fileId, asset);
+        if (asset.assetId != null && !index.assetIds.has(asset.assetId)) index.assetIds.set(asset.assetId, asset);
         if (asset.assetPointer) index.pointers.add(asset.assetPointer);
         if (asset.sourceURL) index.locations.add(asset.sourceURL);
         if (asset.dataURI) index.locations.add(asset.dataURI);
@@ -192,7 +199,7 @@
 
       // 1. Adjuntos a nivel de mensaje
       messages.forEach((msg, mIdx) => {
-        const index = { identities: new Map(), pointers: new Set(), locations: new Set() };
+        const index = { fileIds: new Map(), assetIds: new Map(), pointers: new Set(), locations: new Set() };
         activeMessageIndex = index;
         const msgId = msg.id || `msg_${mIdx}`;
         const atts = Array.isArray(msg.attachments) ? msg.attachments : (Array.isArray(msg.content?.attachments) ? msg.content.attachments : []);
@@ -215,15 +222,23 @@
 
           const rawAssetId = att.assetId || att.id || `asset_${mIdx}_${aIdx}`;
           const safePtr = typeof att.assetPointer === 'string' ? att.assetPointer : null;
-          const identity = (typeof att.fileId === 'string' && att.fileId) || safePtr?.replace(/^(?:sediment|file-service):\/\//, '') || rawAssetId;
-          const existing = index.identities.get(identity);
+          const resolvedFileId = (typeof att.fileId === 'string' && att.fileId) || safePtr?.replace(/^(?:sediment|file-service):\/\//, '') || null;
+          let existing = resolvedFileId ? index.fileIds.get(resolvedFileId) : index.assetIds.get(rawAssetId);
+          if (!existing && !resolvedFileId && index.fileIds.has(rawAssetId)) {
+            const candidate = index.fileIds.get(rawAssetId);
+            if (candidate && !candidate.dataURI && !candidate.data && (dataURI || localBlob)) {
+              existing = candidate;
+            }
+          }
           if (existing) {
-            if (!existing.dataURI && dataURI) { existing.dataURI=dataURI;existing.availability='embedded';index.locations.add(dataURI); }
+            if (!existing.dataURI && dataURI) { existing.dataURI = dataURI; existing.availability = 'embedded'; index.locations.add(dataURI); }
+            if (!existing.data && localBlob) { existing.data = localBlob; existing.availability = 'embedded'; }
             return;
           }
           const scopedKey = `${msgId}::${rawAssetId}`;
           if (seenKeys.has(scopedKey)) return;
           seenKeys.add(scopedKey);
+          emittedMsgExplicitIds.add(rawAssetId);
           const assetId = allocateUniqueAssetId(rawAssetId, mIdx, aIdx);
 
           const mimeType = att.mimeType || (att.kind === 'image' ? 'image/png' : 'application/octet-stream');
@@ -334,13 +349,27 @@
       // 4. Adjuntos a nivel superior de entidad
       const topAtts = Array.isArray(entity.attachments) ? entity.attachments : [];
       topAtts.forEach((att, aIdx) => {
-        const assetId = att.assetId || att.id || `top_asset_${aIdx}`;
-        if (seenKeys.has(assetId) || seenMsgAssetIds.has(assetId)) return;
-        seenKeys.add(assetId);
-
+        if (!att || typeof att !== 'object') return;
+        const rawTopId = att.assetId || att.id || `top_asset_${aIdx}`;
         const remoteURL = att.sourceURL || att.url || null;
         const localBlob = att.data || att.blob || null;
         const dataURI = att.dataURI || null;
+        const safePtr = typeof att.assetPointer === 'string' ? att.assetPointer : null;
+        const topFileId = (typeof att.fileId === 'string' && att.fileId) || safePtr?.replace(/^(?:sediment|file-service):\/\//, '') || null;
+
+        // Omitir únicamente si es un espejo del mismo adjunto ya emitido a nivel de mensaje
+        if (att.sourceMessageId && (seenKeys.has(`${att.sourceMessageId}::${rawTopId}`) || emittedMsgExplicitIds.has(rawTopId))) return;
+        const topKey = `top::${rawTopId}::${aIdx}`;
+        if (seenKeys.has(topKey)) return;
+        const isExactLocationMirror = (
+          (topFileId && emittedGlobalLocations.has('fid:' + topFileId)) ||
+          (safePtr && emittedGlobalLocations.has('ptr:' + safePtr)) ||
+          (dataURI && emittedGlobalLocations.has('uri:' + dataURI)) ||
+          (remoteURL && emittedGlobalLocations.has('url:' + remoteURL))
+        );
+        if (isExactLocationMirror && !localBlob) return;
+        seenKeys.add(topKey);
+        const assetId = allocateUniqueAssetId(rawTopId, 'top', aIdx);
 
         let availability = ASSET_AVAILABILITY.REFERENCED;
         const warnings = [];
@@ -366,7 +395,8 @@
           dataURI,
           data: localBlob,
           sourceURL: remoteURL,
-          assetPointer: att.assetPointer || null,
+          assetPointer: safePtr,
+          fileId: topFileId,
           warnings,
           error: availability === ASSET_AVAILABILITY.UNAVAILABLE ? warnings[0] : null
         });
@@ -477,12 +507,18 @@
     return /^\{[\s\S]*"path"\s*:\s*"\/Automations\//i.test(t);
   }
 
-  function stripInlineCodeSpans(str) {
+  function splitInlineCodeSpans(str) {
     const s = String(str || '');
-    let out = '';
+    const parts = [];
+    let plainBuf = '';
     let i = 0;
+    const isEscaped = (idx) => {
+      let bs = 0;
+      for (let k = idx - 1; k >= 0 && s[k] === '\\'; k--) bs++;
+      return (bs % 2) === 1;
+    };
     while (i < s.length) {
-      if (s[i] === '`') {
+      if (s[i] === '`' && !isEscaped(i)) {
         let ticks = 0;
         while (i + ticks < s.length && s[i + ticks] === '`') ticks++;
         const delim = '`'.repeat(ticks);
@@ -498,16 +534,27 @@
           end = pos + 1;
         }
         if (found !== -1) {
+          if (plainBuf) { parts.push({ isCode: false, text: plainBuf }); plainBuf = ''; }
+          parts.push({ isCode: true, text: s.slice(i, found + ticks) });
           i = found + ticks;
           continue;
         }
-        out += delim;
+        plainBuf += delim;
         i += ticks;
         continue;
       }
-      out += s[i++];
+      plainBuf += s[i++];
     }
-    return out;
+    if (plainBuf) parts.push({ isCode: false, text: plainBuf });
+    return parts;
+  }
+
+  function stripInlineCodeSpans(str) {
+    return splitInlineCodeSpans(str).filter(p => !p.isCode).map(p => p.text).join('');
+  }
+
+  function transformOutsideInlineCode(str, fn) {
+    return splitInlineCodeSpans(str).map(p => p.isCode ? p.text : fn(p.text)).join('');
   }
 
   function splitFencedCodeSegments(text) {
@@ -516,9 +563,11 @@
     const segments = [];
     let buf = [];
     let inFence = false;
+    let inIndented = false;
     let fenceChar = '';
     let fenceLen = 0;
     let fenceBqDepth = 0;
+    let prevLineBlank = true;
 
     const flush = isCode => {
       if (buf.length) {
@@ -526,66 +575,103 @@
         buf = [];
       }
     };
-    const stripBq = line => {
+    const stripContainers = line => {
       let rest = line;
-      let depth = 0;
+      let bqDepth = 0;
+      let hadList = false;
       while (true) {
-        const m = rest.match(/^ {0,3}>[ \t]?/);
-        if (!m) break;
-        depth++;
-        rest = rest.slice(m[0].length);
+        const bq = rest.match(/^ {0,3}>[ \t]?/);
+        if (bq) {
+          bqDepth++;
+          rest = rest.slice(bq[0].length);
+          continue;
+        }
+        const lst = rest.match(/^ {0,3}(?:[-*+]|\d{1,9}[.)])[ \t]+/);
+        if (lst) {
+          hadList = true;
+          rest = rest.slice(lst[0].length);
+          continue;
+        }
+        break;
       }
-      return { depth, rest };
+      return { bqDepth, hadList, rest };
     };
 
     for (const line of lines) {
-      const { depth, rest } = stripBq(line);
-      if (!inFence) {
-        const openM = rest.match(/^ {0,3}(`{3,}|~{3,})(.*)$/);
-        if (openM && !(openM[1][0] === '`' && openM[2].includes('`'))) {
-          flush(false);
-          inFence = true;
-          fenceChar = openM[1][0];
-          fenceLen = openM[1].length;
-          fenceBqDepth = depth;
-          buf.push(line);
-          continue;
-        }
-        buf.push(line);
-      } else {
-        if (fenceBqDepth > 0 && depth < fenceBqDepth) {
+      const { bqDepth, hadList, rest } = stripContainers(line);
+      const isBlank = rest.trim().length === 0;
+      if (inFence) {
+        if (fenceBqDepth > 0 && bqDepth < fenceBqDepth) {
           flush(true);
           inFence = false;
           fenceChar = '';
           fenceLen = 0;
           fenceBqDepth = 0;
           buf.push(line);
+          prevLineBlank = isBlank;
           continue;
         }
         buf.push(line);
-        const closeM = rest.match(/^ {0,3}(`{3,}|~{3,})[ \t]*$/);
+        const closeM = rest.match(/^[ \t]*(`{3,}|~{3,})[ \t]*$/);
         if (closeM && closeM[1][0] === fenceChar && closeM[1].length >= fenceLen) {
           flush(true);
           inFence = false;
           fenceChar = '';
           fenceLen = 0;
           fenceBqDepth = 0;
+          prevLineBlank = false;
         }
+        continue;
       }
+
+      if (inIndented) {
+        if (/^(?: {4}|\t)/.test(rest) || isBlank) {
+          buf.push(line);
+          prevLineBlank = isBlank;
+          continue;
+        }
+        flush(true);
+        inIndented = false;
+      }
+
+      const openM = hadList
+        ? rest.match(/^[ \t]*(`{3,}|~{3,})(.*)$/)
+        : rest.match(/^ {0,3}(`{3,}|~{3,})(.*)$/);
+      if (openM && !(openM[1][0] === '`' && openM[2].includes('`'))) {
+        flush(false);
+        inFence = true;
+        fenceChar = openM[1][0];
+        fenceLen = openM[1].length;
+        fenceBqDepth = bqDepth;
+        buf.push(line);
+        prevLineBlank = false;
+        continue;
+      }
+
+      if (!hadList && prevLineBlank && /^(?: {4}|\t)/.test(rest) && !isBlank) {
+        flush(false);
+        inIndented = true;
+        buf.push(line);
+        prevLineBlank = false;
+        continue;
+      }
+
+      buf.push(line);
+      prevLineBlank = isBlank;
     }
-    flush(inFence);
+    flush(inFence || inIndented);
     return segments;
   }
 
   function cleanExportText(text) {
-    // Preserve literal examples in fenced code (including 4+ backtick nested fences); remove only ChatGPT control tokens.
-    return splitFencedCodeSegments(text).map(seg => seg.isCode ? seg.text : seg.text
+    // Preserve literal examples in fenced, indented, and inline code; remove only ChatGPT control tokens.
+    return splitFencedCodeSegments(text).map(seg => seg.isCode ? seg.text : transformOutsideInlineCode(seg.text, s => s
       .replace(/\uE200[\s\S]*?\uE201/g, '')
       .replace(/<Cite\b[^>]*\/>/gi, '')
       .replace(/<SuggestAutomation\b[^>]*\/>/gi, '')
       .replace(/<DisplayAutomation\b[^>]*\/>/gi, '')
       .replace(/!?\[([^\]]*)\]\(<?app:\/\/[^)>]+>?\)/g, (_, label) => label.replace(/^\$/, ''))
-      .replace(/\[Imagen: (?:sediment:\/\/|file-)[^\]]*\]/g, '')).join('\n');
+      .replace(/\[Imagen: (?:sediment:\/\/|file-)[^\]]*\]/g, ''))).join('\n');
   }
 
   function markdownResources(msg, index, options) {
@@ -613,10 +699,10 @@
     if (!options.preserveRawWidgets && widgets && typeof widgets.renderWidgetsToMarkdown === 'function') {
       text = widgets.renderWidgetsToMarkdown(text);
     }
-    const body = splitFencedCodeSegments(text).map(seg => seg.isCode ? seg.text : seg.text.replace(/!\[([^\]]*)\]\(<?([^)>]+)>?\)/g, (original, alt, url) => {
+    const body = splitFencedCodeSegments(text).map(seg => seg.isCode ? seg.text : transformOutsideInlineCode(seg.text, s => s.replace(/!\[([^\]]*)\]\(<?([^)>]+)>?\)/g, (original, alt, url) => {
       const found = images.find(a => a.sourceURL === url || a.url === url || a.dataURI === url);
       return found ? render(found, alt) : (strategy === 'omit' ? '' : original);
-    })).join('\n');
+    }))).join('\n');
     return body + images.map(a => { const image = render(a); return image ? '\n\n' + image : ''; }).join('');
   }
 
