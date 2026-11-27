@@ -1681,10 +1681,27 @@
           chunks.push(rawLine.slice(contentStart - openLineStart));
           continue;
         }
-        const sliceForLine = li === closeLineIdx ? rawLine.slice(0, closeOffset) : rawLine;
-        const { rest } = stepper.step(sliceForLine);
+        const prevContainers = stepper.containers.map(c => ({ ...c }));
+        const { rest, exitedAnyContainer } = stepper.step(rawLine);
         stepper.inParagraph = true;
-        chunks.push(rest);
+        if (exitedAnyContainer) {
+          let lazyIndentAfterBq = 0;
+          for (let k = prevContainers.length - 1; k >= 0; k--) {
+            if (prevContainers[k].type === 'bq') break;
+            lazyIndentAfterBq += prevContainers[k].indent;
+          }
+          const sliceForLine = li === closeLineIdx ? rawLine.slice(0, closeOffset) : rawLine;
+          if (lazyIndentAfterBq > 0) {
+            const lead = measureLeadCols(sliceForLine, 0);
+            const toStrip = Math.min(lead.cols, lazyIndentAfterBq);
+            chunks.push(toStrip > 0 ? stripIndentCols(sliceForLine, 0, toStrip).rest : sliceForLine);
+          } else {
+            chunks.push(sliceForLine);
+          }
+        } else {
+          const tailTrimLen = li === closeLineIdx ? (rawLine.length - closeOffset) : 0;
+          chunks.push(tailTrimLen > 0 ? rest.slice(0, Math.max(0, rest.length - tailTrimLen)) : rest);
+        }
       }
       inner = chunks.join(' ');
     }

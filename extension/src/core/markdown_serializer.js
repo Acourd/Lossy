@@ -107,8 +107,13 @@
         const codeMd = codeBlocks.map(cb => {
           const lang = cb.language || '';
           const body = String(cb.code || '');
-          const m = body.match(/`+/g);
-          const fence = '`'.repeat(Math.max(3, (m ? Math.max(...m.map(x => x.length)) : 0) + 1));
+          let maxRun = 0;
+          let run = 0;
+          for (let i = 0; i < body.length; i++) {
+            if (body.charCodeAt(i) === 96) { run++; if (run > maxRun) maxRun = run; }
+            else run = 0;
+          }
+          const fence = '`'.repeat(Math.max(3, maxRun + 1));
           return `\n${fence}${lang}\n${body}\n${fence}`;
         }).join('\n');
         contentText += `\n${codeMd}`;
@@ -197,8 +202,13 @@
       if (codeBlocks.length > 0 && !contentText.includes('```')) {
         const cbText = codeBlocks.map(cb => {
           const body = String(cb.code || '');
-          const runs = body.match(/`+/g);
-          const fence = '`'.repeat(Math.max(3, (runs ? Math.max(...runs.map(x => x.length)) : 0) + 1));
+          let maxRun = 0;
+          let run = 0;
+          for (let i = 0; i < body.length; i++) {
+            if (body.charCodeAt(i) === 96) { run++; if (run > maxRun) maxRun = run; }
+            else run = 0;
+          }
+          const fence = '`'.repeat(Math.max(3, maxRun + 1));
           return `${fence}${cb.language || 'plaintext'}\n${body}\n${fence}`;
         }).join('\n\n');
         contentText += `\n\n${cbText}`;

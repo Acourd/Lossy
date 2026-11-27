@@ -86,7 +86,8 @@
 
     const rows = grid.filter(r => Array.isArray(r) && r.length > 0);
     if (!rows.length) return '';
-    const colCount = Math.max(...rows.map(r => r.length));
+    let colCount = 0;
+    for (const r of rows) if (r.length > colCount) colCount = r.length;
     const padRow = r => {
       const out = Array.from({ length: colCount }, (_, idx) => r[idx] ?? '');
       return `| ${out.join(' | ')} |`;
@@ -95,6 +96,31 @@
     const sep = `| ${Array(colCount).fill('---').join(' | ')} |`;
     const body = rows.slice(1).map(padRow);
     return `\n\n${[header, sep, ...body].join('\n')}\n\n`;
+  }
+
+  function maxBacktickRun(str) {
+    const s = String(str || '');
+    let maxRun = 0;
+    let run = 0;
+    for (let i = 0; i < s.length; i++) {
+      if (s.charCodeAt(i) === 96) {
+        run++;
+        if (run > maxRun) maxRun = run;
+      } else {
+        run = 0;
+      }
+    }
+    return maxRun;
+  }
+
+  function joinMarkdownParts(parts) {
+    let acc = '';
+    for (const part of parts) {
+      if (!part) continue;
+      if (acc.endsWith('`') && part.startsWith('`')) acc += ' ';
+      acc += part;
+    }
+    return acc;
   }
 
   function serializeDomToMarkdown(node) {
@@ -113,39 +139,36 @@
       const cls = code?.className || '';
       const lang = (cls.match(/language-([\w+-]+)/) || [])[1] || '';
       const rawCode = ((code ? code.textContent : node.textContent) || '').replace(/\r\n/g, '\n').replace(/^\n+|\n+$/g, '');
-      const matches = rawCode.match(/`+/g);
-      const maxRun = matches ? Math.max(...matches.map(m => m.length)) : 0;
-      const fence = '`'.repeat(Math.max(3, maxRun + 1));
+      const fence = '`'.repeat(Math.max(3, maxBacktickRun(rawCode) + 1));
       return `\n\n${fence}${lang}\n${rawCode}\n${fence}\n\n`;
     }
 
     if (tag === 'ol') {
       let itemNum = 1;
-      const items = Array.from(node.childNodes || []).map(child => {
+      const items = joinMarkdownParts(Array.from(node.childNodes || []).map(child => {
         if (child && child.nodeType === 1 && (child.tagName || '').toLowerCase() === 'li') {
-          const item = Array.from(child.childNodes || []).map(serializeDomToMarkdown).join('').trim();
+          const item = joinMarkdownParts(Array.from(child.childNodes || []).map(serializeDomToMarkdown)).trim();
           return item ? `\n${itemNum++}. ${item}` : '';
         }
         return serializeDomToMarkdown(child);
-      }).join('');
+      }));
       return `\n${items}\n`;
     }
     if (tag === 'blockquote') {
-      const q = Array.from(node.childNodes || []).map(serializeDomToMarkdown).join('').trim();
+      const q = joinMarkdownParts(Array.from(node.childNodes || []).map(serializeDomToMarkdown)).trim();
       if (!q) return '';
       return '\n\n' + q.split('\n').map(line => `> ${line}`).join('\n') + '\n\n';
     }
 
-    const inner = Array.from(node.childNodes || []).map(serializeDomToMarkdown).join('');
+    const childParts = Array.from(node.childNodes || []).map(serializeDomToMarkdown);
     if (tag === 'code') {
-      const cleanCode = inner.trim();
+      const cleanCode = childParts.join('').trim();
       if (!cleanCode) return '';
-      const matches = cleanCode.match(/`+/g);
-      const maxRun = matches ? Math.max(...matches.map(m => m.length)) : 0;
-      const delim = '`'.repeat(maxRun + 1);
+      const delim = '`'.repeat(maxBacktickRun(cleanCode) + 1);
       const needsPad = cleanCode.startsWith('`') || cleanCode.endsWith('`');
       return `${delim}${needsPad ? ' ' : ''}${cleanCode}${needsPad ? ' ' : ''}${delim}`;
     }
+    const inner = joinMarkdownParts(childParts);
     if (/^h[1-6]$/.test(tag)) {
       const heading = inner.trim();
       if (!heading || /^(?:tú dijiste|you said|gemini dijo|gemini said|claude said|claude dijo)\b/i.test(heading)) {

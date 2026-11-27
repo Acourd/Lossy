@@ -49,23 +49,43 @@
       if (cells.length) rows.push(cells);
     }
     if (!rows.length) return '';
-    const cols = Math.max(...rows.map(r => r.length));
+    let cols = 0;
+    for (const r of rows) if (r.length > cols) cols = r.length;
     const fmt = r => `| ${r.concat(Array(Math.max(0, cols - r.length)).fill('')).join(' | ')} |`;
     return `\n\n${fmt(rows[0])}\n| ${Array(cols).fill('---').join(' | ')} |\n${rows.slice(1).map(fmt).join('\n')}\n\n`;
   }
+  function maxBacktickRun(str) {
+    const s = String(str || '');
+    let maxRun = 0;
+    let run = 0;
+    for (let i = 0; i < s.length; i++) {
+      if (s.charCodeAt(i) === 96) {
+        run++;
+        if (run > maxRun) maxRun = run;
+      } else {
+        run = 0;
+      }
+    }
+    return maxRun;
+  }
   function buildSafeCodeFence(code) {
-    const matches = String(code || '').match(/`+/g);
-    const maxRun = matches ? Math.max(...matches.map(m => m.length)) : 0;
-    return '`'.repeat(Math.max(3, maxRun + 1));
+    return '`'.repeat(Math.max(3, maxBacktickRun(code) + 1));
   }
   function wrapInlineCode(text) {
     const s = String(text || '');
     if (!s) return '';
-    const matches = s.match(/`+/g);
-    const maxRun = matches ? Math.max(...matches.map(m => m.length)) : 0;
-    const delim = '`'.repeat(maxRun + 1);
+    const delim = '`'.repeat(maxBacktickRun(s) + 1);
     const needsPad = s.startsWith('`') || s.endsWith('`');
     return `${delim}${needsPad ? ' ' : ''}${s}${needsPad ? ' ' : ''}${delim}`;
+  }
+  function joinMarkdownParts(parts) {
+    let acc = '';
+    for (const part of parts) {
+      if (!part) continue;
+      if (acc.endsWith('`') && part.startsWith('`')) acc += ' ';
+      acc += part;
+    }
+    return acc;
   }
   function messageDomText(node) {
     if (node.nodeType === 3) return node.textContent || '';
@@ -80,8 +100,9 @@
       const fence = buildSafeCodeFence(rawCode);
       return '\n\n' + fence + lang + '\n' + rawCode + '\n' + fence + '\n\n';
     }
-    const text = Array.from(node.childNodes || []).map(messageDomText).join('');
-    if (tag === 'code') return wrapInlineCode(text);
+    const childParts = Array.from(node.childNodes || []).map(messageDomText);
+    if (tag === 'code') return wrapInlineCode(childParts.join(''));
+    const text = joinMarkdownParts(childParts);
     if (/^h[1-6]$/.test(tag)) return '\n\n' + '#'.repeat(Number(tag[1])) + ' ' + text + '\n\n';
     if (tag === 'li') return '\n- ' + text;
     if (['p','div','ul','ol','blockquote'].includes(tag)) return '\n' + text + '\n';

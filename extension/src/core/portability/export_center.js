@@ -1349,8 +1349,17 @@
   }
 
   function buildSafeCodeFence(code) {
-    const matches = String(code || '').match(/`+/g);
-    const maxRun = matches ? Math.max(...matches.map(m => m.length)) : 0;
+    const s = String(code || '');
+    let maxRun = 0;
+    let run = 0;
+    for (let i = 0; i < s.length; i++) {
+      if (s.charCodeAt(i) === 96) {
+        run++;
+        if (run > maxRun) maxRun = run;
+      } else {
+        run = 0;
+      }
+    }
     return '`'.repeat(Math.max(3, maxRun + 1));
   }
 
