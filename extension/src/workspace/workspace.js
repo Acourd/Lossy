@@ -1223,12 +1223,31 @@
       err.nonRetryable = true;
       throw err;
     }
-    const receivedUrl = String(ext?.source?.url || '');
+    const receivedUrl = String(ext?.source?.url || '').trim();
     if (receivedUrl) {
-      if ((expectedPlatform === 'claude' && /chatgpt\.com|gemini\.google\.com/i.test(receivedUrl)) ||
-          (expectedPlatform === 'gemini' && /chatgpt\.com|claude\.ai/i.test(receivedUrl)) ||
-          (expectedPlatform === 'chatgpt' && /claude\.ai|gemini\.google\.com/i.test(receivedUrl))) {
-        const err = new Error(`SOURCE_IDENTITY_MISMATCH: URL de origen incompatible con ${expectedPlatform}.`);
+      let parsed = null;
+      try { parsed = new URL(receivedUrl); } catch (_) {}
+      if (!parsed || (parsed.protocol !== 'http:' && parsed.protocol !== 'https:')) {
+        const err = new Error(`SOURCE_IDENTITY_MISMATCH: URL de origen inválida (${receivedUrl}).`);
+        err.code = 'SOURCE_IDENTITY_MISMATCH';
+        err.nonRetryable = true;
+        throw err;
+      }
+      const host = parsed.hostname.toLowerCase();
+      const allowedHosts = expectedPlatform === 'claude'
+        ? ['claude.ai']
+        : (expectedPlatform === 'gemini'
+          ? ['gemini.google.com']
+          : ['chatgpt.com', 'chat.openai.com']);
+      if (expectedPlatform && !allowedHosts.includes(host)) {
+        const err = new Error(`SOURCE_IDENTITY_MISMATCH: Host de URL (${host}) incompatible con ${expectedPlatform}.`);
+        err.code = 'SOURCE_IDENTITY_MISMATCH';
+        err.nonRetryable = true;
+        throw err;
+      }
+      const urlConvMatch = parsed.pathname.match(/\/(?:c|chat|app)\/([a-zA-Z0-9_-]+)/);
+      if (urlConvMatch && urlConvMatch[1] && expectedConvId && urlConvMatch[1] !== expectedConvId) {
+        const err = new Error(`SOURCE_IDENTITY_MISMATCH: ID de conversación en URL (${urlConvMatch[1]}) != ${expectedConvId}.`);
         err.code = 'SOURCE_IDENTITY_MISMATCH';
         err.nonRetryable = true;
         throw err;

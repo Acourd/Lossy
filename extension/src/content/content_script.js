@@ -979,7 +979,8 @@
       if (jumpedToTop) {
         container.scrollTop = 0;
       }
-      const topSettled = await settleDomWindow(100, 1100, jumpedToTop ? 480 : 240);
+      // Aun si el usuario acaba de llegar arriba (scrollTop=0), espera 480ms si el contenedor es virtualizable
+      const topSettled = await settleDomWindow(100, 1100, 480);
       if (topSettled.aborted) {
         return {
           turns: [],

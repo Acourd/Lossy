@@ -335,27 +335,48 @@ test('R34 P1-1: captura en lote y simple rechaza respuesta de otro proveedor con
     }),
     /SOURCE_IDENTITY_MISMATCH/
   );
+  await assert.rejects(
+    db.saveConversation({
+      canonicalId: claudeCanonicalId,
+      title: 'Inyección por URL B con conversationId A',
+      source: { platform: 'claude', conversationId: sharedUuid, url: 'https://claude.ai/chat/other-B' },
+      messages: [{ id: 'x3b', role: 'assistant', text: 'Mezclado B' }]
+    }),
+    /SOURCE_IDENTITY_MISMATCH/
+  );
+  await assert.rejects(
+    db.saveConversation({
+      canonicalId: claudeCanonicalId,
+      title: 'Inyección host ChatGPT bajo plataforma Claude',
+      source: { platform: 'claude', conversationId: sharedUuid, url: `https://chatgpt.com/c/${sharedUuid}` },
+      messages: [{ id: 'x3c', role: 'assistant', text: 'Mezclado host' }]
+    }),
+    /SOURCE_IDENTITY_MISMATCH/
+  );
   const afterDirectSave = await db.getConversation(claudeCanonicalId);
   assert.equal(afterDirectSave.source.platform, 'claude');
   assert.equal(afterDirectSave.messages[0].text, 'Contenido original de Claude');
 
-  // También verifica rechazo cuando la respuesta omite canonicalId esperando claudeCanonicalId
-  const missingCanonHarness = createWorkspaceHarness({
-    db,
-    tabsQueryFn: async () => [{ id: 88, url: `https://claude.ai/chat/${sharedUuid}` }],
-    sendMessageFn: async () => ({
-      success: true,
-      data: {
-        title: 'Sin canonicalId',
-        source: { platform: 'claude', conversationId: sharedUuid, url: `https://claude.ai/chat/${sharedUuid}` },
-        messages: [{ id: 'x4', role: 'assistant', isConversational: true, text: 'Sin canonicalId' }]
-      }
-    })
-  });
-  missingCanonHarness.hooks.selectIds([claudeCanonicalId]);
-  await missingCanonHarness.hooks.startBulkCapture();
-  assert.equal(missingCanonHarness.hooks.getActiveEngine().activeJob.items[0].status, ITEM_STATUS.FAILED);
-  assert.match(missingCanonHarness.hooks.getActiveEngine().activeJob.items[0].error, /CanonicalId incompatible/);
+  // También verifica rechazo cuando la respuesta omite canonicalId o usa host chat.openai.com/example.org/URL B
+  for (const badResp of [
+    { title: 'Sin canonicalId', source: { platform: 'claude', conversationId: sharedUuid, url: `https://claude.ai/chat/${sharedUuid}` } },
+    { canonicalId: claudeCanonicalId, title: 'Host chat.openai', source: { platform: 'claude', conversationId: sharedUuid, url: `https://chat.openai.com/c/${sharedUuid}` } },
+    { canonicalId: claudeCanonicalId, title: 'Host example.org', source: { platform: 'claude', conversationId: sharedUuid, url: `https://example.org/c/${sharedUuid}` } },
+    { canonicalId: claudeCanonicalId, title: 'URL Claude de B', source: { platform: 'claude', conversationId: sharedUuid, url: 'https://claude.ai/chat/other-B-999' } }
+  ]) {
+    const h = createWorkspaceHarness({
+      db,
+      tabsQueryFn: async () => [{ id: 88, url: `https://claude.ai/chat/${sharedUuid}` }],
+      sendMessageFn: async () => ({
+        success: true,
+        data: { ...badResp, messages: [{ id: 'x4', role: 'assistant', isConversational: true, text: 'Rechazar' }] }
+      })
+    });
+    h.hooks.selectIds([claudeCanonicalId]);
+    await h.hooks.startBulkCapture();
+    assert.equal(h.hooks.getActiveEngine().activeJob.items[0].status, ITEM_STATUS.FAILED);
+    assert.match(h.hooks.getActiveEngine().activeJob.items[0].error, /SOURCE_IDENTITY_MISMATCH/);
+  }
 });
 
 test('R34 P1-2: Eliminar todo no lanza ReferenceError y otra instancia IndexedDB no reintroduce datos tras clearAll()', async () => {
@@ -506,11 +527,11 @@ test('R34 P1-3: primera captura tras navegación SPA A->B en Claude y Gemini rec
     assert.equal(firstCaptureOnB.success, false, `${spec.platform}: la primera captura tras A->B debe rechazar DOM obsoleto`);
     assert.match(firstCaptureOnB.error, /STALE_DOM/);
 
-    // Actualización parcial de A sin llegar a B todavía -> sigue siendo obsoleto de A
-    domText = `Mensaje confidencial exclusivo de A (${spec.platform}) ... [editado parcialmente]`;
-    const partialAOnB = await callMsg({ action: 'ACQUIRE_CONVERSATION' });
-    assert.equal(partialAOnB.success, false, `${spec.platform}: actualización parcial de A tampoco puede pasar por B`);
-    assert.match(partialAOnB.error, /STALE_DOM/);
+    // Retirar solo el prefijo "Mensaje " del turno antiguo de A -> sufijo residual sigue rechazándose como obsoleto
+    domText = `confidencial exclusivo de A (${spec.platform})`;
+    const suffixOnlyA = await callMsg({ action: 'ACQUIRE_CONVERSATION' });
+    assert.equal(suffixOnlyA.success, false, `${spec.platform}: sufijo sin prefijo de A no puede pasar por B`);
+    assert.match(suffixOnlyA.error, /STALE_DOM/);
 
     // Navegación A -> B -> C sin capturar nunca: DOM se actualiza en B y luego salta a C dejando contenido de B
     domText = `Contenido real pero exclusivo de B (${spec.platform})`;
@@ -524,6 +545,34 @@ test('R34 P1-3: primera captura tras navegación SPA A->B en Claude y Gemini rec
     const converged = await callMsg({ action: 'ACQUIRE_CONVERSATION' });
     assert.equal(converged.success, true);
     assert.equal(converged.data.messages[0].text, `Contenido fresco de C (${spec.platform})`);
+
+    // Caso sin falso positivo: conversación D comparte la misma pregunta de usuario que C pero con respuesta propia distinta
+    const sharedPrompt = 'Explica brevemente qué es un árbol B en bases de datos';
+    let multiTurns = [
+      { id: 'u1', role: 'user', text: sharedPrompt },
+      { id: 'a1', role: 'assistant', text: 'Respuesta única de C sobre discos.' }
+    ];
+    adapter.extractClaudeDom = (_doc, u) => {
+      const m = String(u || '').match(spec.regex);
+      return {
+        canonicalId: `conv_${spec.platform}_${m[1]}`,
+        title: spec.platform,
+        source: { platform: spec.platform, conversationId: m[1], url: u },
+        messages: multiTurns.map(t => ({ ...t, isConversational: true, content: { text: t.text }, attachments: [] })),
+        attachments: []
+      };
+    };
+    const capC = await callMsg({ action: 'ACQUIRE_CONVERSATION' });
+    assert.equal(capC.success, true);
+
+    historyObj.pushState({}, '', spec.urlB.replace(/2|b/g, '4').replace(/bbbbbbbbbbbb/, 'dddddddddddd'));
+    multiTurns = [
+      { id: 'u1d', role: 'user', text: sharedPrompt },
+      { id: 'a1d', role: 'assistant', text: 'Respuesta completamente nueva de D sobre Postgres.' }
+    ];
+    const capD = await callMsg({ action: 'ACQUIRE_CONVERSATION' });
+    assert.equal(capD.success, true, `${spec.platform}: pregunta compartida con respuesta distinta no debe bloquearse`);
+    assert.match(capD.data.messages[1].text, /Postgres/);
   }
 });
 
@@ -608,6 +657,17 @@ test('R34 P1-4: content_script con montaje diferido de 400ms recoge exactamente 
   assert.equal(res.turns.length, 12, `Se esperaban exactamente 12 turnos y se obtuvieron ${res.turns.length}`);
   assert.deepEqual(Array.from(res.turns, t => t.id), allTurns.map(t => t.id));
   assert.equal(res.integrity, 'harvested');
+
+  // También si el usuario ya scrolleó manualmente al tope (scrollTop === 0) y el montaje de 400ms sigue pendiente
+  internalScrollTop = 0;
+  visibleRange = [2, 6]; // Aún no monta m0/m1 hasta dentro de 400ms
+  const lateTopTimer = setTimeout(() => { visibleRange = [0, 4]; }, 400);
+  if (typeof lateTopTimer.unref === 'function') lateTopTimer.unref();
+  const resAlreadyAtTop = await sandbox.module.exports.harvestAllConversationTurns('virt_400ms');
+  clearTimeout(lateTopTimer);
+  if (pendingMountTimer) clearTimeout(pendingMountTimer);
+  assert.equal(resAlreadyAtTop.turns.length, 12, `Con scroll ya en top=0 también debe esperar montaje de 400ms (obtuvo ${resAlreadyAtTop.turns.length})`);
+  assert.deepEqual(Array.from(resAlreadyAtTop.turns, t => t.id), allTurns.map(t => t.id));
 });
 
 test('R34 P2-Cap-4: messageDomText conserva jerarquía anidada bajo marcadores ordenados de varios dígitos', () => {
@@ -676,6 +736,31 @@ test('R34 P2-Exp-5: HtmlBuilder combina codeBlocks y content.codeBlocks sin omit
   const inlineOccurrences = html.match(/const enTexto = true;/g) || [];
   assert.equal(inlineOccurrences.length, 1, 'No debe duplicar el bloque ya presente en el Markdown');
   assert.ok(html.includes('def bloque_separado():'), 'Debe renderizar bloques en content.codeBlocks aunque msg.codeBlocks exista y ya haya una cerca en text');
+
+  // También dentro de cita (> ```) o lista (- ```), no debe duplicar respecto a codeBlocks
+  const htmlContainers = HtmlBuilder.buildStandaloneHtml({
+    canonicalId: 'conv_html_container_cb',
+    title: 'Bloques en Citas y Listas',
+    source: { platform: 'chatgpt' },
+    messages: [{
+      id: 'm1',
+      role: 'assistant',
+      isConversational: true,
+      codeBlocks: [
+        { language: 'js', code: 'const enCita = 1;' },
+        { language: 'js', code: 'const enLista = 2;\n  const anidado = 3;' }
+      ],
+      content: {
+        text: '> ```js\n> const enCita = 1;\n> ```\n\n- ```js\n  const enLista = 2;\n    const anidado = 3;\n  ```',
+        codeBlocks: [
+          { language: 'js', code: 'const enCita = 1;' },
+          { language: 'js', code: 'const enLista = 2;\n  const anidado = 3;' }
+        ]
+      }
+    }]
+  });
+  assert.equal((htmlContainers.match(/const enCita = 1;/g) || []).length, 1, 'No debe duplicar cerca dentro de blockquote');
+  assert.equal((htmlContainers.match(/const enLista = 2;/g) || []).length, 1, 'No debe duplicar cerca dentro de lista');
 });
 
 test('R34 P2-UI-1 & Residual: startSingleCapture mantiene el trabajo running hasta terminar adquisición y bloquea solapamiento', async () => {

@@ -408,22 +408,48 @@
       }
       if (storedCode.length > 0) {
         const normCode = s => String(s || '').replace(/\r\n/g, '\n').replace(/^\n+|\n+$/g, '').trim();
+        const stripContainerPrefixesForFence = (segText) => {
+          const rawLines = String(segText || '').split('\n');
+          if (!rawLines.length) return '';
+          const stripOneLine = (line) => String(line || '').replace(/^(?: {0,3}>[ \t]?)+/, '');
+          const cleanFirst = stripOneLine(rawLines[0]);
+          const listLeadM = cleanFirst.match(/^( *(?:[-+*]|\d{1,9}[.)])[ \t]+)(.*)$/);
+          const afterListFirst = listLeadM ? listLeadM[2] : cleanFirst;
+          const indentPadMatch = listLeadM
+            ? listLeadM[1].length
+            : (afterListFirst.match(/^( *)/)?.[1]?.length || 0);
+          const openCheck = afterListFirst.trimStart();
+          const openM = openCheck.match(/^(`{3,}|~{3,})(.*)$/);
+          if (openM && !(openM[1][0] === '`' && openM[2].includes('`'))) {
+            const fChar = openM[1][0];
+            const fLen = openM[1].length;
+            const innerLines = rawLines.slice(1).map((ln, idx, arr) => {
+              let l = stripOneLine(ln);
+              if (indentPadMatch > 0) {
+                let removed = 0;
+                let k = 0;
+                while (k < l.length && removed < indentPadMatch && l[k] === ' ') { k++; removed++; }
+                l = l.slice(k);
+              }
+              return l;
+            });
+            const last = innerLines.length > 0 ? innerLines[innerLines.length - 1] : '';
+            const closeM = last.match(/^ {0,3}(`{3,}|~{3,})[ \t]*$/);
+            const hasClose = Boolean(closeM && closeM[1][0] === fChar && closeM[1].length >= fLen);
+            return normCode(innerLines.slice(0, hasClose ? -1 : undefined).join('\n'));
+          }
+          // También soporta bloques indentados de 4 espacios dentro de citas o listas
+          const deindented = rawLines.map(ln => {
+            let l = stripOneLine(ln);
+            return l.replace(/^ {1,4}/, '');
+          });
+          return normCode(deindented.join('\n'));
+        };
         const inlineBodies = [];
         if (widgets && typeof widgets.splitFencedCodeSegments === 'function') {
           for (const seg of widgets.splitFencedCodeSegments(text)) {
             if (!seg.isCode) continue;
-            const cLines = seg.text.split('\n');
-            const openM = cLines[0].match(/^ {0,3}(`{3,}|~{3,})(.*)$/);
-            if (openM && !(openM[1][0] === '`' && openM[2].includes('`'))) {
-              const fChar = openM[1][0];
-              const fLen = openM[1].length;
-              const lastLine = cLines.length > 1 ? cLines[cLines.length - 1] : '';
-              const closeM = lastLine.match(/^ {0,3}(`{3,}|~{3,})[ \t]*$/);
-              const hasClose = Boolean(closeM && closeM[1][0] === fChar && closeM[1].length >= fLen);
-              inlineBodies.push(normCode(cLines.slice(1, hasClose ? -1 : undefined).join('\n')));
-            } else {
-              inlineBodies.push(normCode(seg.text));
-            }
+            inlineBodies.push(stripContainerPrefixesForFence(seg.text));
           }
         } else {
           const fenceRe = /(?:^|\n) {0,3}(`{3,}|~{3,})[^\n]*\n([\s\S]*?)\n {0,3}\1[ \t]*(?=\n|$)/g;

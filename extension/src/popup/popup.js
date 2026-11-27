@@ -626,13 +626,25 @@ function initPopup() {
         const acquired = response.data;
         const detectedPlat = String(detectedActive.platform || 'chatgpt').toLowerCase();
         const receivedPlat = acquired.source?.platform ? String(acquired.source.platform).toLowerCase() : null;
+        let urlInvalid = false;
+        if (acquired.source?.url) {
+          try {
+            const u = new URL(acquired.source.url);
+            const host = u.hostname.toLowerCase();
+            const okHost = detectedPlat === 'claude' ? host === 'claude.ai' : (detectedPlat === 'gemini' ? host === 'gemini.google.com' : (host === 'chatgpt.com' || host === 'chat.openai.com'));
+            const pathId = u.pathname.match(/\/(?:c|chat|app)\/([a-zA-Z0-9_-]+)/)?.[1] || '';
+            if (!okHost || (targetConvId && pathId && pathId !== targetConvId)) urlInvalid = true;
+          } catch (_) {
+            urlInvalid = true;
+          }
+        }
         // SOURCE IDENTITY INVARIANT:
-        if (targetConvId && (
+        if (urlInvalid || (targetConvId && (
           !acquired.source?.conversationId ||
           acquired.source.conversationId !== targetConvId ||
           (receivedPlat && receivedPlat !== detectedPlat) ||
           (acquired.canonicalId && acquired.canonicalId !== `conv_${detectedPlat}_${targetConvId}`)
-        )) {
+        ))) {
           setStatus('error', 'Mismatch de identidad', 'Los datos recibidos pertenecen a otra conversación o proveedor');
           showFeedback('Error crítico: Mismatch de identidad entre pestaña y captura. Abortado.', true);
           finalizeAcquisition();

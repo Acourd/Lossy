@@ -39,28 +39,88 @@
     return st;
   }
 
+  const EXPECTED_HOSTS_BY_PLATFORM = {
+    chatgpt: new Set(['chatgpt.com', 'chat.openai.com']),
+    claude: new Set(['claude.ai']),
+    gemini: new Set(['gemini.google.com'])
+  };
+
+  function parseUrlIdentity(rawUrl) {
+    if (typeof rawUrl !== 'string' || !rawUrl.trim()) return null;
+    try {
+      const u = new URL(rawUrl.trim());
+      if (u.protocol !== 'http:' && u.protocol !== 'https:') return { host: '', platform: 'invalid', convId: '' };
+      const host = u.hostname.toLowerCase();
+      let platform = 'unknown_host';
+      if (EXPECTED_HOSTS_BY_PLATFORM.chatgpt.has(host)) platform = 'chatgpt';
+      else if (EXPECTED_HOSTS_BY_PLATFORM.claude.has(host)) platform = 'claude';
+      else if (EXPECTED_HOSTS_BY_PLATFORM.gemini.has(host)) platform = 'gemini';
+      const pathMatch = u.pathname.match(/\/(?:c|chat|app)\/([a-zA-Z0-9_-]+)/);
+      return {
+        host,
+        platform,
+        convId: pathMatch && pathMatch[1] ? pathMatch[1] : ''
+      };
+    } catch (_) {
+      return null;
+    }
+  }
+
   function extractIdentityParts(entity) {
     const plat = String(entity?.source?.platform || entity?.platform || '').toLowerCase().trim();
-    let convId = entity?.source?.conversationId ? String(entity.source.conversationId).trim() : '';
-    if (!convId && typeof entity?.source?.url === 'string') {
-      const m = entity.source.url.match(/\/(?:c|chat|app)\/([a-zA-Z0-9_-]+)/);
-      if (m && m[1]) convId = m[1];
-    }
+    const convId = entity?.source?.conversationId ? String(entity.source.conversationId).trim() : '';
+    const urlInfo = parseUrlIdentity(entity?.source?.url);
+    const canonStr = String(entity?.canonicalId || '');
+    const canonM = canonStr.match(/^conv_(chatgpt|claude|gemini)_([a-zA-Z0-9_-]+)$/);
     return {
       platform: plat && plat !== 'unknown' ? plat : '',
-      convId
+      convId,
+      urlInfo,
+      canonicalPlatform: canonM ? canonM[1] : '',
+      canonicalConvId: canonM ? canonM[2] : ''
     };
   }
 
+  function sameConvToken(a, b) {
+    if (!a || !b) return true;
+    return a === b || a.replace(/[-_]/g, '') === b.replace(/[-_]/g, '');
+  }
+
   function hasConflictingIdentity(incoming, existing) {
-    if (!existing || !incoming) return null;
-    const ex = extractIdentityParts(existing);
+    if (!incoming) return null;
     const inc = extractIdentityParts(incoming);
-    if (ex.platform && inc.platform && ex.platform !== inc.platform) {
-      return `SOURCE_IDENTITY_MISMATCH: Proveedor incompatible (${inc.platform} != ${ex.platform}).`;
+    if (inc.canonicalPlatform && inc.platform && inc.canonicalPlatform !== inc.platform) {
+      return `SOURCE_IDENTITY_MISMATCH: CanonicalId (${inc.canonicalPlatform}) incompatible con plataforma (${inc.platform}).`;
     }
-    if (ex.convId && inc.convId && ex.convId !== inc.convId) {
-      return `SOURCE_IDENTITY_MISMATCH: Conversación distinta (${inc.convId} != ${ex.convId}) bajo el mismo canonicalId.`;
+    if (inc.canonicalConvId && inc.convId && !sameConvToken(inc.canonicalConvId, inc.convId)) {
+      return `SOURCE_IDENTITY_MISMATCH: CanonicalId (${inc.canonicalConvId}) incompatible con conversationId (${inc.convId}).`;
+    }
+    const effectivePlat = inc.platform || inc.canonicalPlatform;
+    const effectiveConvId = inc.convId || inc.canonicalConvId;
+    if (inc.urlInfo) {
+      if (effectivePlat && EXPECTED_HOSTS_BY_PLATFORM[effectivePlat] && inc.urlInfo.platform !== effectivePlat) {
+        return `SOURCE_IDENTITY_MISMATCH: Host de URL (${inc.urlInfo.host || 'inválido'}) incompatible con ${effectivePlat}.`;
+      }
+      if (inc.convId && inc.urlInfo.convId && inc.urlInfo.convId !== inc.convId) {
+        return `SOURCE_IDENTITY_MISMATCH: ID en URL (${inc.urlInfo.convId}) distinto al declarado (${inc.convId}).`;
+      }
+      if (!inc.convId && inc.canonicalConvId && inc.urlInfo.convId && !sameConvToken(inc.canonicalConvId, inc.urlInfo.convId)) {
+        return `SOURCE_IDENTITY_MISMATCH: ID en URL (${inc.urlInfo.convId}) distinto al declarado (${inc.canonicalConvId}).`;
+      }
+    }
+    if (!existing) return null;
+    const ex = extractIdentityParts(existing);
+    const exPlat = ex.platform || ex.canonicalPlatform;
+    const exConvId = ex.convId || ex.canonicalConvId || ex.urlInfo?.convId || '';
+    const incEffectiveConv = effectiveConvId || inc.urlInfo?.convId || '';
+    if (exPlat && effectivePlat && exPlat !== effectivePlat) {
+      return `SOURCE_IDENTITY_MISMATCH: Proveedor incompatible (${effectivePlat} != ${exPlat}).`;
+    }
+    if (exConvId && incEffectiveConv && !sameConvToken(exConvId, incEffectiveConv)) {
+      return `SOURCE_IDENTITY_MISMATCH: Conversación distinta (${incEffectiveConv} != ${exConvId}) bajo el mismo canonicalId.`;
+    }
+    if (ex.urlInfo?.convId && inc.urlInfo?.convId && ex.urlInfo.convId !== inc.urlInfo.convId) {
+      return `SOURCE_IDENTITY_MISMATCH: URL de conversación incompatible (${inc.urlInfo.convId} != ${ex.urlInfo.convId}).`;
     }
     return null;
   }

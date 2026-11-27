@@ -95,18 +95,33 @@
       if (sig && sigSet.has(sig)) return true;
     }
     if (!turns || turns.length === 0) return false;
-    const significantTurns = turns.filter(t => t.length >= 16);
+    const parseEntry = (entry) => {
+      const idx = entry.indexOf(':');
+      if (idx === -1) return { role: '', body: entry.trim() };
+      return { role: entry.slice(0, idx), body: entry.slice(idx + 1).trim() };
+    };
+    const isStaleTurnAgainst = (curParsed, prevSet) => {
+      if (!curParsed.body) return true;
+      for (const prevRaw of prevSet) {
+        const prevParsed = parseEntry(prevRaw);
+        if (curParsed.role && prevParsed.role && curParsed.role !== prevParsed.role) continue;
+        if (curParsed.body === prevParsed.body && curParsed.body.length >= 6) return true;
+        if (curParsed.body.length >= 10 && prevParsed.body.length >= 10 &&
+            (prevParsed.body.includes(curParsed.body) || curParsed.body.includes(prevParsed.body))) {
+          return true;
+        }
+      }
+      return false;
+    };
+    const parsedTurns = turns.map(parseEntry);
     for (const [cid, tSet] of foreignTurnsByConv.entries()) {
       if (targetConvId && cid === targetConvId) continue;
-      if (turns.every(t => tSet.has(t))) return true;
-      for (const curTurn of significantTurns) {
-        for (const prevTurn of tSet) {
-          if (curTurn === prevTurn) return true;
-          if (curTurn.length >= 24 && prevTurn.length >= 24 &&
-              (curTurn.startsWith(prevTurn) || prevTurn.startsWith(curTurn))) {
-            return true;
-          }
-        }
+      if (!tSet || tSet.size === 0) continue;
+      const staleFlags = parsedTurns.map(pt => isStaleTurnAgainst(pt, tSet));
+      if (!staleFlags.some(Boolean)) continue;
+      const hasDistinctFreshTurn = parsedTurns.some((pt, i) => !staleFlags[i] && pt.body.length >= 8);
+      if (!hasDistinctFreshTurn) {
+        return true;
       }
     }
     return false;
