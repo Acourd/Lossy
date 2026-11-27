@@ -602,16 +602,11 @@
       };
       const idKeys = new Set(assets.map(a => a.assetId).filter(Boolean));
       const bind = (asset, bytes, availability) => {
-        const magicMime = detectMagicMimeType(bytes);
-        const expectedMimes = [
-          normMimeType(asset.mimeType),
-          mimeFromAssetFilename(asset.filename),
-          parseDataUriMimeType(asset.dataURI)
-        ].filter(m => m && !isGenericMimeType(m));
-        if (magicMime && expectedMimes.some(expected => magicMime !== expected)) {
-          const expectedSummary = expectedMimes.find(m => m !== magicMime) || 'desconocido';
-          asset.warnings = [...(asset.warnings || []), `Firma binaria incompatible (${magicMime} != ${expectedSummary})`];
-          asset.error = asset.warnings[asset.warnings.length - 1];
+        const isEmbedded = availability === ASSET_AVAILABILITY.EMBEDDED;
+        const mismatchReason = validateBinaryForImageAsset(asset, bytes, isEmbedded);
+        if (mismatchReason) {
+          asset.warnings = [...(asset.warnings || []), mismatchReason];
+          asset.error = mismatchReason;
           asset.data = null;
           asset.dataURI = null;
           asset.availability = ASSET_AVAILABILITY.UNAVAILABLE;
@@ -641,7 +636,8 @@
             const { readBytes, mimeType } = await download(asset.sourceURL);
             const respMime = normMimeType(mimeType);
             const extMime = mimeFromAssetFilename(asset.filename);
-            if (asset.mimeType?.startsWith('image/') && respMime && !respMime.startsWith('image/')) {
+            const declaredImage = isDeclaredImageAsset(asset);
+            if (declaredImage && respMime && !respMime.startsWith('image/') && !isGenericMimeType(respMime)) {
               throw new Error('La respuesta no contiene una imagen');
             }
             if (respMime === 'application/pdf' && extMime?.startsWith('image/')) {
@@ -956,6 +952,86 @@
       .replace(/<DisplayAutomation\b[^>]*\/>/gi, '')
       .replace(/!?\[([^\]]*)\]\(<?app:\/\/[^)>]+>?\)/g, (_, label) => label.replace(/^\$/, ''))
       .replace(/\[Imagen: (?:sediment:\/\/|file-)[^\]]*\]/g, ''))).join('\n');
+  }
+
+  function detectMarkupMimeType(bytes) {
+    if (!bytes || typeof bytes.length !== 'number' || bytes.length === 0) return null;
+    const limit = Math.min(bytes.length, 2048);
+    let head = '';
+    for (let i = 0; i < limit; i++) head += String.fromCharCode(bytes[i]);
+    head = head.replace(/^\xEF\xBB\xBF/, '');
+    let trimmed = head.trimStart();
+    while (/^<!--/.test(trimmed)) {
+      const closeIdx = trimmed.indexOf('-->');
+      if (closeIdx === -1) break;
+      trimmed = trimmed.slice(closeIdx + 3).trimStart();
+    }
+    if (/^(?:<!doctype\s+html\b|<html(?=[\s>/])|<head(?=[\s>/])|<body(?=[\s>/])|<script(?=[\s>/])|<style(?=[\s>/])|<title(?=[\s>/])|<meta(?=[\s>/])|<iframe(?=[\s>/])|<object(?=[\s>/])|<embed(?=[\s>/]))/i.test(trimmed)) {
+      return 'text/html';
+    }
+    if (/^<svg(?=[\s>/])/i.test(trimmed)) return 'image/svg+xml';
+    if (/^<\?xml\b/i.test(trimmed)) {
+      return /<svg(?=[\s>/])/i.test(trimmed) ? 'image/svg+xml' : 'application/xml';
+    }
+    return null;
+  }
+
+  function isDeclaredImageAsset(asset) {
+    if (!asset) return false;
+    return Boolean(
+      asset.kind === 'image' ||
+      (typeof asset.sourceType === 'string' && asset.sourceType.includes('image')) ||
+      normMimeType(asset.mimeType).startsWith('image/') ||
+      parseDataUriMimeType(asset.dataURI).startsWith('image/')
+    );
+  }
+
+  function validateBinaryForImageAsset(asset, bytes, isEmbedded) {
+    const magicMime = detectMagicMimeType(bytes);
+    const extMime = mimeFromAssetFilename(asset?.filename);
+    const expectedMimes = [
+      normMimeType(asset?.mimeType),
+      extMime,
+      parseDataUriMimeType(asset?.dataURI)
+    ].filter(m => m && !isGenericMimeType(m));
+    if (magicMime && expectedMimes.some(expected => magicMime !== expected)) {
+      const expectedSummary = expectedMimes.find(m => m !== magicMime) || 'desconocido';
+      return `Firma binaria incompatible (${magicMime} != ${expectedSummary})`;
+    }
+    const declaredImage = isDeclaredImageAsset(asset);
+    const markupMime = detectMarkupMimeType(bytes);
+    if (markupMime && (isEmbedded || declaredImage) && expectedMimes.some(expected => markupMime !== expected)) {
+      const expectedSummary = expectedMimes.find(m => m !== markupMime) || 'imagen';
+      return `Contenido incompatible (${markupMime} != ${expectedSummary})`;
+    }
+    if ((isEmbedded || declaredImage) && isGenericMimeType(normMimeType(asset?.mimeType)) && extMime && extMime.startsWith('image/') && extMime !== 'image/svg+xml' && !magicMime) {
+      return `Firma binaria no válida para imagen (${extMime})`;
+    }
+    return null;
+  }
+
+  function preparePackageZipAssets(assets, assetBinaryMap) {
+    const zipAssets = {};
+    for (const a of (assets || [])) {
+      const bytes = assetBinaryMap.get(a.assetId) || assetBinaryMap.get(a.id) || assetBinaryMap.get(a.filename) || assetBinaryMap.get(a.name);
+      if (!bytes) continue;
+      const extMime = mimeFromAssetFilename(a.filename);
+      const mismatchReason = validateBinaryForImageAsset(a, bytes, Boolean(extMime && extMime.startsWith('image/')));
+      if (mismatchReason) {
+        a.warnings = [...(a.warnings || []), mismatchReason];
+        a.error = mismatchReason;
+        a.data = null;
+        a.dataURI = null;
+        a.availability = ASSET_AVAILABILITY.UNAVAILABLE;
+        if (a.assetId) assetBinaryMap.delete(a.assetId);
+        if (a.id) assetBinaryMap.delete(a.id);
+        if (a.filename) assetBinaryMap.delete(a.filename);
+        if (a.name) assetBinaryMap.delete(a.name);
+        continue;
+      }
+      if (a.filename) zipAssets[`assets/${a.filename}`] = bytes;
+    }
+    return zipAssets;
   }
 
   function markdownResources(msg, index, options) {
@@ -1367,18 +1443,14 @@
           if (exportOptions.imageStrategy === 'package') {
             const zb = deps.zipBuilder || (typeof globalThis !== 'undefined' ? (globalThis.Lossy?.ZipBuilder || globalThis.ZipBuilder) : null);
             if (zb && typeof zb.createZip === 'function') {
+              const zipAssets = preparePackageZipAssets(assets, assetBinaryMap);
               const content = formatAsMarkdown(entity, effectiveProfile, { ...exportOptions, assets, assetBinaryMap, imageStrategy: 'package' });
               const manifest = buildAssetManifest(entity, assets);
               const zipFiles = {
                 [rawBase]: content,
-                'manifest.json': JSON.stringify(manifest, null, 2)
+                'manifest.json': JSON.stringify(manifest, null, 2),
+                ...zipAssets
               };
-              for (const a of assets) {
-                const bytes = assetBinaryMap.get(a.assetId) || assetBinaryMap.get(a.id) || assetBinaryMap.get(a.filename) || assetBinaryMap.get(a.name);
-                if (bytes) {
-                  if (a.filename) zipFiles[`assets/${a.filename}`] = bytes;
-                }
-              }
 
               const zipBytes = zb.createZip(zipFiles);
               return {
@@ -1411,18 +1483,14 @@
           if (exportOptions.imageStrategy === 'package') {
             const zb = deps.zipBuilder || (typeof globalThis !== 'undefined' ? (globalThis.Lossy?.ZipBuilder || globalThis.ZipBuilder) : null);
             if (zb && typeof zb.createZip === 'function') {
+              const zipAssets = preparePackageZipAssets(assets, assetBinaryMap);
               const content = formatAsTxt(entity, effectiveProfile, { ...exportOptions, assets, assetBinaryMap, imageStrategy: 'package' });
               const manifest = buildAssetManifest(entity, assets);
               const zipFiles = {
                 [rawBase]: content,
-                'manifest.json': JSON.stringify(manifest, null, 2)
+                'manifest.json': JSON.stringify(manifest, null, 2),
+                ...zipAssets
               };
-              for (const a of assets) {
-                const bytes = assetBinaryMap.get(a.assetId) || assetBinaryMap.get(a.id) || assetBinaryMap.get(a.filename) || assetBinaryMap.get(a.name);
-                if (bytes) {
-                  if (a.filename) zipFiles[`assets/${a.filename}`] = bytes;
-                }
-              }
 
               const zipBytes = zb.createZip(zipFiles);
               return {

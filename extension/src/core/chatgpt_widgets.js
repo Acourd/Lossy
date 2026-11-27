@@ -1007,17 +1007,68 @@
   }
 
   /**
-   * Encuentra bloques DIL balanceados de nivel superior (incluyendo directivas {@body ...} precedentes).
+   * Construye una copia de longitud 1:1 donde los tramos de código inline (single o multi-línea,
+   * sin cruzar líneas en blanco) y las etiquetas escapadas con '\' (`\<`) quedan neutralizados con espacios.
+   */
+  function sanitizeForWidgetScan(segment) {
+    const s = String(segment || '');
+    const chars = s.split('');
+    const isEscaped = idx => {
+      let bs = 0;
+      for (let k = idx - 1; k >= 0 && s[k] === '\\'; k--) bs++;
+      return (bs % 2) === 1;
+    };
+    let i = 0;
+    while (i < s.length) {
+      if (s[i] === '`' && !isEscaped(i)) {
+        let ticks = 0;
+        while (i + ticks < s.length && s[i + ticks] === '`') ticks++;
+        const delim = '`'.repeat(ticks);
+        let end = i + ticks;
+        let found = -1;
+        while (end < s.length) {
+          const pos = s.indexOf(delim, end);
+          if (pos === -1) break;
+          if (s[pos - 1] !== '`' && s[pos + ticks] !== '`') {
+            if (!/\r?\n[ \t]*\r?\n/.test(s.slice(i + ticks, pos))) {
+              found = pos;
+            }
+            break;
+          }
+          end = pos + 1;
+        }
+        if (found !== -1) {
+          for (let k = i; k < found + ticks; k++) {
+            if (chars[k] !== '\n') chars[k] = ' ';
+          }
+          i = found + ticks;
+          continue;
+        }
+        i += ticks;
+        continue;
+      }
+      if (s[i] === '<' && isEscaped(i)) {
+        chars[i] = ' ';
+      }
+      i++;
+    }
+    return chars.join('');
+  }
+
+  /**
+   * Encuentra bloques DIL balanceados de nivel superior (incluyendo directivas {@body ...} precedentes),
+   * ignorando código inline y etiquetas escapadas con '\'.
    */
   function findTopLevelWidgetRanges(segment) {
     const ranges = [];
+    const scanSegment = sanitizeForWidgetScan(segment);
     const openRe = /((?:(?:\{@body\s+[^}]+\}\s*)+)?)<(grid|card|stack|box|row|svg)(?=[\s/>])[^>]*>/gi;
     let match;
     let searchFrom = 0;
 
-    while (searchFrom < segment.length) {
+    while (searchFrom < scanSegment.length) {
       openRe.lastIndex = searchFrom;
-      match = openRe.exec(segment);
+      match = openRe.exec(scanSegment);
       if (!match) break;
 
       const startIdx = match.index;
@@ -1028,7 +1079,7 @@
       let depth = 0;
       let endIdx = -1;
       let tm;
-      while ((tm = tagRe.exec(segment)) !== null) {
+      while ((tm = tagRe.exec(scanSegment)) !== null) {
         const isSelfClosing = tm[0].endsWith('/>');
         if (tm[1]) {
           depth--;
@@ -1108,22 +1159,97 @@
     let containers = [];
     let prevLineBlank = true;
     let widgetDepth = 0;
+    let inlineOpenTicks = 0;
+    let pendingInlineRest = '';
+    let pendingSegCount = 0;
 
-    const updateWidgetDepth = (s) => {
-      transformOutsideInlineCode(s, plain => {
-        const openRe = /<(grid|card|row|col|stack|box|flex|svg)\b[^>]*>/gi;
-        const closeRe = /<\/(grid|card|row|col|stack|box|flex|svg)\s*>/gi;
-        let m;
-        while ((m = openRe.exec(plain)) !== null) {
-          if (m.index > 0 && plain[m.index - 1] === '\\') continue;
-          if (!/\/>\s*$/.test(m[0])) widgetDepth++;
-        }
-        while ((m = closeRe.exec(plain)) !== null) {
-          if (m.index > 0 && plain[m.index - 1] === '\\') continue;
-          if (widgetDepth > 0) widgetDepth--;
-        }
+    const isEscapedAt = (str, idx) => {
+      let bs = 0;
+      for (let k = idx - 1; k >= 0 && str[k] === '\\'; k--) bs++;
+      return (bs % 2) === 1;
+    };
+
+    const updateWidgetDepthPlain = (plain) => {
+      const openRe = /<(grid|card|row|col|stack|box|flex|svg)\b[^>]*>/gi;
+      const closeRe = /<\/(grid|card|row|col|stack|box|flex|svg)\s*>/gi;
+      let m;
+      while ((m = openRe.exec(plain)) !== null) {
+        if (isEscapedAt(plain, m.index)) continue;
+        if (!/\/>\s*$/.test(m[0])) widgetDepth++;
+      }
+      while ((m = closeRe.exec(plain)) !== null) {
+        if (isEscapedAt(plain, m.index)) continue;
+        if (widgetDepth > 0) widgetDepth--;
+      }
+    };
+
+    const flushPendingInline = () => {
+      if (inlineOpenTicks <= 0) return;
+      const replay = pendingInlineRest;
+      inlineOpenTicks = 0;
+      pendingInlineRest = '';
+      if (!replay) return;
+      transformOutsideInlineCode(replay, plain => {
+        updateWidgetDepthPlain(plain);
         return plain;
       });
+    };
+
+    const updateWidgetDepth = (s) => {
+      let src = String(s || '');
+      if (inlineOpenTicks > 0) {
+        const delim = '`'.repeat(inlineOpenTicks);
+        let pos = 0;
+        let found = -1;
+        while (pos < src.length) {
+          const hit = src.indexOf(delim, pos);
+          if (hit === -1) break;
+          if (src[hit - 1] !== '`' && src[hit + inlineOpenTicks] !== '`') {
+            found = hit;
+            break;
+          }
+          pos = hit + 1;
+        }
+        if (found === -1) {
+          pendingInlineRest += '\n' + src;
+          return;
+        }
+        src = src.slice(found + inlineOpenTicks);
+        inlineOpenTicks = 0;
+        pendingInlineRest = '';
+      }
+      let idx = 0;
+      let plainBuf = '';
+      while (idx < src.length) {
+        if (src[idx] === '`' && !isEscapedAt(src, idx)) {
+          let ticks = 0;
+          while (idx + ticks < src.length && src[idx + ticks] === '`') ticks++;
+          const delim = '`'.repeat(ticks);
+          let end = idx + ticks;
+          let found = -1;
+          while (end < src.length) {
+            const hit = src.indexOf(delim, end);
+            if (hit === -1) break;
+            if (src[hit - 1] !== '`' && src[hit + ticks] !== '`') {
+              found = hit;
+              break;
+            }
+            end = hit + 1;
+          }
+          if (found !== -1) {
+            if (plainBuf) { updateWidgetDepthPlain(plainBuf); plainBuf = ''; }
+            idx = found + ticks;
+            continue;
+          }
+          if (plainBuf) { updateWidgetDepthPlain(plainBuf); plainBuf = ''; }
+          inlineOpenTicks = ticks;
+          pendingInlineRest = src.slice(idx + ticks);
+          pendingSegCount = segments.length;
+          return;
+        }
+        plainBuf += src[idx++];
+      }
+      if (plainBuf) updateWidgetDepthPlain(plainBuf);
     };
 
     const flush = isCode => {
@@ -1315,8 +1441,12 @@
         continue;
       }
 
+      if (inlineOpenTicks > 0 && (isBlank || hadMarker || curBqCount !== 0 || segments.length !== pendingSegCount)) {
+        flushPendingInline();
+      }
       const trimmedAfterLead = rest.slice(lead.idx);
-      if ((hadMarker || prevLineBlank) && lead.cols >= 4 && !isBlank && !(curBqCount === 0 && (widgetDepth > 0 || isWidgetTagLine(trimmedAfterLead)))) {
+      if ((hadMarker || prevLineBlank) && lead.cols >= 4 && !isBlank && !(curBqCount === 0 && (widgetDepth > 0 || (inlineOpenTicks === 0 && isWidgetTagLine(trimmedAfterLead))))) {
+        flushPendingInline();
         flush(false);
         inIndented = true;
         indentedBqCount = curBqCount;
@@ -1381,7 +1511,12 @@
         while (end < s.length) {
           const pos = s.indexOf(delim, end);
           if (pos === -1) break;
-          if (s[pos - 1] !== '`' && s[pos + ticks] !== '`') { found = pos; break; }
+          if (s[pos - 1] !== '`' && s[pos + ticks] !== '`') {
+            if (!/\r?\n[ \t]*\r?\n/.test(s.slice(i + ticks, pos))) {
+              found = pos;
+            }
+            break;
+          }
           end = pos + 1;
         }
         if (found !== -1) {
