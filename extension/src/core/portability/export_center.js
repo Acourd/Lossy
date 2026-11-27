@@ -253,11 +253,13 @@
         // 2. Punteros de imagen en content.parts (ChatGPT DAG)
         if (Array.isArray(msg.content?.parts)) {
           msg.content.parts.forEach((part, pIdx) => {
-            if (part && typeof part === 'object' && (part.content_type === 'image_asset_pointer' || part.asset_pointer)) {
-              const ptr = part.asset_pointer || part.id || `img_ptr_${mIdx}_${pIdx}`;
+            if (part && typeof part === 'object' && (part.content_type === 'image_asset_pointer' || (typeof part.asset_pointer === 'string' && part.asset_pointer))) {
+              const ptr = (typeof part.asset_pointer === 'string' && part.asset_pointer)
+                ? part.asset_pointer
+                : ((typeof part.id === 'string' && part.id) ? part.id : `img_ptr_${mIdx}_${pIdx}`);
               if (index.pointers.has(ptr)) return;
               const rawPtrId = `ptr_${mIdx}_${pIdx}`;
-              const scopedPtrKey = `${msgId}::${rawPtrId}`;
+              const scopedPtrKey = `ptr::${msgId}::${pIdx}`;
               if (seenKeys.has(scopedPtrKey)) return;
               seenKeys.add(scopedPtrKey);
               const assetId = allocateUniqueAssetId(rawPtrId, mIdx, pIdx);
@@ -285,17 +287,21 @@
           });
         }
 
-        // 3. Detección de imágenes Markdown inline ![alt](url)
+        // 3. Detección de imágenes Markdown inline ![alt](url) (excluyendo bloques cercados y código inline)
         const text = typeof msg.text === 'string' ? msg.text : (msg.content?.text || '');
+        const nonCodeText = splitFencedCodeSegments(text)
+          .filter(seg => !seg.isCode)
+          .map(seg => stripInlineCodeSpans(seg.text))
+          .join('\n');
         const mdImgRegex = /!\[([^\]]*)\]\(([^)]+)\)/g;
         let match;
         let imgIdx = 0;
-        while ((match = mdImgRegex.exec(text)) !== null) {
+        while ((match = mdImgRegex.exec(nonCodeText)) !== null) {
           const imgUrl = match[2].replace(/^<|>$/g, '');
           if (index.locations.has(imgUrl)) continue;
           const isInlineData = imgUrl.startsWith('data:');
           const rawMdId = `md_img_${mIdx}_${imgIdx++}`;
-          const scopedKey = `${msgId}::${rawMdId}`;
+          const scopedKey = `md::${msgId}::${imgIdx}`;
           if (seenKeys.has(scopedKey)) continue;
           seenKeys.add(scopedKey);
           const assetId = allocateUniqueAssetId(rawMdId, mIdx, imgIdx);
@@ -471,6 +477,39 @@
     return /^\{[\s\S]*"path"\s*:\s*"\/Automations\//i.test(t);
   }
 
+  function stripInlineCodeSpans(str) {
+    const s = String(str || '');
+    let out = '';
+    let i = 0;
+    while (i < s.length) {
+      if (s[i] === '`') {
+        let ticks = 0;
+        while (i + ticks < s.length && s[i + ticks] === '`') ticks++;
+        const delim = '`'.repeat(ticks);
+        let end = i + ticks;
+        let found = -1;
+        while (end < s.length) {
+          const pos = s.indexOf(delim, end);
+          if (pos === -1) break;
+          if (s[pos - 1] !== '`' && s[pos + ticks] !== '`') {
+            found = pos;
+            break;
+          }
+          end = pos + 1;
+        }
+        if (found !== -1) {
+          i = found + ticks;
+          continue;
+        }
+        out += delim;
+        i += ticks;
+        continue;
+      }
+      out += s[i++];
+    }
+    return out;
+  }
+
   function splitFencedCodeSegments(text) {
     const src = String(text || '').replace(/\r\n/g, '\n');
     const lines = src.split('\n');
@@ -479,6 +518,7 @@
     let inFence = false;
     let fenceChar = '';
     let fenceLen = 0;
+    let fenceBqDepth = 0;
 
     const flush = isCode => {
       if (buf.length) {
@@ -486,27 +526,50 @@
         buf = [];
       }
     };
+    const stripBq = line => {
+      let rest = line;
+      let depth = 0;
+      while (true) {
+        const m = rest.match(/^ {0,3}>[ \t]?/);
+        if (!m) break;
+        depth++;
+        rest = rest.slice(m[0].length);
+      }
+      return { depth, rest };
+    };
 
     for (const line of lines) {
+      const { depth, rest } = stripBq(line);
       if (!inFence) {
-        const openM = line.match(/^ {0,3}(`{3,}|~{3,})(.*)$/);
+        const openM = rest.match(/^ {0,3}(`{3,}|~{3,})(.*)$/);
         if (openM && !(openM[1][0] === '`' && openM[2].includes('`'))) {
           flush(false);
           inFence = true;
           fenceChar = openM[1][0];
           fenceLen = openM[1].length;
+          fenceBqDepth = depth;
           buf.push(line);
           continue;
         }
         buf.push(line);
       } else {
+        if (fenceBqDepth > 0 && depth < fenceBqDepth) {
+          flush(true);
+          inFence = false;
+          fenceChar = '';
+          fenceLen = 0;
+          fenceBqDepth = 0;
+          buf.push(line);
+          continue;
+        }
         buf.push(line);
-        const closeM = line.match(/^ {0,3}(`{3,}|~{3,})[ \t]*$/);
+        const closeM = rest.match(/^ {0,3}(`{3,}|~{3,})[ \t]*$/);
         if (closeM && closeM[1][0] === fenceChar && closeM[1].length >= fenceLen) {
           flush(true);
           inFence = false;
           fenceChar = '';
           fenceLen = 0;
+          fenceBqDepth = 0;
         }
       }
     }
@@ -577,7 +640,8 @@
   function formatMessageMarkdown(message, index, options = {}) {
     const text = markdownResources(message, index, options);
     const blocks = message.codeBlocks || message.content?.codeBlocks || [];
-    const codePart = !text.includes('```') ? blocks.map(block => '\n\n```' + (block.language || '') + '\n' + (block.code || '') + '\n```').join('') : '';
+    const hasInlineFence = splitFencedCodeSegments(text).some(seg => seg.isCode);
+    const codePart = !hasInlineFence ? blocks.map(block => '\n\n```' + (block.language || '') + '\n' + (block.code || '') + '\n```').join('') : '';
     const citationsPart = options.includeCitations !== false ? formatCitationsMarkdown(message) : '';
     return text + codePart + citationsPart;
   }
@@ -627,7 +691,7 @@
         const text = (markdownResources(msg, idx, options) + formatCitationsMarkdown(msg)).trim();
         lines.push(`## ${author}`, '', text, '');
         const codeBlocks = Array.isArray(msg.codeBlocks) ? msg.codeBlocks : (Array.isArray(msg.content?.codeBlocks) ? msg.content.codeBlocks : []);
-        if (codeBlocks.length > 0 && !text.includes('```')) {
+        if (codeBlocks.length > 0 && !splitFencedCodeSegments(text).some(seg => seg.isCode)) {
           codeBlocks.forEach(cb => {
             lines.push(`\`\`\`${cb.language || ''}`, cb.code || '', '```', '');
           });
@@ -663,7 +727,7 @@
         lines.push(`## ${roleLabel}`, '', text, '');
 
         const codeBlocks = Array.isArray(msg.codeBlocks) ? msg.codeBlocks : (Array.isArray(msg.content?.codeBlocks) ? msg.content.codeBlocks : []);
-        if (codeBlocks.length > 0 && !text.includes('```')) {
+        if (codeBlocks.length > 0 && !splitFencedCodeSegments(text).some(seg => seg.isCode)) {
           codeBlocks.forEach(cb => {
             lines.push(`\`\`\`${cb.language || ''}`, cb.code || '', '```', '');
           });
@@ -697,7 +761,7 @@
       lines.push(`### ${author}${timeStr}`, '', text, '');
 
       const codeBlocks = Array.isArray(msg.codeBlocks) ? msg.codeBlocks : (Array.isArray(msg.content?.codeBlocks) ? msg.content.codeBlocks : []);
-      if (codeBlocks.length > 0 && !text.includes('```')) {
+      if (codeBlocks.length > 0 && !splitFencedCodeSegments(text).some(seg => seg.isCode)) {
         codeBlocks.forEach(cb => {
           lines.push(`\`\`\`${cb.language || ''}`, cb.code || '', '```', '');
         });
@@ -749,7 +813,7 @@
       lines.push(`${roleLabel}:`, text, '');
 
       const codeBlocks = Array.isArray(msg.codeBlocks) ? msg.codeBlocks : (Array.isArray(msg.content?.codeBlocks) ? msg.content.codeBlocks : []);
-      if (codeBlocks.length > 0 && !text.includes('```')) {
+      if (codeBlocks.length > 0 && !splitFencedCodeSegments(text).some(seg => seg.isCode)) {
         codeBlocks.forEach(cb => {
           lines.push(`--- CODE [${cb.language || 'plaintext'}] ---`, cb.code || '', '-------------------------', '');
         });

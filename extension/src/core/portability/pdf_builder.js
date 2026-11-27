@@ -267,8 +267,14 @@
     // Browser codecs decode PNG alpha, palette PNG and WebP before native PDF assembly.
     if (typeof createImageBitmap !== 'function') return buildPdf(entity, options);
     const assetMap = new Map(options.assetMap instanceof Map ? options.assetMap : Object.entries(options.assetMap || {}));
+    const idKeys = new Set();
+    for (const a of options.assets || []) {
+      if (a?.assetId) idKeys.add(a.assetId);
+      if (a?.id) idKeys.add(a.id);
+    }
+    const seenFilenames = new Set();
     for (const asset of options.assets || []) {
-      const bytes=assetMap.get(asset.assetId) || asset.data;
+      const bytes = (asset.assetId && assetMap.get(asset.assetId)) || (asset.id && assetMap.get(asset.id)) || asset.data;
       if (!(bytes instanceof Uint8Array) || (bytes[0]===255 && bytes[1]===216)) continue;
       let bitmap;
       try {
@@ -280,7 +286,12 @@
         const blob=canvas.convertToBlob ? await canvas.convertToBlob({type:'image/jpeg',quality:0.96}) : await new Promise(resolve=>canvas.toBlob(resolve,'image/jpeg',0.96));
         if (!blob) throw new Error('No se pudo convertir la imagen');
         const converted=new Uint8Array(await blob.arrayBuffer());
-        for (const key of [asset.assetId,asset.id,asset.filename]) if (key) assetMap.set(key,converted);
+        if (asset.assetId) assetMap.set(asset.assetId, converted);
+        if (asset.id) assetMap.set(asset.id, converted);
+        if (asset.filename && !idKeys.has(asset.filename) && !seenFilenames.has(asset.filename) && !assetMap.has(asset.filename)) {
+          assetMap.set(asset.filename, converted);
+          seenFilenames.add(asset.filename);
+        }
       } catch (error) {
         asset.warnings = [...(asset.warnings || []), 'Imagen no decodificable: ' + error.message];
       } finally { bitmap?.close(); }

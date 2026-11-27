@@ -81,17 +81,35 @@
         restored.downloadable = true;
         return restored;
       });
-      if (preserveOmitted && prevList.length > 0 && hydrated.length === 0) {
-        const seen = new Set();
+      if (preserveOmitted && prevList.length > 0) {
+        const presentKeys = new Set(hydrated.map(a => fileIdentity(a) || a.id || a.assetId || a.filename).filter(Boolean));
         for (const prev of prevList) {
           if (!hasBinary(prev)) continue;
           const pk = fileIdentity(prev) || prev.id || prev.assetId || prev.filename;
-          if (pk && seen.has(pk)) continue;
-          if (pk) seen.add(pk);
+          if (pk && (matchedPrevIds.has(pk) || presentKeys.has(pk))) continue;
+          if (pk) presentKeys.add(pk);
           hydrated.push(prev);
         }
       }
       return hydrated;
+    };
+    const mergeMonotonicCodeBlocks = (oldBlocks, newBlocks) => {
+      const a = Array.isArray(oldBlocks) ? oldBlocks : [];
+      const b = Array.isArray(newBlocks) ? newBlocks : [];
+      if (!a.length) return newBlocks;
+      if (!b.length) return a;
+      const maxLen = Math.max(a.length, b.length);
+      const out = [];
+      for (let i = 0; i < maxLen; i++) {
+        const prev = a[i];
+        const next = b[i];
+        if (!prev) { out.push(next); continue; }
+        if (!next) { out.push(prev); continue; }
+        const prevCode = typeof prev.code === 'string' ? prev.code : '';
+        const nextCode = typeof next.code === 'string' ? next.code : '';
+        out.push(prevCode.length > nextCode.length ? prev : next);
+      }
+      return out;
     };
     const msgTextOf = m => (typeof m?.text === 'string' ? m.text : (typeof m?.content?.text === 'string' ? m.content.text : ''));
     const mergeSingleMsg = (old, message) => {
@@ -116,6 +134,15 @@
             mergedMsg.content = { ...(mergedMsg.content || {}), text: oldText };
           }
         }
+        if (Array.isArray(old.codeBlocks) && old.codeBlocks.length > 0) {
+          mergedMsg.codeBlocks = mergeMonotonicCodeBlocks(old.codeBlocks, message.codeBlocks);
+        }
+        if (Array.isArray(old.content?.codeBlocks) && old.content.codeBlocks.length > 0) {
+          mergedMsg.content = {
+            ...(mergedMsg.content || {}),
+            codeBlocks: mergeMonotonicCodeBlocks(old.content.codeBlocks, message.content?.codeBlocks)
+          };
+        }
       }
       return mergedMsg;
     };
@@ -123,20 +150,51 @@
     const oldById = new Map(existingMsgs.filter(m => m && m.id).map(m => [m.id, m]));
     let messages;
     if (!incoming.forceOverwrite && existingCount > 0) {
+      const existingIndexById = new Map();
+      existingMsgs.forEach((m, i) => {
+        if (m && m.id && !existingIndexById.has(m.id)) existingIndexById.set(m.id, i);
+      });
+      const overlaps = [];
+      incomingMsgs.forEach((inc, incIdx) => {
+        if (!inc || !inc.id || !existingIndexById.has(inc.id)) return;
+        const oldIdx = existingIndexById.get(inc.id);
+        const old = existingMsgs[oldIdx];
+        if (!old.role || !inc.role || old.role === inc.role) {
+          overlaps.push({ incIdx, oldIdx });
+        }
+      });
       const incomingIds = new Set(incomingMsgs.filter(m => m && m.id).map(m => m.id));
       const missingOld = existingMsgs.filter(m => m && m.id && !incomingIds.has(m.id));
-      const hasOverlap = existingMsgs.some(m => m && m.id && incomingIds.has(m.id));
+      const hasOverlap = overlaps.length > 0;
       const isAuthoritativeUpgrade = !hasOverlap && incomingCount > existingCount && !isCompleteStatus(existing.integrity?.status);
       if (missingOld.length > 0 && !isAuthoritativeUpgrade) {
-        // Incomplete capture or shifted window (e.g. [a,b] -> [b,c]): preserve existing history and merge overlapping/new messages
-        const out = existingMsgs.map(old => {
-          const inc = old?.id ? incomingMsgs.find(m => m && m.id === old.id && m.role === old.role) : null;
-          return inc ? mergeSingleMsg(old, inc) : old;
-        });
-        const existingIdSet = new Set(existingMsgs.filter(m => m && m.id).map(m => m.id));
-        for (const inc of incomingMsgs) {
-          if (inc && (!inc.id || !existingIdSet.has(inc.id))) out.push(inc);
+        // Anchor-preserving chronological merge: preserves prior messages, merges overlaps, places leading/middle/trailing incoming messages in order
+        const mergedExisting = existingMsgs.slice();
+        const overlapByIncIdx = new Map(overlaps.map(o => [o.incIdx, o.oldIdx]));
+        const insertedBefore = new Map();
+        const trailing = [];
+        for (let incIdx = 0; incIdx < incomingMsgs.length; incIdx++) {
+          const inc = incomingMsgs[incIdx];
+          if (overlapByIncIdx.has(incIdx)) {
+            const oldIdx = overlapByIncIdx.get(incIdx);
+            mergedExisting[oldIdx] = mergeSingleMsg(existingMsgs[oldIdx], inc);
+          } else {
+            const nextOv = overlaps.find(o => o.incIdx > incIdx);
+            if (nextOv) {
+              if (!insertedBefore.has(nextOv.oldIdx)) insertedBefore.set(nextOv.oldIdx, []);
+              insertedBefore.get(nextOv.oldIdx).push(inc);
+            } else {
+              trailing.push(inc);
+            }
+          }
         }
+        const out = [];
+        for (let oldIdx = 0; oldIdx < mergedExisting.length; oldIdx++) {
+          const before = insertedBefore.get(oldIdx);
+          if (before) out.push(...before);
+          out.push(mergedExisting[oldIdx]);
+        }
+        if (trailing.length) out.push(...trailing);
         messages = out;
       } else {
         messages = incomingMsgs.map(message => mergeSingleMsg(oldById.get(message?.id), message));

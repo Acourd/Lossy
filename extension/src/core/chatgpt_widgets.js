@@ -1101,6 +1101,7 @@
     let inFence = false;
     let fenceChar = '';
     let fenceLen = 0;
+    let fenceBqDepth = 0;
 
     const flush = isCode => {
       if (buf.length) {
@@ -1108,27 +1109,50 @@
         buf = [];
       }
     };
+    const stripBq = line => {
+      let rest = line;
+      let depth = 0;
+      while (true) {
+        const m = rest.match(/^ {0,3}>[ \t]?/);
+        if (!m) break;
+        depth++;
+        rest = rest.slice(m[0].length);
+      }
+      return { depth, rest };
+    };
 
     for (const line of lines) {
+      const { depth, rest } = stripBq(line);
       if (!inFence) {
-        const openM = line.match(/^ {0,3}(`{3,}|~{3,})(.*)$/);
+        const openM = rest.match(/^ {0,3}(`{3,}|~{3,})(.*)$/);
         if (openM && !(openM[1][0] === '`' && openM[2].includes('`'))) {
           flush(false);
           inFence = true;
           fenceChar = openM[1][0];
           fenceLen = openM[1].length;
+          fenceBqDepth = depth;
           buf.push(line);
           continue;
         }
         buf.push(line);
       } else {
+        if (fenceBqDepth > 0 && depth < fenceBqDepth) {
+          flush(true);
+          inFence = false;
+          fenceChar = '';
+          fenceLen = 0;
+          fenceBqDepth = 0;
+          buf.push(line);
+          continue;
+        }
         buf.push(line);
-        const closeM = line.match(/^ {0,3}(`{3,}|~{3,})[ \t]*$/);
+        const closeM = rest.match(/^ {0,3}(`{3,}|~{3,})[ \t]*$/);
         if (closeM && closeM[1][0] === fenceChar && closeM[1].length >= fenceLen) {
           flush(true);
           inFence = false;
           fenceChar = '';
           fenceLen = 0;
+          fenceBqDepth = 0;
         }
       }
     }

@@ -33,6 +33,17 @@
    if(cb.code!==undefined&&cb.code!==null&&typeof cb.code!=='string')throw Error('Contenido de código inválido');
   }
  }
+ function validateParts(list){
+  if(list===undefined||list===null)return;
+  if(!Array.isArray(list)||list.length>5000)throw Error('Lista de partes de contenido inválida');
+  for(const part of list){
+   if(part&&typeof part==='object'&&!Array.isArray(part)){
+    for(const k of ['asset_pointer','id','content_type','text']){
+     if(part[k]!==undefined&&part[k]!==null&&typeof part[k]!=='string')throw Error('Campo de parte inválido: '+k);
+    }
+   }
+  }
+ }
  function validateEntity(entity){
   if(!entity||typeof entity!=='object'||typeof entity.canonicalId!=='string'||!entity.canonicalId||entity.canonicalId.length>300)throw Error('Una fuente del proyecto no tiene un identificador válido');
   if(entity.title!==undefined&&entity.title!==null&&(typeof entity.title!=='string'||entity.title.length>2000))throw Error('Título de fuente inválido');
@@ -42,7 +53,7 @@
    if(plat!==undefined&&plat!==null&&(typeof plat!=='string'||!ALLOWED_PLATFORMS.has(plat.toLowerCase())))throw Error('Plataforma de fuente inválida');
   }
   validateAttachments(entity.attachments);
-  for(const m of messages){validateAttachments(m.attachments);validateAttachments(m.content?.attachments);validateCodeBlocks(m.codeBlocks);validateCodeBlocks(m.content?.codeBlocks);}
+  for(const m of messages){validateAttachments(m.attachments);validateAttachments(m.content?.attachments);validateCodeBlocks(m.codeBlocks);validateCodeBlocks(m.content?.codeBlocks);validateParts(m.content?.parts);}
   for(const k of ['conversationMessageCount','visibleMessageCount','sourceNodeCount'])if(!isSafeCount(entity[k]))throw Error('Métrica numérica inválida: '+k);
   if(entity.nodeMetrics!==undefined&&entity.nodeMetrics!==null){
    if(typeof entity.nodeMetrics!=='object'||Array.isArray(entity.nodeMetrics))throw Error('Métricas de nodo inválidas');

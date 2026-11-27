@@ -254,13 +254,16 @@
   }
 
   function stableTurnHash(str) {
-    let h = 2166136261;
+    let h1 = 2166136261;
+    let h2 = 5381;
     const s = String(str || '');
     for (let i = 0; i < s.length; i++) {
-      h ^= s.charCodeAt(i);
-      h = Math.imul(h, 16777619);
+      const c = s.charCodeAt(i);
+      h1 ^= c;
+      h1 = Math.imul(h1, 16777619);
+      h2 = Math.imul(h2, 33) ^ c;
     }
-    return (h >>> 0).toString(36);
+    return `${(h1 >>> 0).toString(36)}_${(h2 >>> 0).toString(36)}_${s.length.toString(36)}`;
   }
 
   function buildCanonical(platform, label, convId, url, title, turns) {
@@ -272,7 +275,7 @@
       const text = normalizeText(t.text);
       const codeBlocks = extractCodeBlocks(text);
       const attachments = Array.isArray(t.attachments) ? t.attachments : [];
-      const baseKey = `${t.role}|${text.slice(0, 160)}|${attachments.map(a => a.sourceURL || a.url || a.filename || '').join(',')}`;
+      const baseKey = `${t.role}|${text}|${attachments.map(a => a.sourceURL || a.url || a.filename || '').join(',')}`;
       const occ = (seenTurnKeys.get(baseKey) || 0) + 1;
       seenTurnKeys.set(baseKey, occ);
       const msgId = `msg_${platform}_${t.role}_${stableTurnHash(baseKey)}_${occ}`;
