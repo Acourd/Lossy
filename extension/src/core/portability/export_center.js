@@ -179,6 +179,24 @@
         seenMsgAssetIds.add(candidate);
         return candidate;
       };
+      const normMime = (m) => {
+        const base = String(m || '').split(';')[0].trim().toLowerCase();
+        return base === 'image/jpg' ? 'image/jpeg' : base;
+      };
+      const isGenericMime = (m) => !m || m === 'application/octet-stream';
+      const areMimesCompatible = (target, att, dataURI) => {
+        const candMime = normMime(target?.mimeType);
+        const attMime = normMime(att?.mimeType);
+        const uriMime = (typeof dataURI === 'string' && dataURI.startsWith('data:'))
+          ? normMime(dataURI.slice(5).split(';')[0])
+          : '';
+        if (attMime && !isGenericMime(candMime) && !isGenericMime(attMime) && attMime !== candMime) return false;
+        if (uriMime && !isGenericMime(candMime) && !isGenericMime(uriMime) && uriMime !== candMime) return false;
+        if (att?.kind && target?.mimeType && !isGenericMime(candMime)) {
+          if (att.kind === 'image' && !candMime.startsWith('image/')) return false;
+        }
+        return true;
+      };
       let activeMessageIndex = null;
       const emittedMsgExplicitIds = new Set();
       const emittedByLocation = { fid: new Map(), ptr: new Map(), url: new Map(), uri: new Map() };
@@ -225,15 +243,12 @@
           const resolvedFileId = (typeof att.fileId === 'string' && att.fileId) || safePtr?.replace(/^(?:sediment|file-service):\/\//, '') || null;
           const isBareHydrationStub = !att.assetId && !att.filename && !att.name && !remoteURL && !att.fileId && !att.assetPointer && !att.kind && Boolean(dataURI) && !localBlob;
           let existing = resolvedFileId ? index.fileIds.get(resolvedFileId) : index.assetIds.get(rawAssetId);
+          if (existing && !areMimesCompatible(existing, att, dataURI)) {
+            existing = null;
+          }
           if (!existing && isBareHydrationStub && index.fileIds.has(rawAssetId)) {
             const candidate = index.fileIds.get(rawAssetId);
-            const candMime = String(candidate?.mimeType || '').split(';')[0].trim().toLowerCase();
-            const attMime = String(att.mimeType || '').split(';')[0].trim().toLowerCase();
-            const uriMime = (typeof dataURI === 'string' && dataURI.startsWith('data:'))
-              ? dataURI.slice(5).split(';')[0].trim().toLowerCase()
-              : '';
-            const mimeCompatible = (!attMime || !candMime || attMime === candMime) && (!uriMime || !candMime || uriMime === candMime);
-            if (candidate && !candidate.dataURI && !candidate.data && mimeCompatible) {
+            if (candidate && !candidate.dataURI && !candidate.data && areMimesCompatible(candidate, att, dataURI)) {
               existing = candidate;
             }
           }
@@ -242,14 +257,14 @@
             if (!existing.data && localBlob) { existing.data = localBlob; existing.availability = 'embedded'; }
             return;
           }
-          const scopedKey = `${msgId}::${rawAssetId}`;
+          const scopedKey = `msg::${msgId}::${aIdx}::${rawAssetId}`;
           if (seenKeys.has(scopedKey)) return;
           seenKeys.add(scopedKey);
           emittedMsgExplicitIds.add(rawAssetId);
           const assetId = allocateUniqueAssetId(rawAssetId, mIdx, aIdx);
 
           const mimeType = att.mimeType || (att.kind === 'image' ? 'image/png' : 'application/octet-stream');
-          const ext = mimeType.includes('jpeg') || mimeType.includes('jpg') ? 'jpg' : (mimeType.includes('png') ? 'png' : 'bin');
+          const ext = mimeType.includes('jpeg') || mimeType.includes('jpg') ? 'jpg' : (mimeType.includes('png') ? 'png' : (mimeType.includes('pdf') ? 'pdf' : 'bin'));
           const filename = att.filename || att.name || `image_${mIdx}_${aIdx}.${ext}`;
 
           addAsset({
@@ -403,13 +418,16 @@
           return true;
         };
 
-        const exactMirror = (topFileId && emittedByLocation.fid.get(topFileId)) ||
+        let exactMirror = (topFileId && emittedByLocation.fid.get(topFileId)) ||
           (safePtr && emittedByLocation.ptr.get(safePtr)) ||
           (dataURI && emittedByLocation.uri.get(dataURI)) ||
           (remoteURL && emittedByLocation.url.get(remoteURL)) ||
           (att.sourceMessageId && records.find(r => r.sourceMessageId === att.sourceMessageId && (r.id === rawTopId || r.assetId === rawTopId))) ||
           null;
 
+        if (exactMirror && !areMimesCompatible(exactMirror, att, dataURI)) {
+          exactMirror = null;
+        }
         if (exactMirror) {
           const mirrorBytes = toBytes(exactMirror.data, exactMirror.dataURI);
           const topBytes = toBytes(localBlob, dataURI);
@@ -636,7 +654,8 @@
     let fenceLen = 0;
     let fenceBqDepth = 0;
     let fenceListIndent = 0;
-    let activeListIndent = 0;
+    let listStack = [];
+    let activeBqDepth = 0;
     let prevLineBlank = true;
 
     const flush = isCode => {
@@ -644,29 +663,6 @@
         segments.push({ isCode, text: buf.join('\n') });
         buf = [];
       }
-    };
-    const stripContainers = line => {
-      let rest = line;
-      let bqDepth = 0;
-      let hadList = false;
-      let listIndent = 0;
-      while (true) {
-        const bq = rest.match(/^ {0,3}>[ \t]?/);
-        if (bq) {
-          bqDepth++;
-          rest = rest.slice(bq[0].length);
-          continue;
-        }
-        const lst = rest.match(/^ {0,3}(?:[-*+]|\d{1,9}[.)])[ \t]+/);
-        if (lst) {
-          hadList = true;
-          listIndent += lst[0].length;
-          rest = rest.slice(lst[0].length);
-          continue;
-        }
-        break;
-      }
-      return { bqDepth, hadList, listIndent, rest };
     };
     const stripExactBq = (line, targetDepth) => {
       let rest = line;
@@ -678,6 +674,40 @@
         rest = rest.slice(bq[0].length);
       }
       return { depth, rest };
+    };
+    const parseContainers = line => {
+      let rest = line;
+      let bqDepth = 0;
+      while (true) {
+        const bq = rest.match(/^ {0,3}>[ \t]?/);
+        if (!bq) break;
+        bqDepth++;
+        rest = rest.slice(bq[0].length);
+      }
+      const isBlank = rest.trim().length === 0;
+      if (bqDepth !== activeBqDepth) {
+        listStack = [];
+        activeBqDepth = bqDepth;
+      }
+      let leadSpaces = (rest.match(/^ */) || [''])[0].length;
+      if (!isBlank) {
+        while (listStack.length > 0 && listStack[listStack.length - 1] > leadSpaces) {
+          listStack.pop();
+        }
+      }
+      let hadList = false;
+      let consumedCol = (!isBlank && listStack.length > 0) ? listStack[listStack.length - 1] : 0;
+      if (consumedCol > 0) rest = rest.slice(consumedCol);
+      while (!isBlank) {
+        const lst = rest.match(/^ {0,3}(?:[-*+]|\d{1,9}[.)])[ \t]+/);
+        if (!lst) break;
+        hadList = true;
+        consumedCol += lst[0].length;
+        listStack.push(consumedCol);
+        rest = rest.slice(lst[0].length);
+      }
+      const effectiveListIndent = listStack.length > 0 ? listStack[listStack.length - 1] : 0;
+      return { bqDepth, hadList, effectiveListIndent, rest, rawAfterBqIsBlank: isBlank };
     };
 
     for (const line of lines) {
@@ -691,7 +721,6 @@
           fenceLen = 0;
           fenceBqDepth = 0;
           fenceListIndent = 0;
-          // Fall through cleanly to process `line` outside the closed blockquote fence
         } else {
           buf.push(line);
           const closeRe = fenceListIndent > 0
@@ -713,26 +742,11 @@
         }
       }
 
-      const { bqDepth, hadList, listIndent, rest } = stripContainers(line);
-      const isBlank = rest.trim().length === 0;
-
-      let effectiveListIndent = 0;
-      if (hadList) {
-        activeListIndent = listIndent;
-        effectiveListIndent = listIndent;
-      } else if (!isBlank && activeListIndent > 0) {
-        const leadSpaces = (rest.match(/^ */) || [''])[0].length;
-        if (leadSpaces >= activeListIndent) {
-          effectiveListIndent = activeListIndent;
-        } else {
-          activeListIndent = 0;
-        }
-      }
+      const { bqDepth, hadList, effectiveListIndent, rest, rawAfterBqIsBlank } = parseContainers(line);
+      const isBlank = rawAfterBqIsBlank;
 
       if (inIndented) {
-        const contCheck = (!hadList && activeListIndent > 0) ? rest.slice(Math.min(activeListIndent, (rest.match(/^ */) || [''])[0].length)) : rest;
-        const stillIndented = activeListIndent > 0 ? /^(?: {4}|\t)/.test(contCheck) : /^(?: {4}|\t)/.test(rest);
-        if (stillIndented || isBlank) {
+        if (/^(?: {4}|\t)/.test(rest) || isBlank) {
           buf.push(line);
           prevLineBlank = isBlank;
           continue;
@@ -741,8 +755,7 @@
         inIndented = false;
       }
 
-      const openCheckRest = (!hadList && effectiveListIndent > 0) ? rest.slice(effectiveListIndent) : rest;
-      const openM = openCheckRest.match(/^ {0,3}(`{3,}|~{3,})(.*)$/);
+      const openM = rest.match(/^ {0,3}(`{3,}|~{3,})(.*)$/);
       if (openM && !(openM[1][0] === '`' && openM[2].includes('`'))) {
         flush(false);
         inFence = true;
@@ -755,7 +768,7 @@
         continue;
       }
 
-      if (!hadList && prevLineBlank && /^(?: {4}|\t)/.test(openCheckRest) && !isBlank) {
+      if (!hadList && prevLineBlank && /^(?: {4}|\t)/.test(rest) && !isBlank) {
         flush(false);
         inIndented = true;
         buf.push(line);

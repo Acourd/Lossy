@@ -1137,36 +1137,14 @@
     let fenceLen = 0;
     let fenceBqDepth = 0;
     let fenceListIndent = 0;
-    let activeListIndent = 0;
+    let listStack = [];
+    let activeBqDepth = 0;
 
     const flush = isCode => {
       if (buf.length) {
         segments.push({ isCode, text: buf.join('\n') });
         buf = [];
       }
-    };
-    const stripContainers = line => {
-      let rest = line;
-      let bqDepth = 0;
-      let hadList = false;
-      let listIndent = 0;
-      while (true) {
-        const bq = rest.match(/^ {0,3}>[ \t]?/);
-        if (bq) {
-          bqDepth++;
-          rest = rest.slice(bq[0].length);
-          continue;
-        }
-        const lst = rest.match(/^ {0,3}(?:[-*+]|\d{1,9}[.)])[ \t]+/);
-        if (lst) {
-          hadList = true;
-          listIndent += lst[0].length;
-          rest = rest.slice(lst[0].length);
-          continue;
-        }
-        break;
-      }
-      return { bqDepth, hadList, listIndent, rest };
     };
     const stripExactBq = (line, targetDepth) => {
       let rest = line;
@@ -1178,6 +1156,38 @@
         rest = rest.slice(bq[0].length);
       }
       return { depth, rest };
+    };
+    const parseContainers = line => {
+      let rest = line;
+      let bqDepth = 0;
+      while (true) {
+        const bq = rest.match(/^ {0,3}>[ \t]?/);
+        if (!bq) break;
+        bqDepth++;
+        rest = rest.slice(bq[0].length);
+      }
+      const isBlank = rest.trim().length === 0;
+      if (bqDepth !== activeBqDepth) {
+        listStack = [];
+        activeBqDepth = bqDepth;
+      }
+      const leadSpaces = (rest.match(/^ */) || [''])[0].length;
+      if (!isBlank) {
+        while (listStack.length > 0 && listStack[listStack.length - 1] > leadSpaces) {
+          listStack.pop();
+        }
+      }
+      let consumedCol = (!isBlank && listStack.length > 0) ? listStack[listStack.length - 1] : 0;
+      if (consumedCol > 0) rest = rest.slice(consumedCol);
+      while (!isBlank) {
+        const lst = rest.match(/^ {0,3}(?:[-*+]|\d{1,9}[.)])[ \t]+/);
+        if (!lst) break;
+        consumedCol += lst[0].length;
+        listStack.push(consumedCol);
+        rest = rest.slice(lst[0].length);
+      }
+      const effectiveListIndent = listStack.length > 0 ? listStack[listStack.length - 1] : 0;
+      return { bqDepth, effectiveListIndent, rest };
     };
 
     for (const line of lines) {
@@ -1208,22 +1218,8 @@
         }
       }
 
-      const { bqDepth, hadList, listIndent, rest } = stripContainers(line);
-      const isBlank = rest.trim().length === 0;
-      let effectiveListIndent = 0;
-      if (hadList) {
-        activeListIndent = listIndent;
-        effectiveListIndent = listIndent;
-      } else if (!isBlank && activeListIndent > 0) {
-        const leadSpaces = (rest.match(/^ */) || [''])[0].length;
-        if (leadSpaces >= activeListIndent) {
-          effectiveListIndent = activeListIndent;
-        } else {
-          activeListIndent = 0;
-        }
-      }
-      const openCheckRest = (!hadList && effectiveListIndent > 0) ? rest.slice(effectiveListIndent) : rest;
-      const openM = openCheckRest.match(/^ {0,3}(`{3,}|~{3,})(.*)$/);
+      const { bqDepth, effectiveListIndent, rest } = parseContainers(line);
+      const openM = rest.match(/^ {0,3}(`{3,}|~{3,})(.*)$/);
       if (openM && !(openM[1][0] === '`' && openM[2].includes('`'))) {
         flush(false);
         inFence = true;
