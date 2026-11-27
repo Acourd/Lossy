@@ -721,32 +721,38 @@
     const lead = measureLeadColsMd(str, lineCol);
     if (lead.cols > 3 || str[lead.idx] !== '>') return { ok: false };
     let i = lead.idx + 1;
-    let colAfterGt = lead.endCol + 1;
+    const tBase = sCol + lead.cols + 1;
+    let t = tBase;
     let optCols = 0;
-    let pad = '';
+    let tabAdj = 0;
     if (i < str.length) {
-      if (str[i] === ' ') { i++; colAfterGt += 1; optCols = 1; }
-      else if (str[i] === '\t') {
-        const adv = 4 - (colAfterGt % 4);
+      if (str[i] === ' ') {
         i++;
-        colAfterGt += 1;
+        t++;
         optCols = 1;
-        if (adv > 1) pad = ' '.repeat(adv - 1);
+      } else if (str[i] === '\t') {
+        optCols = 1;
+        if (((bsCol + t) % 4) === 3) {
+          i++;
+          t++;
+        } else {
+          tabAdj = 1;
+        }
       }
     }
-    const nextBsCol = sCol + lead.cols + 1 + optCols;
-    const nextLineCol = bsCol + nextBsCol;
-    return { ok: true, rest: pad + str.slice(i), col: nextBsCol, bsCol: nextBsCol, lineCol: nextLineCol };
+    const nextBsCol = tBase + optCols;
+    const nextLineCol = bsCol + t + tabAdj;
+    return { ok: true, rest: str.slice(i), col: nextBsCol, bsCol: nextBsCol, lineCol: nextLineCol };
   }
 
-  function matchListPrefixMd(str, startCol, canInterruptPara = true, allowEmptyInterrupt = false) {
-    const lead = measureLeadColsMd(str, startCol);
+  function matchListPrefixMd(str, bsSCol, canInterruptPara = true, allowEmptyInterrupt = false, lineCol = bsSCol) {
+    const lead = measureLeadColsMd(str, lineCol);
     if (lead.cols > 3) return { ok: false };
     const after = str.slice(lead.idx);
     const m = after.match(/^([-*+]|\d{1,9}[.)])([ \t]+|$)/);
     if (!m) return { ok: false };
     const markerLen = m[1].length;
-    const wsStartCol = lead.endCol + markerLen;
+    const wsStartCol = bsSCol + lead.cols + markerLen;
     const wsLead = measureLeadColsMd(after.slice(markerLen), wsStartCol);
     const isEmptyItem = after.slice(markerLen + wsLead.idx).trim().length === 0;
     if (!canInterruptPara) {
@@ -759,7 +765,7 @@
     const targetIndent = lead.cols + markerLen + wsCols;
     const stripped = stripIndentColsMd(after.slice(markerLen), wsStartCol, wsCols);
     const rest = stripped.ok ? stripped.rest : after.slice(markerLen + wsLead.idx);
-    return { ok: true, indent: targetIndent, col: startCol + targetIndent, rest };
+    return { ok: true, indent: targetIndent, col: bsSCol + targetIndent, rest };
   }
 
   function stepContainerPrefixMd(line, containerList, allowBlankListSkip = true) {
@@ -832,12 +838,12 @@
           const allowEmpty = !inParagraph || exitedAnyContainer || hadMarker;
           const leadBeforeList = measureLeadColsMd(rest, lineCol);
           if (leadBeforeList.cols > 3) break;
-          const lst = matchListPrefixMd(rest, bsCol + sCol, !inParagraph || listExited || exitedAnyContainer || hadMarker, allowEmpty);
+          const lst = matchListPrefixMd(rest, bsCol + sCol, !inParagraph || listExited || exitedAnyContainer || hadMarker, allowEmpty, lineCol);
           if (lst.ok) {
             containers.push({ type: 'list', indent: lst.indent });
             rest = lst.rest;
             sCol += lst.indent;
-            lineCol += lst.indent;
+            lineCol = bsCol + sCol;
             hadMarker = true;
             continue;
           }

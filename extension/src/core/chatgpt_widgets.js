@@ -1013,32 +1013,38 @@
     const lead = measureLeadCols(str, lineCol);
     if (lead.cols > 3 || str[lead.idx] !== '>') return { ok: false };
     let i = lead.idx + 1;
-    let colAfterGt = lead.endCol + 1;
+    const tBase = sCol + lead.cols + 1;
+    let t = tBase;
     let optCols = 0;
-    let pad = '';
+    let tabAdj = 0;
     if (i < str.length) {
-      if (str[i] === ' ') { i++; colAfterGt += 1; optCols = 1; }
-      else if (str[i] === '\t') {
-        const adv = 4 - (colAfterGt % 4);
+      if (str[i] === ' ') {
         i++;
-        colAfterGt += 1;
+        t++;
         optCols = 1;
-        if (adv > 1) pad = ' '.repeat(adv - 1);
+      } else if (str[i] === '\t') {
+        optCols = 1;
+        if (((bsCol + t) % 4) === 3) {
+          i++;
+          t++;
+        } else {
+          tabAdj = 1;
+        }
       }
     }
-    const nextBsCol = sCol + lead.cols + 1 + optCols;
-    const nextLineCol = bsCol + nextBsCol;
-    return { ok: true, rest: pad + str.slice(i), col: nextBsCol, bsCol: nextBsCol, lineCol: nextLineCol };
+    const nextBsCol = tBase + optCols;
+    const nextLineCol = bsCol + t + tabAdj;
+    return { ok: true, rest: str.slice(i), col: nextBsCol, bsCol: nextBsCol, lineCol: nextLineCol };
   }
 
-  function matchListPrefix(str, startCol, canInterruptPara = true, allowEmptyInterrupt = false) {
-    const lead = measureLeadCols(str, startCol);
+  function matchListPrefix(str, bsSCol, canInterruptPara = true, allowEmptyInterrupt = false, lineCol = bsSCol) {
+    const lead = measureLeadCols(str, lineCol);
     if (lead.cols > 3) return { ok: false };
     const after = str.slice(lead.idx);
     const m = after.match(/^([-*+]|\d{1,9}[.)])([ \t]+|$)/);
     if (!m) return { ok: false };
     const markerLen = m[1].length;
-    const wsStartCol = lead.endCol + markerLen;
+    const wsStartCol = bsSCol + lead.cols + markerLen;
     const wsLead = measureLeadCols(after.slice(markerLen), wsStartCol);
     const isEmptyItem = after.slice(markerLen + wsLead.idx).trim().length === 0;
     if (!canInterruptPara) {
@@ -1051,7 +1057,7 @@
     const targetIndent = lead.cols + markerLen + wsCols;
     const stripped = stripIndentCols(after.slice(markerLen), wsStartCol, wsCols);
     const rest = stripped.ok ? stripped.rest : after.slice(markerLen + wsLead.idx);
-    return { ok: true, indent: targetIndent, col: startCol + targetIndent, rest };
+    return { ok: true, indent: targetIndent, col: bsSCol + targetIndent, rest };
   }
 
   function stepContainerPrefix(line, containerList, allowBlankListSkip = true) {
@@ -1072,7 +1078,7 @@
         sCol = 0;
         lineCol = m.lineCol;
         afterLastBqRest = rest;
-        afterLastBqCol = lineCol;
+        afterLastBqCol = bsCol;
         matched++;
       } else {
         if (allowBlankListSkip && rest.trim().length === 0) {
@@ -1128,12 +1134,12 @@
           const allowEmpty = !inParagraph || exitedAnyContainer || hadMarker;
           const leadBeforeList = measureLeadCols(rest, lineCol);
           if (leadBeforeList.cols > 3) break;
-          const lst = matchListPrefix(rest, bsCol + sCol, !inParagraph || listExited || exitedAnyContainer || hadMarker, allowEmpty);
+          const lst = matchListPrefix(rest, bsCol + sCol, !inParagraph || listExited || exitedAnyContainer || hadMarker, allowEmpty, lineCol);
           if (lst.ok) {
             containers.push({ type: 'list', indent: lst.indent });
             rest = lst.rest;
             sCol += lst.indent;
-            lineCol += lst.indent;
+            lineCol = bsCol + sCol;
             hadMarker = true;
             continue;
           }
@@ -1692,26 +1698,22 @@
           continue;
         }
         const prevContainers = stepper.containers.map(c => ({ ...c }));
-        const { rest, exitedAnyContainer, afterLastBqRest, afterLastBqCol } = stepper.step(rawLine);
+        const { afterLastBqRest, afterLastBqCol } = stepper.step(rawLine);
         stepper.inParagraph = true;
         const tailTrimLen = li === closeLineIdx ? (rawLine.length - closeOffset) : 0;
         const trimClose = s => (tailTrimLen > 0 ? s.slice(0, Math.max(0, s.length - tailTrimLen)) : s);
-        if (exitedAnyContainer) {
-          const baseSlice = trimClose(afterLastBqRest);
-          let lazyIndentAfterBq = 0;
-          for (let k = prevContainers.length - 1; k >= 0; k--) {
-            if (prevContainers[k].type === 'bq') break;
-            lazyIndentAfterBq += prevContainers[k].indent;
-          }
-          if (lazyIndentAfterBq > 0) {
-            const lead = measureLeadCols(baseSlice, afterLastBqCol);
-            const toStrip = Math.min(lead.cols, lazyIndentAfterBq);
-            chunks.push(toStrip > 0 ? stripIndentCols(baseSlice, afterLastBqCol, toStrip).rest : baseSlice);
-          } else {
-            chunks.push(baseSlice);
-          }
+        const baseSlice = trimClose(afterLastBqRest);
+        let listIndentAfterBq = 0;
+        for (let k = prevContainers.length - 1; k >= 0; k--) {
+          if (prevContainers[k].type === 'bq') break;
+          listIndentAfterBq += prevContainers[k].indent;
+        }
+        if (listIndentAfterBq > 0) {
+          const lead = measureLeadCols(baseSlice, afterLastBqCol);
+          const toStrip = Math.min(lead.cols, listIndentAfterBq);
+          chunks.push(toStrip > 0 ? stripIndentCols(baseSlice, afterLastBqCol, toStrip).rest : baseSlice);
         } else {
-          chunks.push(trimClose(rest));
+          chunks.push(baseSlice);
         }
       }
       inner = chunks.join(' ');

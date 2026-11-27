@@ -7,7 +7,7 @@ const HtmlBuilder = require('../../extension/src/core/portability/html_builder')
 const DocumentModel = require('../../extension/src/core/portability/document_model');
 const ChatGPTWidgets = require('../../extension/src/core/chatgpt_widgets');
 
-test('R27 P2: alineación prevBsCol+t tras citas anidadas y listas cercadas con tabuladores', async () => {
+test('R27/R28 P2: alineación prevBsCol+t y tabAdj tras citas anidadas y listas cercadas con tabuladores', async () => {
   const payloadKeep = '![LITERAL](https://audit.invalid/keep.png) <Cite id="KEEP_CITE"/>';
   const payloadDrop = '![REAL](https://audit.invalid/real.png) <Cite id="DROP_CITE"/>';
 
@@ -15,13 +15,21 @@ test('R27 P2: alineación prevBsCol+t tras citas anidadas y listas cercadas con 
     ['bq_bq_list_tab_fence_step', `> > -\t~~~\n>  > \t${payloadKeep}`],
     ['bq_bq_list_tab_fence_indent5', `>  > -\t~~~\n>  > \t  ${payloadKeep}`],
     ['bq_tight_bq_sp_tab', `>> > \t${payloadKeep}`],
+    ['bq_tight_3_double_tab', `>>>\t\t${payloadKeep}`],
+    ['bq_tight_2_double_tab', `>>\t\t${payloadKeep}`],
+    ['bq_tab_sp2_bq_tab', `>\t  > \t${payloadKeep}`],
+    ['bq_sp_bq_tab_bq_double_tab', `> >\t>\t\t${payloadKeep}`],
+    ['bq_tight_3_tab_list_fence_indented_exit', `>>>\t-\t~~~\n>>>\t    ${payloadKeep}\n>>>\t~~~`],
+    ['bq_tight_3_tab_list_fence_stay', `>>>\t-\t~~~\n>>>\t     ${payloadKeep}\n>>>\t~~~`],
     ['list_bq_sp_tab', `- > \t${payloadKeep}`],
     ['bq_bq_tab_bq_sp_tab', `> >\t> \t${payloadKeep}`],
     ['bq_bq_list_tab_fence_exit_to_indented', `>  > -\t~~~\n>  > \t ${payloadKeep}`]
   ];
 
   const proseCases = [
-    ['bq_tight_3_tab', `>>> \t${payloadDrop}`],
+    ['bq_tight_3_sp_tab', `>>> \t${payloadDrop}`],
+    ['bq_tight_3_single_tab', `>>>\t${payloadDrop}`],
+    ['bq_tab_sp1_bq_tab', `>\t > \t${payloadDrop}`],
     ['bq_sp2_bq_bq_tab', `>  > > \t${payloadDrop}`],
     ['bq_bq_sp2_bq_tab', `> >  > \t${payloadDrop}`],
     ['list_tab_bq_sp_tab', `-\t> \t${payloadDrop}`],
@@ -36,7 +44,7 @@ test('R27 P2: alineación prevBsCol+t tras citas anidadas y listas cercadas con 
     assert.equal(segs.some(s => s.isCode && s.text.includes('KEEP_CITE')), true, `${label}: debe clasificarse como código`);
 
     let fetchCalls = 0;
-    const conv = { canonicalId: `r27_${label}`, title: label, messages: [{ id: 'm1', role: 'assistant', isConversational: true, text: sample }] };
+    const conv = { canonicalId: `r28_${label}`, title: label, messages: [{ id: 'm1', role: 'assistant', isConversational: true, text: sample }] };
     const resolved = await AssetResolver.resolveAssetBinaries(conv, { fetch: async () => { fetchCalls++; return new Response('', { status: 404 }); } });
     assert.equal(fetchCalls, 0, `${label}: 0 fetch`);
     assert.equal(resolved.assets.length, 0, `${label}: 0 assets`);
@@ -55,7 +63,7 @@ test('R27 P2: alineación prevBsCol+t tras citas anidadas y listas cercadas con 
 
   for (const [label, sample] of proseCases) {
     let fetchCalls = 0;
-    const conv = { canonicalId: `r27_${label}`, title: label, messages: [{ id: 'm1', role: 'assistant', isConversational: true, text: sample }] };
+    const conv = { canonicalId: `r28_${label}`, title: label, messages: [{ id: 'm1', role: 'assistant', isConversational: true, text: sample }] };
     const resolved = await AssetResolver.resolveAssetBinaries(conv, { fetch: async () => { fetchCalls++; return new Response(new Uint8Array([0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A]), { status: 200, headers: { 'content-type': 'image/png' } }); } });
     assert.equal(fetchCalls, 1, `${label}: prosa debe disparar 1 fetch`);
     assert.equal(resolved.assets.length, 1, `${label}: prosa debe extraer 1 asset`);
@@ -73,19 +81,30 @@ test('R27 P2: alineación prevBsCol+t tras citas anidadas y listas cercadas con 
   }
 });
 
-test('R27 P2: span inline multilínea tras cita+lista con tabulador preserva etiquetas literales', async () => {
-  const samples = [
-    '> > -\t`<Cite id="INLINE_KEEP"/>\n>  > \t <svg width="10" height="10"/></svg>`',
-    '> > -    `<Cite id="INLINE_KEEP"/>\n>  > \t <svg width="10" height="10"/></svg>`'
+test('R28 P2: espaciado exacto en spans inline multilínea con getLines bsCol en renderInlineCodeSpanPayload y HtmlBuilder', async () => {
+  const inlineCases = [
+    ['bq_sp2_list_tab_sp1', '> > -\t`A\n>  > \t B`', 'A B'],
+    ['bq_sp2_list_tab_sp2', '> > -\t`A\n>  > \t  B`', 'A  B'],
+    ['bq_sp2_list_tab_nosp', '> > -\t`A\n>  > \tB`', 'A B'],
+    ['bq_list_tab_same_bs_sp1', '> > -\t`A\n> > \t B`', 'A  B'],
+    ['bq_lazy_list_indent5', '> > -    `A\n>  > \t B`', 'A B'],
+    ['list_bq_list_tab_sp1', '- > -\t`A\n  >  \t B`', 'A  B']
   ];
-  const center = new ExportCenter();
-  for (const [idx, sample] of samples.entries()) {
-    const cleanedMd = ChatGPTWidgets.renderWidgetsToMarkdown(sample);
-    assert.equal(cleanedMd.includes('INLINE_KEEP'), true, `renderWidgetsToMarkdown[${idx}]`);
-    const cleanedHtml = ChatGPTWidgets.renderWidgetsToHtml(sample);
-    assert.equal(cleanedHtml.includes('INLINE_KEEP'), true, `renderWidgetsToHtml[${idx}]`);
-    const conv = { canonicalId: `r27_inline_${idx}`, title: 'InlineTab', messages: [{ id: 'm1', role: 'assistant', isConversational: true, text: sample }] };
-    const exp = await center.exportSingle(conv, 'md', 'ai', { imageStrategy: 'omit' });
-    assert.equal(exp.data.includes('INLINE_KEEP'), true, `ExportCenter[${idx}]`);
+
+  for (const [label, sample, expected] of inlineCases) {
+    const openTick = sample.indexOf('`');
+    const payload = ChatGPTWidgets.renderInlineCodeSpanPayload(sample, openTick, sample.length);
+    assert.equal(payload, expected, `${label}: renderInlineCodeSpanPayload espaciado exacto`);
+
+    const conv = { canonicalId: `r28_inline_${label}`, title: label, messages: [{ id: 'm1', role: 'assistant', isConversational: true, text: sample }] };
+    const hb = HtmlBuilder.buildStandaloneHtml(conv, { imageStrategy: 'omit' });
+    assert.equal(hb.includes(`<code>${expected}</code>`), true, `${label}: HtmlBuilder <code>${expected}</code> exacto`);
+    const dm = await DocumentModel.prepare([conv], { includeImages: false });
+    assert.equal(dm.html.includes(`<code>${expected}</code>`), true, `${label}: DocumentModel <code>${expected}</code> exacto`);
   }
+
+  const protectedSample = '> > -\t`<Cite id="INLINE_KEEP"/>\n>  > \t <svg width="10" height="10"/></svg>`';
+  const cleanedMd = ChatGPTWidgets.renderWidgetsToMarkdown(protectedSample);
+  assert.equal(cleanedMd.includes('INLINE_KEEP'), true);
+  assert.equal(HtmlBuilder.buildStandaloneHtml({ canonicalId: 'r28_keep', title: 'Keep', messages: [{ id: 'm1', role: 'assistant', isConversational: true, text: protectedSample }] }, { imageStrategy: 'omit' }).includes('INLINE_KEEP'), true);
 });
