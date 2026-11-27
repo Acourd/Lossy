@@ -30,9 +30,26 @@
   const foreignSignaturesByConv = new Map(); // convId -> Set<string>
   const foreignTurnsByConv = new Map();      // convId -> Set<string>
 
+  function attachmentFingerprint(att) {
+    if (!att || typeof att !== 'object') return '';
+    const uri = typeof att.dataURI === 'string' && att.dataURI
+      ? `${att.dataURI.slice(0, 64)}:${att.dataURI.length}`
+      : '';
+    return String(att.sourceURL || att.url || uri || att.assetId || att.id || att.filename || att.name || '').trim();
+  }
+
   function extractTurnEntries(data) {
     return (data?.messages || [])
-      .map(m => `${m.role || ''}:${String(m.content?.text || m.text || '').trim()}`)
+      .map(m => {
+        const role = String(m?.role || '').toLowerCase();
+        const body = String(m?.content?.text || m?.text || '').trim();
+        const rawAtts = Array.isArray(m?.attachments)
+          ? m.attachments
+          : (Array.isArray(m?.content?.attachments) ? m.content.attachments : []);
+        const atts = rawAtts.map(attachmentFingerprint).filter(Boolean);
+        if (!body && atts.length === 0) return '';
+        return JSON.stringify({ r: role, b: body, a: atts });
+      })
       .filter(Boolean);
   }
 
@@ -96,18 +113,33 @@
     }
     if (!turns || turns.length === 0) return false;
     const parseEntry = (entry) => {
-      const idx = entry.indexOf(':');
-      if (idx === -1) return { role: '', body: entry.trim() };
-      return { role: entry.slice(0, idx), body: entry.slice(idx + 1).trim() };
+      if (typeof entry === 'string' && entry.startsWith('{')) {
+        try {
+          const parsed = JSON.parse(entry);
+          return {
+            r: String(parsed.r || '').toLowerCase(),
+            b: String(parsed.b || '').trim(),
+            a: Array.isArray(parsed.a) ? parsed.a : []
+          };
+        } catch (_) {}
+      }
+      const idx = String(entry || '').indexOf(':');
+      if (idx === -1) return { r: '', b: String(entry || '').trim(), a: [] };
+      return { r: entry.slice(0, idx).toLowerCase(), b: entry.slice(idx + 1).trim(), a: [] };
     };
     const isStaleTurnAgainst = (curParsed, prevSet) => {
-      if (!curParsed.body) return true;
+      if (!curParsed.b && curParsed.a.length === 0) return false;
       for (const prevRaw of prevSet) {
         const prevParsed = parseEntry(prevRaw);
-        if (curParsed.role && prevParsed.role && curParsed.role !== prevParsed.role) continue;
-        if (curParsed.body === prevParsed.body && curParsed.body.length >= 6) return true;
-        if (curParsed.body.length >= 10 && prevParsed.body.length >= 10 &&
-            (prevParsed.body.includes(curParsed.body) || curParsed.body.includes(prevParsed.body))) {
+        if (curParsed.r && prevParsed.r && curParsed.r !== prevParsed.r) continue;
+        if (curParsed.a.length > 0 && prevParsed.a.length > 0 && curParsed.a.some(att => prevParsed.a.includes(att))) {
+          return true;
+        }
+        if (curParsed.b && prevParsed.b && curParsed.b === prevParsed.b) {
+          return true;
+        }
+        if (curParsed.b.length >= 10 && prevParsed.b.length >= 10 &&
+            (prevParsed.b.includes(curParsed.b) || curParsed.b.includes(prevParsed.b))) {
           return true;
         }
       }
@@ -119,12 +151,11 @@
       if (!tSet || tSet.size === 0) continue;
       const staleFlags = parsedTurns.map(pt => isStaleTurnAgainst(pt, tSet));
       if (!staleFlags.some(Boolean)) continue;
-      // Un turno de usuario repetido con nueva respuesta es válido, pero cualquier respuesta de asistente previa sigue siendo obsoleta.
-      const hasStaleAiResponse = parsedTurns.some((pt, i) => staleFlags[i] && pt.role !== 'user' && pt.body.length >= 6);
+      const hasStaleAiResponse = parsedTurns.some((pt, i) => staleFlags[i] && pt.r !== 'user');
       if (hasStaleAiResponse) {
         return true;
       }
-      const hasDistinctFreshTurn = parsedTurns.some((pt, i) => !staleFlags[i] && pt.body.length >= 8);
+      const hasDistinctFreshTurn = parsedTurns.some((pt, i) => !staleFlags[i] && (pt.b.length > 0 || pt.a.length > 0));
       if (!hasDistinctFreshTurn) {
         return true;
       }

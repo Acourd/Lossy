@@ -584,6 +584,71 @@ test('R34 P1-3: primera captura tras navegación SPA A->B en Claude y Gemini rec
     const capE = await callMsg({ action: 'ACQUIRE_CONVERSATION' });
     assert.equal(capE.success, true, `${spec.platform}: pregunta compartida con respuesta distinta no debe bloquearse`);
     assert.match(capE.data.messages[1].text, /Postgres/);
+
+    // R37 P1: respuesta breve (5 chars "73129") e imagen exclusiva obsoleta con pregunta nueva deben rechazarse
+    historyObj.pushState({}, '', spec.urlB.replace(/2|b/g, '6').replace(/bbbbbbbbbbbb/, 'ffffffffffff'));
+    multiTurns = [
+      { id: 'u1f', role: 'user', text: 'Elige una capital europea' },
+      { id: 'a1f', role: 'assistant', text: '73129' }
+    ];
+    assert.equal((await callMsg({ action: 'ACQUIRE_CONVERSATION' })).success, true);
+
+    historyObj.pushState({}, '', spec.urlB.replace(/2|b/g, '7').replace(/bbbbbbbbbbbb/, 'gggggggggggg'));
+    multiTurns = [
+      { id: 'u1g', role: 'user', text: 'Pregunta completamente distinta' },
+      { id: 'a1g_stale', role: 'assistant', text: '73129' }
+    ];
+    const staleShort = await callMsg({ action: 'ACQUIRE_CONVERSATION' });
+    assert.equal(staleShort.success, false, `${spec.platform}: respuesta breve obsoleta (73129) debe rechazarse`);
+    assert.match(staleShort.error, /STALE_DOM/);
+
+    // R37 P2: pregunta repetida + respuesta breve nueva ("Roma") debe aceptarse
+    setTimeout(() => {
+      multiTurns = [
+        { id: 'u1g_ok', role: 'user', text: 'Elige una capital europea' },
+        { id: 'a1g_ok', role: 'assistant', text: 'Roma' }
+      ];
+    }, 120);
+    const shortFresh = await callMsg({ action: 'ACQUIRE_CONVERSATION' });
+    assert.equal(shortFresh.success, true, `${spec.platform}: respuesta breve nueva (Roma) con pregunta compartida no debe bloquearse`);
+    assert.equal(shortFresh.data.messages[1].text, 'Roma');
+
+    // R37 P1/P2 imágenes exclusivas sin texto: imagen obsoleta rechaza, imagen nueva acepta
+    historyObj.pushState({}, '', spec.urlB.replace(/2|b/g, '8').replace(/bbbbbbbbbbbb/, 'hhhhhhhhhhhh'));
+    multiTurns = [
+      { id: 'u1img', role: 'user', text: 'Genera gráfico', attachments: [] },
+      { id: 'a1img', role: 'assistant', text: '', attachments: [{ kind: 'image', sourceURL: 'https://cdn.test/paris.png' }] }
+    ];
+    adapter.extractClaudeDom = (_doc, u) => {
+      const m = String(u || '').match(spec.regex);
+      return {
+        canonicalId: `conv_${spec.platform}_${m[1]}`,
+        title: spec.platform,
+        source: { platform: spec.platform, conversationId: m[1], url: u },
+        messages: multiTurns.map(t => ({ ...t, isConversational: true, content: { text: t.text, attachments: t.attachments || [] }, attachments: t.attachments || [] })),
+        attachments: []
+      };
+    };
+    assert.equal((await callMsg({ action: 'ACQUIRE_CONVERSATION' })).success, true);
+
+    historyObj.pushState({}, '', spec.urlB.replace(/2|b/g, '9').replace(/bbbbbbbbbbbb/, 'iiiiiiiiiiii'));
+    multiTurns = [
+      { id: 'u2img', role: 'user', text: 'Genera gráfico nuevo', attachments: [] },
+      { id: 'a2img_stale', role: 'assistant', text: '', attachments: [{ kind: 'image', sourceURL: 'https://cdn.test/paris.png' }] }
+    ];
+    const staleImgOnly = await callMsg({ action: 'ACQUIRE_CONVERSATION' });
+    assert.equal(staleImgOnly.success, false, `${spec.platform}: imagen obsoleta exclusiva sin texto debe rechazarse`);
+    assert.match(staleImgOnly.error, /STALE_DOM/);
+
+    setTimeout(() => {
+      multiTurns = [
+        { id: 'u2img_ok', role: 'user', text: 'Genera gráfico', attachments: [] },
+        { id: 'a2img_ok', role: 'assistant', text: '', attachments: [{ kind: 'image', sourceURL: 'https://cdn.test/roma.png' }] }
+      ];
+    }, 120);
+    const freshImgOnly = await callMsg({ action: 'ACQUIRE_CONVERSATION' });
+    assert.equal(freshImgOnly.success, true, `${spec.platform}: imagen nueva exclusiva sin texto debe aceptarse`);
+    assert.equal(freshImgOnly.data.messages[1].attachments[0].sourceURL, 'https://cdn.test/roma.png');
   }
 });
 
