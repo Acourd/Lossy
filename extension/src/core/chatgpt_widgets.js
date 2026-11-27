@@ -1009,9 +1009,9 @@
     return { ok: true, rest, col: startCol + targetCols };
   }
 
-  function matchBqPrefix(str, bsCol, sCol = 0, lineCol = bsCol + sCol) {
+  function matchBqPrefix(str, bsCol, sCol = 0, lineCol = bsCol + sCol, allowOverIndent = false) {
     const lead = measureLeadCols(str, lineCol);
-    if (lead.cols > 3 || str[lead.idx] !== '>') return { ok: false };
+    if ((!allowOverIndent && lead.cols > 3) || str[lead.idx] !== '>') return { ok: false };
     let i = lead.idx + 1;
     const tBase = sCol + lead.cols + 1;
     let t = tBase;
@@ -1071,7 +1071,7 @@
     while (matched < containerList.length) {
       const c = containerList[matched];
       if (c.type === 'bq') {
-        const m = matchBqPrefix(rest, bsCol, sCol, lineCol);
+        const m = matchBqPrefix(rest, bsCol, sCol, lineCol, true);
         if (!m.ok) break;
         rest = m.rest;
         bsCol = m.bsCol;

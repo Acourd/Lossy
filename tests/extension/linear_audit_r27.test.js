@@ -23,7 +23,8 @@ test('R27/R28 P2: alineación prevBsCol+t y tabAdj tras citas anidadas y listas 
     ['bq_tight_3_tab_list_fence_stay', `>>>\t-\t~~~\n>>>\t     ${payloadKeep}\n>>>\t~~~`],
     ['list_bq_sp_tab', `- > \t${payloadKeep}`],
     ['bq_bq_tab_bq_sp_tab', `> >\t> \t${payloadKeep}`],
-    ['bq_bq_list_tab_fence_exit_to_indented', `>  > -\t~~~\n>  > \t ${payloadKeep}`]
+    ['bq_bq_list_tab_fence_exit_to_indented', `>  > -\t~~~\n>  > \t ${payloadKeep}`],
+    ['bq_overindent_tab_fence_keep', `> > ~~~\n>\t  > ${payloadKeep}\n>\t  > ~~~`]
   ];
 
   const proseCases = [
@@ -88,7 +89,10 @@ test('R28 P2: espaciado exacto en spans inline multilínea con getLines bsCol en
     ['bq_sp2_list_tab_nosp', '> > -\t`A\n>  > \tB`', 'A B'],
     ['bq_list_tab_same_bs_sp1', '> > -\t`A\n> > \t B`', 'A  B'],
     ['bq_lazy_list_indent5', '> > -    `A\n>  > \t B`', 'A B'],
-    ['list_bq_list_tab_sp1', '- > -\t`A\n  >  \t B`', 'A  B']
+    ['list_bq_list_tab_sp1', '- > -\t`A\n  >  \t B`', 'A  B'],
+    ['bq_overindent_tab_sp2', '> > `A\n>\t  > B`', 'A B'],
+    ['bq_overindent_4sp', '> `A\n    > B`', 'A B'],
+    ['list_bq_overindent_4sp', '- > `A\n      > B`', 'A B']
   ];
 
   for (const [label, sample, expected] of inlineCases) {
@@ -107,4 +111,14 @@ test('R28 P2: espaciado exacto en spans inline multilínea con getLines bsCol en
   const cleanedMd = ChatGPTWidgets.renderWidgetsToMarkdown(protectedSample);
   assert.equal(cleanedMd.includes('INLINE_KEEP'), true);
   assert.equal(HtmlBuilder.buildStandaloneHtml({ canonicalId: 'r28_keep', title: 'Keep', messages: [{ id: 'm1', role: 'assistant', isConversational: true, text: protectedSample }] }, { imageStrategy: 'omit' }).includes('INLINE_KEEP'), true);
+
+  // Interrupción tras bq sobreindentado con marcador de lista no queda atrapada como código inline
+  const brokenByList = '> > `A\n>     > - <Cite id="BREAK_DROP"/> B`';
+  const brokenMd = await (new ExportCenter()).exportSingle(
+    { canonicalId: 'r28_brk', title: 'Brk', messages: [{ id: 'm1', role: 'assistant', isConversational: true, text: brokenByList }] },
+    'md',
+    'ai',
+    { imageStrategy: 'omit' }
+  );
+  assert.equal(brokenMd.data.includes('BREAK_DROP'), false);
 });
