@@ -1061,6 +1061,8 @@
         let rest = line;
         let col = 0;
         let matched = 0;
+        let afterLastBqRest = line;
+        let afterLastBqCol = 0;
         while (matched < containers.length) {
           const c = containers[matched];
           if (c.type === 'bq') {
@@ -1068,6 +1070,8 @@
             if (!m.ok) break;
             rest = m.rest;
             col = m.col;
+            afterLastBqRest = rest;
+            afterLastBqCol = col;
             matched++;
           } else {
             if (rest.trim().length === 0) {
@@ -1120,7 +1124,7 @@
         const curBqCount = containers.filter(c => c.type === 'bq').length;
         const isBlank = rest.trim().length === 0;
         const trimmedAfterLead = rest.slice(lead.idx);
-        return { rest, col, lead, curBqCount, hadMarker, isBlank, trimmedAfterLead, exitedAnyContainer };
+        return { rest, col, lead, curBqCount, hadMarker, isBlank, trimmedAfterLead, exitedAnyContainer, afterLastBqRest, afterLastBqCol };
       }
     };
   }
@@ -1682,25 +1686,26 @@
           continue;
         }
         const prevContainers = stepper.containers.map(c => ({ ...c }));
-        const { rest, exitedAnyContainer } = stepper.step(rawLine);
+        const { rest, exitedAnyContainer, afterLastBqRest, afterLastBqCol } = stepper.step(rawLine);
         stepper.inParagraph = true;
+        const tailTrimLen = li === closeLineIdx ? (rawLine.length - closeOffset) : 0;
+        const trimClose = s => (tailTrimLen > 0 ? s.slice(0, Math.max(0, s.length - tailTrimLen)) : s);
         if (exitedAnyContainer) {
+          const baseSlice = trimClose(afterLastBqRest);
           let lazyIndentAfterBq = 0;
           for (let k = prevContainers.length - 1; k >= 0; k--) {
             if (prevContainers[k].type === 'bq') break;
             lazyIndentAfterBq += prevContainers[k].indent;
           }
-          const sliceForLine = li === closeLineIdx ? rawLine.slice(0, closeOffset) : rawLine;
           if (lazyIndentAfterBq > 0) {
-            const lead = measureLeadCols(sliceForLine, 0);
+            const lead = measureLeadCols(baseSlice, afterLastBqCol);
             const toStrip = Math.min(lead.cols, lazyIndentAfterBq);
-            chunks.push(toStrip > 0 ? stripIndentCols(sliceForLine, 0, toStrip).rest : sliceForLine);
+            chunks.push(toStrip > 0 ? stripIndentCols(baseSlice, afterLastBqCol, toStrip).rest : baseSlice);
           } else {
-            chunks.push(sliceForLine);
+            chunks.push(baseSlice);
           }
         } else {
-          const tailTrimLen = li === closeLineIdx ? (rawLine.length - closeOffset) : 0;
-          chunks.push(tailTrimLen > 0 ? rest.slice(0, Math.max(0, rest.length - tailTrimLen)) : rest);
+          chunks.push(trimClose(rest));
         }
       }
       inner = chunks.join(' ');
