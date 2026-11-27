@@ -26,21 +26,112 @@
 
   const SAFE_RASTER_DATA_URI_RE = /^data:image\/(?:png|jpe?g|gif|webp|avif);base64,[A-Za-z0-9+/=\s]+$/i;
 
+  function makeSlotPrefix(text) {
+    let tok = 'XLOSSYSLOT';
+    const src = String(text || '');
+    while (src.includes(tok)) tok += 'X';
+    return tok;
+  }
+
+  function isEscapedInRaw(str, idx) {
+    let bs = 0;
+    for (let k = idx - 1; k >= 0 && str[k] === '\\'; k--) bs++;
+    return (bs % 2) === 1;
+  }
+
+  function formatInlineCodeInnerFallback(rawSpan) {
+    let ticks = 0;
+    while (ticks < rawSpan.length && rawSpan[ticks] === '`') ticks++;
+    let inner = rawSpan.slice(ticks, rawSpan.length - ticks).replace(/\r?\n/g, ' ');
+    if (inner.length >= 2 && inner.startsWith(' ') && inner.endsWith(' ') && /[^ ]/.test(inner)) {
+      inner = inner.slice(1, -1);
+    }
+    return inner;
+  }
+
   function renderInline(raw, opts = {}) {
-    let s = escapeHtml(raw);
-    // Inline code
-    s = s.replace(/`([^`]+)`/g, '<code>$1</code>');
+    const src = String(raw || '');
+    const tok = opts._tokPrefix || makeSlotPrefix(src);
+    const localSlots = [];
+    let work = src;
+    if (!opts._inlinePreExtracted) {
+      const ranges = (widgets && typeof widgets.findInlineCodeRanges === 'function')
+        ? widgets.findInlineCodeRanges(work, opts._initialContainers)
+        : [];
+      if (ranges.length) {
+        let rebuilt = '';
+        let cursor = 0;
+        for (const r of ranges) {
+          rebuilt += work.slice(cursor, r.start);
+          const inner = (widgets && typeof widgets.renderInlineCodeSpanPayload === 'function')
+            ? widgets.renderInlineCodeSpanPayload(work, r.start, r.end, opts._initialContainers)
+            : formatInlineCodeInnerFallback(work.slice(r.start, r.end));
+          const idx = localSlots.length;
+          localSlots.push(`<code>${escapeHtml(inner)}</code>`);
+          rebuilt += `${tok}LIC${idx}END`;
+          cursor = r.end;
+        }
+        rebuilt += work.slice(cursor);
+        work = rebuilt;
+      } else {
+        // Fallback when widgets is unavailable: scan backtick spans respecting escapes and delimiter length
+        let rebuilt = '';
+        let i = 0;
+        while (i < work.length) {
+          if (work[i] === '`' && !isEscapedInRaw(work, i)) {
+            let ticks = 0;
+            while (i + ticks < work.length && work[i + ticks] === '`') ticks++;
+            const delim = '`'.repeat(ticks);
+            let searchFrom = i + ticks;
+            let found = -1;
+            while (searchFrom < work.length) {
+              const pos = work.indexOf(delim, searchFrom);
+              if (pos === -1) break;
+              if (work[pos - 1] !== '`' && work[pos + ticks] !== '`') {
+                found = pos;
+                break;
+              }
+              searchFrom = pos + 1;
+            }
+            if (found !== -1) {
+              const spanEnd = found + ticks;
+              const inner = formatInlineCodeInnerFallback(work.slice(i, spanEnd));
+              const idx = localSlots.length;
+              localSlots.push(`<code>${escapeHtml(inner)}</code>`);
+              rebuilt += `${tok}LIC${idx}END`;
+              i = spanEnd;
+              continue;
+            }
+            rebuilt += delim;
+            i += ticks;
+          } else {
+            rebuilt += work[i];
+            i++;
+          }
+        }
+        work = rebuilt;
+      }
+    }
+    let s = escapeHtml(work);
     // Images (strict raster data URI only; rejects svg+xml; strips completely when omitImages is true)
     if (opts.omitImages) {
-      s = s.replace(/!\[([^\]]*)\]\((?:&lt;)?(?:data:image\/[^)\s]+|https?:\/\/[^)\s]+)(?:&gt;)?\)/gi, '');
+      s = s.replace(/!\[([^\]]*)\]\((?:&lt;)?(?:data:image\/[^)\s]+|https?:\/\/[^)\s]+)(?:&gt;)?\)/gi, (m, _alt, offset, full) => (isEscapedInRaw(full, offset) ? m : ''));
     } else {
-      s = s.replace(/!\[([^\]]*)\]\((?:&lt;)?(data:image\/(?:png|jpe?g|gif|webp|avif);base64,[A-Za-z0-9+/=]+)(?:&gt;)?\)/gi, '<figure class="l-fig"><img src="$2" alt="$1"><figcaption>$1</figcaption></figure>');
+      s = s.replace(/!\[([^\]]*)\]\((?:&lt;)?(data:image\/(?:png|jpe?g|gif|webp|avif);base64,[A-Za-z0-9+/=]+)(?:&gt;)?\)/gi, (m, alt, uri, offset, full) => (isEscapedInRaw(full, offset) ? m : `<figure class="l-fig"><img src="${uri}" alt="${alt}"><figcaption>${alt}</figcaption></figure>`));
     }
     // Links (preserves &amp; query parameters safely since escapeHtml already ran)
     s = s.replace(/\[([^\]]+)\]\((?:&lt;)?(https?:\/\/(?:&amp;|[^)\s"'<>])+)(?:&gt;)?\)/g, '<a href="$2" target="_blank" rel="noopener noreferrer">$1</a>');
     // Bold & italic
     s = s.replace(/\*\*([^*]+)\*\*/g, '<strong>$1</strong>');
     s = s.replace(/\*([^*]+)\*/g, '<em>$1</em>');
+    if (localSlots.length) {
+      const licRe = new RegExp(`${tok}LIC(\\d+)END`, 'g');
+      s = s.replace(licRe, (_, idx) => localSlots[Number(idx)] ?? '');
+    }
+    if (Array.isArray(opts._inlineSlots) && opts._inlineSlots.length) {
+      const icRe = new RegExp(`${tok}IC(\\d+)END`, 'g');
+      s = s.replace(icRe, (_, idx) => opts._inlineSlots[Number(idx)] ?? '');
+    }
     return s;
   }
 
@@ -65,12 +156,15 @@
 
   function renderSimpleMarkdownToHtml(text, opts = {}) {
     const src = String(text || '').replace(/\r\n/g, '\n');
+    const tok = makeSlotPrefix(src);
     const blocks = [];
     const codeSlots = [];
     const widgetSlots = [];
+    const inlineSlots = [];
 
-    // 1. Unified CommonMark code-block + DIL visual widget extraction
+    // 1. Unified CommonMark code-block + DIL visual widget + inline-code extraction
     let work;
+    let inlinePreExtracted = false;
     if (widgets && typeof widgets.splitFencedCodeSegments === 'function') {
       const segs = widgets.splitFencedCodeSegments(src);
       work = segs.map(seg => {
@@ -93,13 +187,15 @@
           } else {
             codeSlots.push(`<div class="l-code-wrap"><pre><code>${escapeHtml(seg.text)}</code></pre></div>`);
           }
-          return `\n\n@@CODE${idx}@@\n\n`;
+          return `\n\n${tok}CODE${idx}END\n\n`;
         }
         let part = seg.text;
         if (typeof widgets.findTopLevelWidgetRanges === 'function') {
           const initContainers = seg.initialContainers;
           const widgetRanges = widgets.findTopLevelWidgetRanges(part, initContainers).map(r => ({ kind: 'widget', start: r.start, end: r.end, raw: r.raw }));
-          const inlineRanges = typeof widgets.findInlineCodeRanges === 'function'
+          const hasInlineFinder = typeof widgets.findInlineCodeRanges === 'function';
+          if (hasInlineFinder) inlinePreExtracted = true;
+          const inlineRanges = hasInlineFinder
             ? widgets.findInlineCodeRanges(part, initContainers).map(r => ({ kind: 'inline', start: r.start, end: r.end }))
             : [];
           const events = [...widgetRanges, ...inlineRanges].sort((a, b) => a.start - b.start);
@@ -112,11 +208,16 @@
             if (ev.start < cursor) continue;
             rebuilt += stripPlain(part.slice(cursor, ev.start));
             if (ev.kind === 'inline') {
-              rebuilt += part.slice(ev.start, ev.end);
+              const inner = typeof widgets.renderInlineCodeSpanPayload === 'function'
+                ? widgets.renderInlineCodeSpanPayload(part, ev.start, ev.end, initContainers)
+                : formatInlineCodeInnerFallback(part.slice(ev.start, ev.end));
+              const icIdx = inlineSlots.length;
+              inlineSlots.push(`<code>${escapeHtml(inner)}</code>`);
+              rebuilt += `${tok}IC${icIdx}END`;
             } else {
               const idx = widgetSlots.length;
               widgetSlots.push(widgets.renderWidgetBlockToHtml(ev.raw));
-              rebuilt += `\n\n@@WIDGET${idx}@@\n\n`;
+              rebuilt += `\n\n${tok}WIDGET${idx}END\n\n`;
             }
             cursor = ev.end;
           }
@@ -129,6 +230,11 @@
       work = src;
     }
 
+    const inlineOpts = { ...opts, _tokPrefix: tok, _inlineSlots: inlineSlots, _inlinePreExtracted: inlinePreExtracted };
+    const slotCodeRe = new RegExp(`^${tok}CODE(\\d+)END$`);
+    const slotWidgetRe = new RegExp(`^${tok}WIDGET(\\d+)END$`);
+    const slotAnyBlockRe = new RegExp(`^(?:${tok}CODE\\d+END|${tok}WIDGET\\d+END)$`);
+
     // 3. Parse lines into paragraphs, headings, lists, tables, blockquotes
     const lines = work.split('\n');
     let i = 0;
@@ -137,10 +243,10 @@
       const trimmed = line.trim();
       if (!trimmed) { i++; continue; }
 
-      const codeM = trimmed.match(/^@@CODE(\d+)@@$/);
+      const codeM = trimmed.match(slotCodeRe);
       if (codeM) { blocks.push(codeSlots[Number(codeM[1])]); i++; continue; }
 
-      const widM = trimmed.match(/^@@WIDGET(\d+)@@$/);
+      const widM = trimmed.match(slotWidgetRe);
       if (widM) { blocks.push(widgetSlots[Number(widM[1])]); i++; continue; }
 
       if (/^---+$/.test(trimmed)) { blocks.push('<hr>'); i++; continue; }
@@ -148,13 +254,14 @@
       const headM = trimmed.match(/^(#{1,4})\s+(.+)$/);
       if (headM) {
         const lvl = Math.min(4, headM[1].length + 1);
-        blocks.push(`<h${lvl}>${renderInline(headM[2], opts)}</h${lvl}>`);
+        blocks.push(`<h${lvl}>${renderInline(headM[2], inlineOpts)}</h${lvl}>`);
         i++;
         continue;
       }
 
       // Markdown table
-      if (trimmed.startsWith('|') && i + 1 < lines.length && /^\|[\s:|-]+\|/.test(lines[i + 1].trim())) {
+      const isTableAt = idx => idx + 1 < lines.length && lines[idx].trim().startsWith('|') && /^\|[\s:|-]+\|/.test(lines[idx + 1].trim());
+      if (isTableAt(i)) {
         const headers = splitMarkdownTableRow(trimmed);
         i += 2;
         const rows = [];
@@ -162,8 +269,8 @@
           rows.push(splitMarkdownTableRow(lines[i]));
           i++;
         }
-        const thead = `<thead><tr>${headers.map(h => `<th>${renderInline(h, opts)}</th>`).join('')}</tr></thead>`;
-        const tbody = `<tbody>${rows.map(r => `<tr>${r.map(c => `<td>${renderInline(c, opts)}</td>`).join('')}</tr>`).join('')}</tbody>`;
+        const thead = `<thead><tr>${headers.map(h => `<th>${renderInline(h, inlineOpts)}</th>`).join('')}</tr></thead>`;
+        const tbody = `<tbody>${rows.map(r => `<tr>${r.map(c => `<td>${renderInline(c, inlineOpts)}</td>`).join('')}</tr>`).join('')}</tbody>`;
         blocks.push(`<div class="l-table-wrap"><table>${thead}${tbody}</table></div>`);
         continue;
       }
@@ -172,7 +279,7 @@
       if (/^[-*]\s+/.test(trimmed)) {
         const items = [];
         while (i < lines.length && /^[-*]\s+/.test(lines[i].trim())) {
-          items.push(`<li>${renderInline(lines[i].trim().replace(/^[-*]\s+/, ''), opts)}</li>`);
+          items.push(`<li>${renderInline(lines[i].trim().replace(/^[-*]\s+/, ''), inlineOpts)}</li>`);
           i++;
         }
         blocks.push(`<ul>${items.join('')}</ul>`);
@@ -183,41 +290,55 @@
       if (/^\d+\.\s+/.test(trimmed)) {
         const items = [];
         while (i < lines.length && /^\d+\.\s+/.test(lines[i].trim())) {
-          items.push(`<li>${renderInline(lines[i].trim().replace(/^\d+\.\s+/, ''), opts)}</li>`);
+          items.push(`<li>${renderInline(lines[i].trim().replace(/^\d+\.\s+/, ''), inlineOpts)}</li>`);
           i++;
         }
         blocks.push(`<ol>${items.join('')}</ol>`);
         continue;
       }
 
-      // Blockquote
+      // Blockquote (supports lazy paragraph continuations while stopping on block interrupts)
       if (trimmed.startsWith('>')) {
         const qLines = [];
-        while (i < lines.length && lines[i].trim().startsWith('>')) {
-          qLines.push(renderInline(lines[i].trim().replace(/^>\s?/, ''), opts));
+        while (i < lines.length) {
+          const qt = lines[i].trim();
+          if (!qt) break;
+          if (qt.startsWith('>')) {
+            qLines.push(qt.replace(/^>\s?/, ''));
+            i++;
+            continue;
+          }
+          const prevQ = qLines.length ? qLines[qLines.length - 1].trim() : '';
+          const prevAllowsLazy = Boolean(prevQ) && !/^(?:#{1,6}(?:[ \t]|$)|(?:(?:\*[ \t]*){3,}|(?:-[ \t]*){3,}|(?:_[ \t]*){3,})$|[-+*]\s|\d{1,9}[.)]\s)/.test(prevQ);
+          const nextInterrupts =
+            slotAnyBlockRe.test(qt) ||
+            /^(?:#{1,6}(?:[ \t]|$)|(?:(?:\*[ \t]*){3,}|(?:-[ \t]*){3,}|(?:_[ \t]*){3,})$|[-+*](?:[ \t]|$)|\d{1,9}[.)](?:[ \t]|$))/.test(qt) ||
+            isTableAt(i);
+          if (!prevAllowsLazy || nextInterrupts) break;
+          qLines.push(qt);
           i++;
         }
-        blocks.push(`<blockquote>${qLines.join('<br>')}</blockquote>`);
+        blocks.push(`<blockquote>${qLines.map(ql => renderInline(ql, inlineOpts)).join('<br>')}</blockquote>`);
         continue;
       }
 
       // Paragraph (only stops at '|' if it starts a real Markdown table, plus mandatory progress guard)
       const prevI = i;
       const pLines = [];
-      const isTableAt = idx => idx + 1 < lines.length && lines[idx].trim().startsWith('|') && /^\|[\s:|-]+\|/.test(lines[idx + 1].trim());
       while (
         i < lines.length &&
         lines[i].trim() &&
-        !/^(#{1,4}\s+|[-*]\s+|\d+\.\s+|>|@@CODE\d+@@|@@WIDGET\d+@@|---+$)/.test(lines[i].trim()) &&
+        !slotAnyBlockRe.test(lines[i].trim()) &&
+        !/^(#{1,4}\s+|[-*]\s+|\d+\.\s+|>|---+$)/.test(lines[i].trim()) &&
         !isTableAt(i)
       ) {
-        pLines.push(renderInline(lines[i].trim(), opts));
+        pLines.push(renderInline(lines[i].trim(), inlineOpts));
         i++;
       }
       if (pLines.length) {
         blocks.push(`<p>${pLines.join('<br>')}</p>`);
       } else if (i === prevI) {
-        blocks.push(`<p>${renderInline(trimmed, opts)}</p>`);
+        blocks.push(`<p>${renderInline(trimmed, inlineOpts)}</p>`);
         i++;
       }
     }

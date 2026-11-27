@@ -53,6 +53,20 @@
     const fmt = r => `| ${r.concat(Array(Math.max(0, cols - r.length)).fill('')).join(' | ')} |`;
     return `\n\n${fmt(rows[0])}\n| ${Array(cols).fill('---').join(' | ')} |\n${rows.slice(1).map(fmt).join('\n')}\n\n`;
   }
+  function buildSafeCodeFence(code) {
+    const matches = String(code || '').match(/`+/g);
+    const maxRun = matches ? Math.max(...matches.map(m => m.length)) : 0;
+    return '`'.repeat(Math.max(3, maxRun + 1));
+  }
+  function wrapInlineCode(text) {
+    const s = String(text || '');
+    if (!s) return '';
+    const matches = s.match(/`+/g);
+    const maxRun = matches ? Math.max(...matches.map(m => m.length)) : 0;
+    const delim = '`'.repeat(maxRun + 1);
+    const needsPad = s.startsWith('`') || s.endsWith('`');
+    return `${delim}${needsPad ? ' ' : ''}${s}${needsPad ? ' ' : ''}${delim}`;
+  }
   function messageDomText(node) {
     if (node.nodeType === 3) return node.textContent || '';
     const tag = (node.tagName || '').toLowerCase();
@@ -62,12 +76,12 @@
     if (tag === 'pre') {
       const code=node.querySelector('code');
       const lang=code?.className?.match(/language-([\w+-]+)/)?.[1] || '';
-      const rawCode = (code?.textContent || node.textContent || '').replace(/^\n+|\n+$/g, '');
-      const fence = rawCode.includes('```') ? '````' : '```';
+      const rawCode = (code?.textContent || node.textContent || '').replace(/\r\n/g, '\n').replace(/^\n+|\n+$/g, '');
+      const fence = buildSafeCodeFence(rawCode);
       return '\n\n' + fence + lang + '\n' + rawCode + '\n' + fence + '\n\n';
     }
     const text = Array.from(node.childNodes || []).map(messageDomText).join('');
-    if (tag === 'code') return '`' + text + '`';
+    if (tag === 'code') return wrapInlineCode(text);
     if (/^h[1-6]$/.test(tag)) return '\n\n' + '#'.repeat(Number(tag[1])) + ' ' + text + '\n\n';
     if (tag === 'li') return '\n- ' + text;
     if (['p','div','ul','ol','blockquote'].includes(tag)) return '\n' + text + '\n';
@@ -542,7 +556,7 @@
 
           codeBlocks.push({ language, code });
 
-          const fence = code.includes('```') ? '````' : '```';
+          const fence = buildSafeCodeFence(code);
           const mdNode = document.createTextNode(`\n\n${fence}${language}\n${code}\n${fence}\n\n`);
           if (pre.parentNode) {
             pre.parentNode.replaceChild(mdNode, pre);
@@ -602,7 +616,7 @@
 
             codeBlocks.push({ language, code });
 
-            const fence = code.includes('```') ? '````' : '```';
+            const fence = buildSafeCodeFence(code);
             const mdNode = document.createTextNode(`\n\n${fence}${language}\n${code}\n${fence}\n\n`);
             if (pre.parentNode) {
               pre.parentNode.replaceChild(mdNode, pre);

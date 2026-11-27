@@ -106,7 +106,10 @@
       if (codeBlocks.length > 0 && !contentText.includes('```')) {
         const codeMd = codeBlocks.map(cb => {
           const lang = cb.language || '';
-          return `\n\`\`\`${lang}\n${cb.code}\n\`\`\``;
+          const body = String(cb.code || '');
+          const m = body.match(/`+/g);
+          const fence = '`'.repeat(Math.max(3, (m ? Math.max(...m.map(x => x.length)) : 0) + 1));
+          return `\n${fence}${lang}\n${body}\n${fence}`;
         }).join('\n');
         contentText += `\n${codeMd}`;
       }
@@ -192,7 +195,12 @@
       // Bloques de código embebidos si están presentes por separado
       const codeBlocks = (m.content && Array.isArray(m.content.codeBlocks)) ? m.content.codeBlocks : (Array.isArray(m.codeBlocks) ? m.codeBlocks : []);
       if (codeBlocks.length > 0 && !contentText.includes('```')) {
-        const cbText = codeBlocks.map(cb => `\`\`\`${cb.language || 'plaintext'}\n${cb.code || ''}\n\`\`\``).join('\n\n');
+        const cbText = codeBlocks.map(cb => {
+          const body = String(cb.code || '');
+          const runs = body.match(/`+/g);
+          const fence = '`'.repeat(Math.max(3, (runs ? Math.max(...runs.map(x => x.length)) : 0) + 1));
+          return `${fence}${cb.language || 'plaintext'}\n${body}\n${fence}`;
+        }).join('\n\n');
         contentText += `\n\n${cbText}`;
       }
 

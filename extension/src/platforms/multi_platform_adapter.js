@@ -113,7 +113,9 @@
       const cls = code?.className || '';
       const lang = (cls.match(/language-([\w+-]+)/) || [])[1] || '';
       const rawCode = ((code ? code.textContent : node.textContent) || '').replace(/\r\n/g, '\n').replace(/^\n+|\n+$/g, '');
-      const fence = rawCode.includes('```') ? '````' : '```';
+      const matches = rawCode.match(/`+/g);
+      const maxRun = matches ? Math.max(...matches.map(m => m.length)) : 0;
+      const fence = '`'.repeat(Math.max(3, maxRun + 1));
       return `\n\n${fence}${lang}\n${rawCode}\n${fence}\n\n`;
     }
 
@@ -137,7 +139,12 @@
     const inner = Array.from(node.childNodes || []).map(serializeDomToMarkdown).join('');
     if (tag === 'code') {
       const cleanCode = inner.trim();
-      return cleanCode ? `\`${cleanCode}\`` : '';
+      if (!cleanCode) return '';
+      const matches = cleanCode.match(/`+/g);
+      const maxRun = matches ? Math.max(...matches.map(m => m.length)) : 0;
+      const delim = '`'.repeat(maxRun + 1);
+      const needsPad = cleanCode.startsWith('`') || cleanCode.endsWith('`');
+      return `${delim}${needsPad ? ' ' : ''}${cleanCode}${needsPad ? ' ' : ''}${delim}`;
     }
     if (/^h[1-6]$/.test(tag)) {
       const heading = inner.trim();

@@ -1348,11 +1348,23 @@
     return links.length ? `\n\n> **Fuentes:** ${links.join(' · ')}` : '';
   }
 
+  function buildSafeCodeFence(code) {
+    const matches = String(code || '').match(/`+/g);
+    const maxRun = matches ? Math.max(...matches.map(m => m.length)) : 0;
+    return '`'.repeat(Math.max(3, maxRun + 1));
+  }
+
+  function formatFencedCodeBlockMd(block) {
+    const body = String(block?.code || '');
+    const fence = buildSafeCodeFence(body);
+    return `${fence}${block?.language || ''}\n${body}\n${fence}`;
+  }
+
   function formatMessageMarkdown(message, index, options = {}) {
     const text = markdownResources(message, index, options);
     const blocks = message.codeBlocks || message.content?.codeBlocks || [];
     const hasInlineFence = splitFencedCodeSegments(text).some(seg => seg.isCode);
-    const codePart = !hasInlineFence ? blocks.map(block => '\n\n```' + (block.language || '') + '\n' + (block.code || '') + '\n```').join('') : '';
+    const codePart = !hasInlineFence ? blocks.map(block => '\n\n' + formatFencedCodeBlockMd(block)).join('') : '';
     const citationsPart = options.includeCitations !== false ? formatCitationsMarkdown(message) : '';
     return text + codePart + citationsPart;
   }
@@ -1404,7 +1416,7 @@
         const codeBlocks = Array.isArray(msg.codeBlocks) ? msg.codeBlocks : (Array.isArray(msg.content?.codeBlocks) ? msg.content.codeBlocks : []);
         if (codeBlocks.length > 0 && !splitFencedCodeSegments(text).some(seg => seg.isCode)) {
           codeBlocks.forEach(cb => {
-            lines.push(`\`\`\`${cb.language || ''}`, cb.code || '', '```', '');
+            lines.push(formatFencedCodeBlockMd(cb), '');
           });
         }
       });
@@ -1440,7 +1452,7 @@
         const codeBlocks = Array.isArray(msg.codeBlocks) ? msg.codeBlocks : (Array.isArray(msg.content?.codeBlocks) ? msg.content.codeBlocks : []);
         if (codeBlocks.length > 0 && !splitFencedCodeSegments(text).some(seg => seg.isCode)) {
           codeBlocks.forEach(cb => {
-            lines.push(`\`\`\`${cb.language || ''}`, cb.code || '', '```', '');
+            lines.push(formatFencedCodeBlockMd(cb), '');
           });
         }
 
@@ -1474,7 +1486,7 @@
       const codeBlocks = Array.isArray(msg.codeBlocks) ? msg.codeBlocks : (Array.isArray(msg.content?.codeBlocks) ? msg.content.codeBlocks : []);
       if (codeBlocks.length > 0 && !splitFencedCodeSegments(text).some(seg => seg.isCode)) {
         codeBlocks.forEach(cb => {
-          lines.push(`\`\`\`${cb.language || ''}`, cb.code || '', '```', '');
+          lines.push(formatFencedCodeBlockMd(cb), '');
         });
       }
 
@@ -1586,7 +1598,10 @@
     const pngPlatform = (entity.source?.platform || entity.sourcePlatform || 'CHATGPT').toUpperCase();
     for(const [index,msg] of messages.entries()){
       space(80);line(msg.role==='user'?'USUARIO':msg.role==='assistant'?pngPlatform:msg.role.toUpperCase(),12,'#25664f',true);y+=4;
-      const text=cleanExportText(typeof msg.text==='string'?msg.text:msg.content?.text).replace(/!\[[^\]]*\]\(<?[^)>]+>?\)/g,'');
+      const cleanedRaw = cleanExportText(typeof msg.text === 'string' ? msg.text : msg.content?.text);
+      const text = splitFencedCodeSegments(cleanedRaw).map(seg => seg.isCode
+        ? seg.text
+        : transformOutsideInlineCode(seg.text, s => s.replace(/!\[[^\]]*\]\(<?[^)>]+>?\)/g, ''), seg.initialContainers)).join('\n');
       textLines(text);
       const code=msg.codeBlocks||msg.content?.codeBlocks||[];
       if(!text.includes('```'))for(const block of code)textLines(block.code,true);

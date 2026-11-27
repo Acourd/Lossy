@@ -8,15 +8,31 @@
 (function (root, factory) {
   if (typeof module !== 'undefined' && module.exports) {
     const zipBuilder = require('./zip_builder.js');
-    module.exports = factory(zipBuilder);
+    const chatgptWidgets = require('../chatgpt_widgets.js');
+    module.exports = factory(zipBuilder, chatgptWidgets);
   } else {
     root.Lossy = root.Lossy || root.Liner || {};
     const zipBuilder = root.Lossy.ZipBuilder || root.Liner?.ZipBuilder;
-    root.Lossy.DocxBuilder = factory(zipBuilder);
+    const chatgptWidgets = root.Lossy.ChatGPTWidgets || root.Liner?.ChatGPTWidgets;
+    root.Lossy.DocxBuilder = factory(zipBuilder, chatgptWidgets);
     if (root.Liner) root.Liner.DocxBuilder = root.Lossy.DocxBuilder;
   }
-})(typeof globalThis !== 'undefined' ? globalThis : this, function (zipBuilderModule) {
+})(typeof globalThis !== 'undefined' ? globalThis : this, function (zipBuilderModule, widgets) {
   'use strict';
+
+  function isEscapedAt(str, idx) {
+    let bs = 0;
+    for (let k = idx - 1; k >= 0 && str[k] === '\\'; k--) bs++;
+    return (bs % 2) === 1;
+  }
+
+  function stripNonCodeMarkdownImages(proseChunk, initialContainers) {
+    const stripFn = str => String(str || '').replace(/!\[[^\]]*\]\(<?[^)>]+>?\)/g, (m, offset, full) => (isEscapedAt(full, offset) ? m : ''));
+    if (widgets && typeof widgets.transformOutsideInlineCode === 'function') {
+      return widgets.transformOutsideInlineCode(proseChunk, stripFn, initialContainers);
+    }
+    return stripFn(proseChunk);
+  }
 
   function dataUriToUint8Array(dataUri) {
     if (!dataUri || !dataUri.includes(',')) return new Uint8Array(0);
@@ -311,8 +327,8 @@
       );
 
       // Renderizar prosa y bloques de código en su orden exacto original
-      const pushProse = (proseChunk) => {
-        const cleaned = proseChunk.replace(/!\[[^\]]*\]\(<?[^)>]+>?\)/g, '');
+      const pushProse = (proseChunk, initialContainers) => {
+        const cleaned = stripNonCodeMarkdownImages(proseChunk, initialContainers);
         cleaned.split(/\n\s*\n/).forEach(pText => {
           const trimmed = pText.trim();
           if (!trimmed) return;
@@ -357,46 +373,69 @@
         });
       };
 
-      // CommonMark-compliant line scanner (0-3 spaces, backticks/tildes, trailing spaces, unclosed to EOF)
-      const srcLines = originalText.replace(/\r\n/g, '\n').split('\n');
-      let proseBuf = [];
-      let codeBuf = [];
-      let inFence = false;
-      let fenceChar = '';
-      let fenceLen = 0;
-      let fenceLang = '';
+      // CommonMark-compliant segmentation preserving fenced, indented, and inline code literals
       let foundInlineFences = false;
-      const flushProse = () => { if (proseBuf.length) { pushProse(proseBuf.join('\n')); proseBuf = []; } };
-      for (const line of srcLines) {
-        if (!inFence) {
-          const openM = line.match(/^ {0,3}(`{3,}|~{3,})(.*)$/);
-          if (openM && !(openM[1][0] === '`' && openM[2].includes('`'))) {
-            flushProse();
-            inFence = true;
-            foundInlineFences = true;
-            fenceChar = openM[1][0];
-            fenceLen = openM[1].length;
-            fenceLang = openM[2].trim().split(/\s+/)[0] || '';
-            codeBuf = [];
-            continue;
+      if (widgets && typeof widgets.splitFencedCodeSegments === 'function') {
+        for (const seg of widgets.splitFencedCodeSegments(originalText.replace(/\r\n/g, '\n'))) {
+          if (seg.isCode) {
+            const cLines = seg.text.split('\n');
+            const openM = cLines[0].match(/^ {0,3}(`{3,}|~{3,})(.*)$/);
+            if (openM && !(openM[1][0] === '`' && openM[2].includes('`'))) {
+              foundInlineFences = true;
+              const fChar = openM[1][0];
+              const fLen = openM[1].length;
+              const fenceLang = openM[2].trim().split(/\s+/)[0] || '';
+              const lastLine = cLines.length > 1 ? cLines[cLines.length - 1] : '';
+              const closeM = lastLine.match(/^ {0,3}(`{3,}|~{3,})[ \t]*$/);
+              const hasClose = Boolean(closeM && closeM[1][0] === fChar && closeM[1].length >= fLen);
+              pushCodeBlock({ language: fenceLang, code: cLines.slice(1, hasClose ? -1 : undefined).join('\n') });
+            } else {
+              pushCodeBlock({ language: '', code: seg.text });
+            }
+          } else if (seg.text.trim()) {
+            pushProse(seg.text, seg.initialContainers);
           }
-          proseBuf.push(line);
-        } else {
-          const closeM = line.match(/^ {0,3}(`{3,}|~{3,})[ \t]*$/);
-          if (closeM && closeM[1][0] === fenceChar && closeM[1].length >= fenceLen) {
-            pushCodeBlock({ language: fenceLang, code: codeBuf.join('\n') });
-            inFence = false;
-            fenceChar = '';
-            fenceLen = 0;
-            fenceLang = '';
-            codeBuf = [];
-            continue;
-          }
-          codeBuf.push(line);
         }
+      } else {
+        const srcLines = originalText.replace(/\r\n/g, '\n').split('\n');
+        let proseBuf = [];
+        let codeBuf = [];
+        let inFence = false;
+        let fenceChar = '';
+        let fenceLen = 0;
+        let fenceLang = '';
+        const flushProse = () => { if (proseBuf.length) { pushProse(proseBuf.join('\n')); proseBuf = []; } };
+        for (const line of srcLines) {
+          if (!inFence) {
+            const openM = line.match(/^ {0,3}(`{3,}|~{3,})(.*)$/);
+            if (openM && !(openM[1][0] === '`' && openM[2].includes('`'))) {
+              flushProse();
+              inFence = true;
+              foundInlineFences = true;
+              fenceChar = openM[1][0];
+              fenceLen = openM[1].length;
+              fenceLang = openM[2].trim().split(/\s+/)[0] || '';
+              codeBuf = [];
+              continue;
+            }
+            proseBuf.push(line);
+          } else {
+            const closeM = line.match(/^ {0,3}(`{3,}|~{3,})[ \t]*$/);
+            if (closeM && closeM[1][0] === fenceChar && closeM[1].length >= fenceLen) {
+              pushCodeBlock({ language: fenceLang, code: codeBuf.join('\n') });
+              inFence = false;
+              fenceChar = '';
+              fenceLen = 0;
+              fenceLang = '';
+              codeBuf = [];
+              continue;
+            }
+            codeBuf.push(line);
+          }
+        }
+        if (inFence) pushCodeBlock({ language: fenceLang, code: codeBuf.join('\n') });
+        else flushProse();
       }
-      if (inFence) pushCodeBlock({ language: fenceLang, code: codeBuf.join('\n') });
-      else flushProse();
       if (!foundInlineFences && storedCode.length > 0) {
         storedCode.forEach(pushCodeBlock);
       }

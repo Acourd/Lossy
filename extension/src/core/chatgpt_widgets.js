@@ -1634,6 +1634,66 @@
     return transformOutsideCodeFences(text, renderWidgetBlockToHtml, 'html');
   }
 
+  function renderInlineCodeSpanPayload(str, spanStart, spanEnd, initialContainers) {
+    const s = String(str || '');
+    let ticks = 0;
+    while (spanStart + ticks < spanEnd && s[spanStart + ticks] === '`') ticks++;
+    const contentStart = spanStart + ticks;
+    const closeTickStart = spanEnd - ticks;
+    if (closeTickStart < contentStart) return s.slice(spanStart, spanEnd);
+    const rawInner = s.slice(contentStart, closeTickStart);
+    let inner;
+    if (!rawInner.includes('\n')) {
+      inner = rawInner;
+    } else {
+      const lines = s.split('\n');
+      const openLineStart = s.lastIndexOf('\n', Math.max(0, contentStart - 1)) + 1;
+      let openLineIdx = 0;
+      for (let pos = 0; pos < openLineStart; pos++) {
+        if (s[pos] === '\n') openLineIdx++;
+      }
+      let closeLineStart = openLineStart;
+      let closeLineIdx = openLineIdx;
+      for (let pos = openLineStart; pos < closeTickStart; pos++) {
+        if (s[pos] === '\n') {
+          closeLineIdx++;
+          closeLineStart = pos + 1;
+        }
+      }
+      const closeOffset = closeTickStart - closeLineStart;
+      const stepper = createContainerStepper(initialContainers);
+      const chunks = [];
+      for (let li = 0; li <= closeLineIdx; li++) {
+        const rawLine = lines[li].replace(/\r$/, '');
+        if (li < openLineIdx) {
+          const prevPara = stepper.inParagraph;
+          const { lead, hadMarker, isBlank, trimmedAfterLead, exitedAnyContainer } = stepper.step(rawLine);
+          const canSetext = prevPara && !exitedAnyContainer && !hadMarker;
+          const isNonPara = !isBlank && isSingleLineNonParaBlock(lead.cols, trimmedAfterLead, canSetext);
+          const isFenceOpen = !isBlank && lead.cols <= 3 && /^(`{3,}[^`]*|~{3,}.*)$/.test(trimmedAfterLead);
+          const isIndented = !isBlank && (hadMarker || !stepper.inParagraph) && lead.cols >= 4;
+          stepper.inParagraph = !(isBlank || isNonPara || isFenceOpen || isIndented);
+          continue;
+        }
+        if (li === openLineIdx) {
+          stepper.step(rawLine);
+          stepper.inParagraph = true;
+          chunks.push(rawLine.slice(contentStart - openLineStart));
+          continue;
+        }
+        const sliceForLine = li === closeLineIdx ? rawLine.slice(0, closeOffset) : rawLine;
+        const { rest } = stepper.step(sliceForLine);
+        stepper.inParagraph = true;
+        chunks.push(rest);
+      }
+      inner = chunks.join(' ');
+    }
+    if (inner.length >= 2 && inner.startsWith(' ') && inner.endsWith(' ') && /[^ ]/.test(inner)) {
+      inner = inner.slice(1, -1);
+    }
+    return inner;
+  }
+
   function stripControlTokensPlain(str) {
     return String(str || '').replace(/<(?:Cite|SuggestAutomation|DisplayAutomation)\b[^>]*\/>/gi, (m, offset, src) => (isEscapedAt(src, offset) ? m : ''));
   }
@@ -1702,6 +1762,7 @@
     splitFencedCodeSegments,
     transformOutsideInlineCode,
     findInlineCodeRanges,
+    renderInlineCodeSpanPayload,
     findTopLevelWidgetRanges,
     stripControlTokensPlain,
     stripControlTokensOnly,

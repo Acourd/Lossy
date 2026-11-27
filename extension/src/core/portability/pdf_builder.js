@@ -7,14 +7,28 @@
 
 (function (root, factory) {
   if (typeof module !== 'undefined' && module.exports) {
-    module.exports = factory();
+    module.exports = factory(require('../chatgpt_widgets.js'));
   } else {
     root.Lossy = root.Lossy || root.Liner || {};
-    root.Lossy.PdfBuilder = factory();
+    root.Lossy.PdfBuilder = factory(root.Lossy.ChatGPTWidgets || root.Liner?.ChatGPTWidgets);
     if (root.Liner) root.Liner.PdfBuilder = root.Lossy.PdfBuilder;
   }
-})(typeof globalThis !== 'undefined' ? globalThis : this, function () {
+})(typeof globalThis !== 'undefined' ? globalThis : this, function (widgets) {
   'use strict';
+
+  function isEscapedAt(str, idx) {
+    let bs = 0;
+    for (let k = idx - 1; k >= 0 && str[k] === '\\'; k--) bs++;
+    return (bs % 2) === 1;
+  }
+
+  function stripNonCodeMarkdownImages(proseChunk, initialContainers) {
+    const stripFn = str => String(str || '').replace(/!\[[^\]]*\]\(<?[^)>]+>?\)/g, (m, offset, full) => (isEscapedAt(full, offset) ? m : ''));
+    if (widgets && typeof widgets.transformOutsideInlineCode === 'function') {
+      return widgets.transformOutsideInlineCode(proseChunk, stripFn, initialContainers);
+    }
+    return stripFn(proseChunk);
+  }
 
   // Dimensiones A4 en puntos tipográficos (72 puntos/pulgada)
   const PAGE_WIDTH = 595.28;
@@ -425,8 +439,8 @@
 
       currentY -= 22;
 
-      const renderProseChunk = (proseChunk) => {
-        const cleaned = proseChunk.replace(/!\[[^\]]*\]\(<?[^)>]+>?\)/g, '');
+      const renderProseChunk = (proseChunk, initialContainers) => {
+        const cleaned = stripNonCodeMarkdownImages(proseChunk, initialContainers);
         if (!cleaned.trim()) return;
         const bodyLines = wrapText(cleaned, CONTENT_WIDTH - 12, 10, false);
         for (const line of bodyLines) {
@@ -489,46 +503,69 @@
         }
       };
 
-      // Renderizar prosa y bloques de código en su orden exacto original (scanner CommonMark)
-      const srcLines = cleanSource.replace(/\r\n/g, '\n').split('\n');
-      let proseBuf = [];
-      let codeBuf = [];
-      let inFence = false;
-      let fenceChar = '';
-      let fenceLen = 0;
-      let fenceLang = '';
+      // Renderizar prosa y bloques de código en su orden exacto original (CommonMark)
       let foundInlineFences = false;
-      const flushProse = () => { if (proseBuf.length) { renderProseChunk(proseBuf.join('\n')); proseBuf = []; } };
-      for (const line of srcLines) {
-        if (!inFence) {
-          const openM = line.match(/^ {0,3}(`{3,}|~{3,})(.*)$/);
-          if (openM && !(openM[1][0] === '`' && openM[2].includes('`'))) {
-            flushProse();
-            inFence = true;
-            foundInlineFences = true;
-            fenceChar = openM[1][0];
-            fenceLen = openM[1].length;
-            fenceLang = openM[2].trim().split(/\s+/)[0] || '';
-            codeBuf = [];
-            continue;
+      if (widgets && typeof widgets.splitFencedCodeSegments === 'function') {
+        for (const seg of widgets.splitFencedCodeSegments(cleanSource.replace(/\r\n/g, '\n'))) {
+          if (seg.isCode) {
+            const cLines = seg.text.split('\n');
+            const openM = cLines[0].match(/^ {0,3}(`{3,}|~{3,})(.*)$/);
+            if (openM && !(openM[1][0] === '`' && openM[2].includes('`'))) {
+              foundInlineFences = true;
+              const fChar = openM[1][0];
+              const fLen = openM[1].length;
+              const fenceLang = openM[2].trim().split(/\s+/)[0] || '';
+              const lastLine = cLines.length > 1 ? cLines[cLines.length - 1] : '';
+              const closeM = lastLine.match(/^ {0,3}(`{3,}|~{3,})[ \t]*$/);
+              const hasClose = Boolean(closeM && closeM[1][0] === fChar && closeM[1].length >= fLen);
+              renderCodeChunk({ language: fenceLang, code: cLines.slice(1, hasClose ? -1 : undefined).join('\n') });
+            } else {
+              renderCodeChunk({ language: '', code: seg.text });
+            }
+          } else if (seg.text.trim()) {
+            renderProseChunk(seg.text, seg.initialContainers);
           }
-          proseBuf.push(line);
-        } else {
-          const closeM = line.match(/^ {0,3}(`{3,}|~{3,})[ \t]*$/);
-          if (closeM && closeM[1][0] === fenceChar && closeM[1].length >= fenceLen) {
-            renderCodeChunk({ language: fenceLang, code: codeBuf.join('\n') });
-            inFence = false;
-            fenceChar = '';
-            fenceLen = 0;
-            fenceLang = '';
-            codeBuf = [];
-            continue;
-          }
-          codeBuf.push(line);
         }
+      } else {
+        const srcLines = cleanSource.replace(/\r\n/g, '\n').split('\n');
+        let proseBuf = [];
+        let codeBuf = [];
+        let inFence = false;
+        let fenceChar = '';
+        let fenceLen = 0;
+        let fenceLang = '';
+        const flushProse = () => { if (proseBuf.length) { renderProseChunk(proseBuf.join('\n')); proseBuf = []; } };
+        for (const line of srcLines) {
+          if (!inFence) {
+            const openM = line.match(/^ {0,3}(`{3,}|~{3,})(.*)$/);
+            if (openM && !(openM[1][0] === '`' && openM[2].includes('`'))) {
+              flushProse();
+              inFence = true;
+              foundInlineFences = true;
+              fenceChar = openM[1][0];
+              fenceLen = openM[1].length;
+              fenceLang = openM[2].trim().split(/\s+/)[0] || '';
+              codeBuf = [];
+              continue;
+            }
+            proseBuf.push(line);
+          } else {
+            const closeM = line.match(/^ {0,3}(`{3,}|~{3,})[ \t]*$/);
+            if (closeM && closeM[1][0] === fenceChar && closeM[1].length >= fenceLen) {
+              renderCodeChunk({ language: fenceLang, code: codeBuf.join('\n') });
+              inFence = false;
+              fenceChar = '';
+              fenceLen = 0;
+              fenceLang = '';
+              codeBuf = [];
+              continue;
+            }
+            codeBuf.push(line);
+          }
+        }
+        if (inFence) renderCodeChunk({ language: fenceLang, code: codeBuf.join('\n') });
+        else flushProse();
       }
-      if (inFence) renderCodeChunk({ language: fenceLang, code: codeBuf.join('\n') });
-      else flushProse();
       if (!foundInlineFences && storedCode.length > 0) {
         storedCode.forEach(renderCodeChunk);
       }
