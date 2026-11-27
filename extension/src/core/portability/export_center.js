@@ -684,22 +684,57 @@
     return /^\{[\s\S]*"path"\s*:\s*"\/Automations\//i.test(t);
   }
 
-  function isBlockInterruptLineMd(line) {
+  function isSingleLineNonParaBlockMd(cols, trimmed) {
+    if (cols > 3) return false;
+    if (/^#{1,6}(?:[ \t]|$)/.test(trimmed)) return true;
+    if (/^(?:(?:\*[ \t]*){3,}|(?:-[ \t]*){3,}|(?:_[ \t]*){3,})$/.test(trimmed)) return true;
+    if (/^=+ *$/.test(trimmed)) return true;
+    return false;
+  }
+
+  function isBlockInterruptLineMd(line, inList = false, inPara = true) {
     const ln = String(line || '').replace(/\r$/, '');
     if (/^[ \t]*$/.test(ln)) return true;
-    if (/^ {0,3}(?:#{1,6}(?:[ \t]|$)|>|(?:[-+*]|\d{1,9}[.)])(?:[ \t]|$)|=+ *$|`{3,}[^`]*$|~{3,}.*$)/.test(ln)) return true;
+    if (/^ {0,3}(?:#{1,6}(?:[ \t]|$)|>|`{3,}[^`]*$|~{3,}.*$|==* *$)/.test(ln)) return true;
     if (/^ {0,3}(?:(?:\*[ \t]*){3,}|(?:-[ \t]*){3,}|(?:_[ \t]*){3,})$/.test(ln)) return true;
+    if (/^ {0,3}(?:[-+*][ \t]+\S|1[.)][ \t]+\S)/.test(ln)) return true;
+    if ((!inPara || inList) && /^ {0,3}\d{1,9}[.)][ \t]+\S/.test(ln)) return true;
     return false;
   }
 
   function inlineSpanCrossesBlockBreakMd(s, contentStart, closePos) {
     const firstNl = s.indexOf('\n', contentStart);
     if (firstNl === -1 || firstNl >= closePos) return false;
+    const openLineStart = s.lastIndexOf('\n', Math.max(0, contentStart - 1)) + 1;
+    const openRaw = s.slice(openLineStart, firstNl).replace(/\r$/, '');
+    let openBq = 0;
+    let openRest = openRaw;
+    while (true) {
+      const m = openRest.match(/^ {0,3}>(?:[ \t])?/);
+      if (!m) break;
+      openRest = openRest.slice(m[0].length);
+      openBq++;
+    }
+    const openInList = /^ {0,3}(?:[-+*]|\d{1,9}[.)])[ \t]+\S/.test(openRest);
+
     let lineStart = firstNl + 1;
     while (lineStart <= closePos) {
       let lineEnd = s.indexOf('\n', lineStart);
       if (lineEnd === -1) lineEnd = s.length;
-      if (isBlockInterruptLineMd(s.slice(lineStart, lineEnd))) return true;
+      const rawLine = s.slice(lineStart, lineEnd).replace(/\r$/, '');
+      if (openBq === 0) {
+        if (isBlockInterruptLineMd(rawLine, openInList, true)) return true;
+      } else {
+        let rest = rawLine;
+        let count = 0;
+        while (count < openBq) {
+          const m = rest.match(/^ {0,3}>(?:[ \t])?/);
+          if (!m) break;
+          rest = rest.slice(m[0].length);
+          count++;
+        }
+        if (isBlockInterruptLineMd(rest, openInList, true)) return true;
+      }
       if (lineEnd >= closePos) break;
       lineStart = lineEnd + 1;
     }
@@ -770,7 +805,8 @@
     let fenceLen = 0;
     let fenceContainers = [];
     let containers = [];
-    let prevLineBlank = true;
+    let inParagraph = false;
+    let prevBqCount = 0;
 
     const flush = isCode => {
       if (buf.length) {
@@ -818,7 +854,7 @@
       }
       return { ok: true, rest: pad + str.slice(i), col };
     };
-    const matchList = (str, startCol) => {
+    const matchList = (str, startCol, canInterruptPara = true) => {
       const lead = measureLeadCols(str, startCol);
       if (lead.cols > 3) return { ok: false };
       const after = str.slice(lead.idx);
@@ -828,6 +864,10 @@
       const wsStartCol = lead.endCol + markerLen;
       const wsLead = measureLeadCols(after.slice(markerLen), wsStartCol);
       const isEmptyItem = after.slice(markerLen + wsLead.idx).trim().length === 0;
+      if (!canInterruptPara) {
+        if (isEmptyItem) return { ok: false };
+        if (/^\d/.test(m[1]) && m[1] !== '1.' && m[1] !== '1)') return { ok: false };
+      }
       const wsCols = isEmptyItem ? 1 : (wsLead.cols >= 5 ? 1 : wsLead.cols);
       const targetIndent = lead.cols + markerLen + wsCols;
       const stripped = stripIndentCols(after.slice(markerLen), wsStartCol, wsCols);
@@ -860,6 +900,7 @@
       let rest = line;
       let col = 0;
       let matched = 0;
+      const hadActiveList = containers.some(c => c.type === 'list');
       while (matched < containers.length) {
         const c = containers[matched];
         if (c.type === 'bq') {
@@ -880,6 +921,7 @@
           matched++;
         }
       }
+      const listExited = hadActiveList && !containers.slice(0, matched).some(c => c.type === 'list');
       containers.length = matched;
       let hadMarker = false;
       while (rest.trim().length > 0) {
@@ -891,7 +933,7 @@
           hadMarker = true;
           continue;
         }
-        const lst = matchList(rest, col);
+        const lst = matchList(rest, col, !inParagraph || listExited || hadMarker);
         if (lst.ok) {
           containers.push({ type: 'list', indent: lst.indent });
           rest = lst.rest;
@@ -907,13 +949,13 @@
     for (const line of lines) {
       if (inFence) {
         const { ok, rest, col } = matchFenceContainers(line, fenceContainers);
-        const isBlank = rest.trim().length === 0;
         if (!ok) {
           flush(true);
           inFence = false;
           fenceChar = '';
           fenceLen = 0;
           fenceContainers = [];
+          inParagraph = false;
         } else {
           buf.push(line);
           const closeLead = measureLeadCols(rest, col);
@@ -924,9 +966,9 @@
             fenceChar = '';
             fenceLen = 0;
             fenceContainers = [];
-            prevLineBlank = false;
+            inParagraph = false;
           } else {
-            prevLineBlank = isBlank;
+            inParagraph = false;
           }
           continue;
         }
@@ -935,16 +977,19 @@
       const { rest, col, hadMarker, isBlank } = advanceContainers(line);
       const lead = measureLeadCols(rest, col);
       const curBqCount = containers.filter(c => c.type === 'bq').length;
+      if (curBqCount < prevBqCount) inParagraph = false;
+      prevBqCount = curBqCount;
 
       if (inIndented) {
         if (curBqCount >= indentedBqCount && (lead.cols >= 4 || isBlank)) {
           buf.push(line);
-          prevLineBlank = isBlank;
+          inParagraph = false;
           continue;
         }
         flush(true);
         inIndented = false;
         indentedBqCount = 0;
+        inParagraph = false;
       }
 
       const openM = lead.cols <= 3 ? rest.slice(lead.idx).match(/^(`{3,}|~{3,})(.*)$/) : null;
@@ -955,21 +1000,23 @@
         fenceLen = openM[1].length;
         fenceContainers = containers.map(c => ({ ...c }));
         buf.push(line);
-        prevLineBlank = false;
+        inParagraph = false;
         continue;
       }
 
-      if ((hadMarker || prevLineBlank) && lead.cols >= 4 && !isBlank) {
+      if ((hadMarker || !inParagraph) && lead.cols >= 4 && !isBlank) {
         flush(false);
         inIndented = true;
         indentedBqCount = curBqCount;
         buf.push(line);
-        prevLineBlank = false;
+        inParagraph = false;
         continue;
       }
 
+      const trimmedAfterLead = rest.slice(lead.idx);
+      const lineIsNonParaBlock = !isBlank && isSingleLineNonParaBlockMd(lead.cols, trimmedAfterLead);
       buf.push(line);
-      prevLineBlank = isBlank;
+      inParagraph = isBlank ? false : !lineIsNonParaBlock;
     }
     flush(inFence || inIndented);
     return segments;
@@ -1020,13 +1067,85 @@
     return out;
   }
 
-  function detectMarkupMimeType(bytes) {
-    if (!bytes || typeof bytes.length !== 'number' || bytes.length === 0) return null;
-    const head = decodeBytesHeadUtf8(bytes, 8192).replace(/^\uFEFF/, '');
+  function decodeUnicodeBomOrUtf16Text(bytes) {
+    if (!bytes || typeof bytes.length !== 'number' || bytes.length < 2) return null;
+    const len = bytes.length;
+    const u8 = bytes instanceof Uint8Array ? bytes : Uint8Array.from(bytes);
+
+    if (len >= 4) {
+      const is32le = u8[0] === 0xFF && u8[1] === 0xFE && u8[2] === 0x00 && u8[3] === 0x00;
+      const is32be = u8[0] === 0x00 && u8[1] === 0x00 && u8[2] === 0xFE && u8[3] === 0xFF;
+      if (is32le || is32be) {
+        let out = '';
+        const limit = Math.min(len, 262144);
+        for (let i = 4; i + 3 < limit; i += 4) {
+          const cp = is32le
+            ? (u8[i] | (u8[i + 1] << 8) | (u8[i + 2] << 16) | (u8[i + 3] << 24)) >>> 0
+            : ((u8[i] << 24) | (u8[i + 1] << 16) | (u8[i + 2] << 8) | u8[i + 3]) >>> 0;
+          if (cp === 0 || cp > 0x10FFFF || (cp <= 0x08 || cp === 0x0B || cp === 0x0C || (cp >= 0x0E && cp <= 0x1F) || cp === 0x7F)) return null;
+          out += String.fromCodePoint(cp);
+        }
+        return { text: out, complete: len <= 262144 };
+      }
+    }
+
+    let utf16Mode = null;
+    let startOffset = 0;
+    if (u8[0] === 0xFF && u8[1] === 0xFE) {
+      utf16Mode = 'le';
+      startOffset = 2;
+    } else if (u8[0] === 0xFE && u8[1] === 0xFF) {
+      utf16Mode = 'be';
+      startOffset = 2;
+    } else if (len >= 4 && (len % 2) === 0) {
+      const samplePairs = Math.min(len, 1024) >> 1;
+      let leZeroHigh = 0, lePrintable = 0, beZeroHigh = 0, bePrintable = 0;
+      const isPrint = b => (b >= 0x20 && b <= 0x7E) || b === 0x09 || b === 0x0A || b === 0x0D;
+      for (let i = 0; i < samplePairs * 2; i += 2) {
+        if (u8[i + 1] === 0x00) leZeroHigh++;
+        if (u8[i + 1] === 0x00 && isPrint(u8[i])) lePrintable++;
+        if (u8[i] === 0x00) beZeroHigh++;
+        if (u8[i] === 0x00 && isPrint(u8[i + 1])) bePrintable++;
+      }
+      if (leZeroHigh >= Math.ceil(samplePairs * 0.8) && lePrintable >= Math.max(2, Math.floor(samplePairs * 0.75))) utf16Mode = 'le';
+      else if (beZeroHigh >= Math.ceil(samplePairs * 0.8) && bePrintable >= Math.max(2, Math.floor(samplePairs * 0.75))) utf16Mode = 'be';
+    }
+
+    if (!utf16Mode) return null;
+    const limit = Math.min(len, 262144);
+    const bodyLen = (limit - startOffset) & ~1;
+    if (bodyLen <= 0) return null;
+    let viewBytes = u8.subarray(startOffset, startOffset + bodyLen);
+    if (utf16Mode === 'be') {
+      const swapped = new Uint8Array(bodyLen);
+      for (let i = 0; i < bodyLen; i += 2) {
+        swapped[i] = viewBytes[i + 1];
+        swapped[i + 1] = viewBytes[i];
+      }
+      viewBytes = swapped;
+    }
+    let decoded = '';
+    if (typeof TextDecoder !== 'undefined') {
+      decoded = new TextDecoder('utf-16le', { fatal: false }).decode(viewBytes);
+    } else {
+      for (let i = 0; i < viewBytes.length; i += 2) {
+        decoded += String.fromCharCode(viewBytes[i] | (viewBytes[i + 1] << 8));
+      }
+    }
+    for (let i = 0; i < Math.min(decoded.length, 4096); i++) {
+      const c = decoded.charCodeAt(i);
+      if (c <= 0x08 || c === 0x0B || c === 0x0C || (c >= 0x0E && c <= 0x1F) || c === 0x7F || c === 0xFFFD) return null;
+    }
+    return { text: decoded, complete: len <= 262144 };
+  }
+
+  function classifyDecodedTextMime(fullText, canParseCompleteJson) {
+    const head = fullText.slice(0, 8192).replace(/^\uFEFF/, '');
     let trimmed = head.trimStart();
     let hasXmlPrologue = false;
     let hasXhtmlDoctype = false;
     let hasHtmlDoctype = false;
+    let doctypeRoot = '';
 
     const stripComments = s => {
       let cur = s;
@@ -1049,12 +1168,11 @@
       if (endPi === -1) break;
       trimmed = stripComments(trimmed.slice(endPi + 2).trimStart());
     }
-    const doctypeM = trimmed.match(/^<!doctype\s+([^>]+)>/i);
+    const doctypeM = trimmed.match(/^<!doctype\s+([^\s\[>]+)([^>]*)>/i);
     if (doctypeM) {
-      const dt = doctypeM[1];
-      if (/\bsvg\b/i.test(dt)) return 'image/svg+xml';
-      if (/\bxhtml\b/i.test(dt)) hasXhtmlDoctype = true;
-      else if (/\bhtml\b/i.test(dt)) hasHtmlDoctype = true;
+      doctypeRoot = doctypeM[1].toLowerCase();
+      if (/\bxhtml\b/i.test(doctypeM[0])) hasXhtmlDoctype = true;
+      else if (doctypeRoot === 'html') hasHtmlDoctype = true;
       trimmed = stripComments(trimmed.slice(doctypeM[0].length).trimStart());
     }
     if (/^<svg(?=[\s>/])/i.test(trimmed)) return 'image/svg+xml';
@@ -1065,23 +1183,35 @@
     if (/^(?:<head|<body|<script|<style|<title|<meta|<iframe|<object|<embed)(?=[\s>/])/i.test(trimmed) || (hasHtmlDoctype && !hasXhtmlDoctype)) {
       return 'text/html';
     }
+    if (doctypeRoot === 'svg') return 'image/svg+xml';
     if (hasXmlPrologue) return 'application/xml';
 
-    if (isPlainUtf8Text(bytes)) {
-      const t = trimmed;
-      if (/^(?:\{|\[|true\b|false\b|null\b|-?\d|")/.test(t)) {
-        if (bytes.length <= 262144) {
-          try {
-            JSON.parse(decodeBytesHeadUtf8(bytes, bytes.length));
-            return 'application/json';
-          } catch (_) {}
-        } else if (/^(?:\{\s*"|\[\s*[\{\["\d\-tfn])/.test(t)) {
+    const t = trimmed;
+    if (/^(?:\{|\[|true\b|false\b|null\b|-?\d|")/.test(t)) {
+      if (canParseCompleteJson) {
+        try {
+          JSON.parse(fullText);
           return 'application/json';
-        }
+        } catch (_) {}
+      } else if (/^(?:\{\s*"|\[\s*[\{\["\d\-tfn])/.test(t)) {
+        return 'application/json';
       }
-      return 'text/plain';
     }
     return null;
+  }
+
+  function detectMarkupMimeType(bytes) {
+    if (!bytes || typeof bytes.length !== 'number' || bytes.length === 0) return null;
+    const unicodeText = decodeUnicodeBomOrUtf16Text(bytes);
+    if (unicodeText) {
+      return classifyDecodedTextMime(unicodeText.text, unicodeText.complete) || 'text/plain';
+    }
+    const utf8Head = decodeBytesHeadUtf8(bytes, 8192);
+    const plain = isPlainUtf8Text(bytes);
+    const fullUtf8 = plain && bytes.length <= 262144 ? decodeBytesHeadUtf8(bytes, bytes.length) : utf8Head;
+    const classified = classifyDecodedTextMime(fullUtf8, plain && bytes.length <= 262144);
+    if (classified) return classified;
+    return plain ? 'text/plain' : null;
   }
 
   function isDeclaredImageAsset(asset) {
