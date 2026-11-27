@@ -13,7 +13,7 @@
     <header class="chrome-header">
       <div class="brand-group">
         <div class="brand-glyph-box" aria-hidden="true">
-          <img src="../../icons/icon128.png" alt="Lossy" class="brand-glyph-img" width="24" height="24">
+          <img src="../../icons/logo-lossy.svg" alt="Lossy" class="brand-glyph-img" width="28" height="28">
         </div>
         <div class="brand-meta">
           <h1 class="brand-title">Lossy</h1>
@@ -47,40 +47,57 @@
         </div>
       </section>
 
-      <!-- Linear Transit Card (Source ────●────> Portable) -->
+      <!-- Current Conversation Bento Card (Option 4 — 3-Column Metric Band) -->
       <section id="conversation-info" class="transit-card hidden">
-        <p class="conversation-eyebrow">CONVERSACIÓN ACTUAL</p>
+        <div class="conv-card-top">
+          <p id="conv-eyebrow" class="conversation-eyebrow">CONVERSACIÓN ACTUAL</p>
+          <span class="conv-status-pill"><span id="transit-status-sub">Capturado</span></span>
+        </div>
         <h2 id="conv-title" class="conv-title">Conversación</h2>
-        
-        <div class="transit-conduit">
-          <div class="transit-endpoint left">
-            <span class="endpoint-name" id="platform-tag">CHATGPT</span>
-            <span class="endpoint-meta" id="msg-count">0 turnos</span>
-          </div>
 
-          <div class="transit-rail" aria-hidden="true">
-            <div class="rail-line"></div>
-            <div id="transit-rail-node" class="rail-node"></div>
+        <div class="conv-metrics-band" role="group" aria-label="Resumen de conversación">
+          <div class="conv-metric-cell">
+            <strong id="metric-messages" class="conv-metric-val">0</strong>
+            <span class="conv-metric-lbl">Mensajes</span>
           </div>
-
-          <div class="transit-endpoint right">
-            <span class="endpoint-name" id="export-readiness-label">CONTEXTO</span>
-            <span class="endpoint-meta" id="transit-status-sub">Capturado</span>
+          <div class="conv-metric-cell">
+            <strong id="metric-images" class="conv-metric-val">0</strong>
+            <span class="conv-metric-lbl">Imágenes</span>
+          </div>
+          <div class="conv-metric-cell">
+            <strong id="metric-updated" class="conv-metric-val">—</strong>
+            <span class="conv-metric-lbl">Actualizado</span>
           </div>
         </div>
 
+        <!-- Hidden compatibility hooks for existing state/test bindings -->
+        <div class="transit-conduit hidden" aria-hidden="true">
+          <span class="endpoint-name" id="platform-tag">CHATGPT</span>
+          <span class="endpoint-meta" id="msg-count">0 turnos</span>
+          <div id="transit-rail-node" class="rail-node"></div>
+          <span class="endpoint-name" id="export-readiness-label">CONTEXTO</span>
+        </div>
+
         <div class="transit-capture-action">
-          <button id="btn-capture-update" class="action-row" type="button">
-            <div class="action-glyph-box" aria-hidden="true">
-              <svg class="action-glyph" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="2">
-                <path d="M2.5 8a5.5 5.5 0 1 0 1.6-3.9L2 6"/>
-                <path d="M2 2v4h4"/>
+          <div class="capture-btn-row">
+            <button id="btn-capture-update" class="action-row" type="button">
+              <div class="action-glyph-box" aria-hidden="true">
+                <svg class="action-glyph" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                  <path d="M2.5 8a5.5 5.5 0 1 0 1.6-3.9L2 6"/>
+                  <path d="M2 2v4h4"/>
+                </svg>
+              </div>
+              <div class="action-details">
+                <span id="btn-capture-label" class="action-title">Capturar contexto</span>
+              </div>
+            </button>
+            <button id="btn-quick-copy" class="btn-quick-copy" type="button" disabled title="Copiar conversación limpia al portapapeles" aria-label="Copiar conversación limpia">
+              <svg viewBox="0 0 16 16" width="15" height="15" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+                <rect x="5" y="5" width="9" height="9" rx="2"/>
+                <path d="M11 5V3a1 1 0 0 0-1-1H3a1 1 0 0 0-1 1v7a1 1 0 0 0 1 1h2"/>
               </svg>
-            </div>
-            <div class="action-details">
-              <span id="btn-capture-label" class="action-title">Capturar contexto</span>
-            </div>
-          </button>
+            </button>
+          </div>
           <button id="btn-cancel-capture" class="action-row hidden" type="button">
             <div class="action-details">
               <span class="action-title">Cancelar captura</span>
@@ -145,7 +162,7 @@
           </div>
           <div class="action-details">
             <span class="action-title">Exportar</span>
-            <span class="action-subtitle">Markdown, PDF, DOCX, JSON, TXT, PNG</span>
+            <span class="action-subtitle">MD, PDF, DOCX, HTML, Obsidian, JSON, TXT, PNG</span>
           </div>
           <div class="action-meta">
             <span class="action-pill">Export</span>
@@ -181,7 +198,16 @@
             <button type="button" class="btn-popup-format-choice" data-format="png" disabled>
               <strong>Imagen</strong> <span>.png</span>
             </button>
+            <button type="button" class="btn-popup-format-choice" data-format="html" disabled>
+              <strong>HTML offline</strong> <span>.html</span>
+            </button>
+            <button type="button" class="btn-popup-format-choice" data-format="obsidian" disabled>
+              <strong>Obsidian</strong> <span>.md</span>
+            </button>
           </div>
+          <button type="button" id="btn-popup-copy-clean" class="btn-popup-format-choice" style="width:100%;margin-bottom:10px" disabled>
+            <strong>Copiar limpio (portapapeles)</strong> <span>Ctrl+V</span>
+          </button>
           <div class="format-panel-footer">
             <label>
               <input type="checkbox" id="popup-export-tech-events">
@@ -261,13 +287,16 @@
   <script src="../core/i18n/translator.js"></script>
   <script src="../core/i18n/page_translation.js"></script>
   <script src="../platforms/chatgpt/chatgpt_assets.js"></script>
+  <script src="../platforms/multi_platform_adapter.js"></script>
   <script src="../core/crypto_util.js"></script>
   <script src="../core/canonical/canonical_schema.js"></script>
   <script src="../core/canonical_model.js"></script>
   <script src="../core/markdown_serializer.js"></script>
+  <script src="../core/chatgpt_widgets.js"></script>
   <script src="../core/portability/zip_builder.js"></script>
   <script src="../core/portability/pdf_builder.js"></script>
   <script src="../core/portability/docx_builder.js"></script>
+  <script src="../core/portability/html_builder.js"></script>
   <script src="../core/portability/export_center.js"></script>
   <script src="../core/storage/liner_db.js"></script>
   <script src="popup.js"></script>

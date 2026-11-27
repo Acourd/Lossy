@@ -14,7 +14,9 @@
     const docxBuilder = require('./docx_builder.js');
     const canonicalModel = require('../canonical_model.js');
     const serializer = require('../markdown_serializer.js');
-    module.exports = factory({ zipBuilder, pdfBuilder, docxBuilder, canonicalModel, serializer });
+    const chatgptWidgets = require('../chatgpt_widgets.js');
+    const htmlBuilder = require('./html_builder.js');
+    module.exports = factory({ zipBuilder, pdfBuilder, docxBuilder, canonicalModel, serializer, chatgptWidgets, htmlBuilder });
   } else {
     root.Lossy = root.Lossy || root.Liner || {};
     const deps = {
@@ -22,7 +24,9 @@
       pdfBuilder: root.Lossy.PdfBuilder || root.Liner?.PdfBuilder,
       docxBuilder: root.Lossy.DocxBuilder || root.Liner?.DocxBuilder,
       canonicalModel: root.Lossy.CanonicalModel || root.Liner?.CanonicalModel,
-      serializer: root.Lossy.MarkdownSerializer || root.Liner?.MarkdownSerializer
+      serializer: root.Lossy.MarkdownSerializer || root.Liner?.MarkdownSerializer,
+      chatgptWidgets: root.Lossy.ChatGPTWidgets,
+      htmlBuilder: root.Lossy.HtmlBuilder
     };
     root.Lossy.ExportCenter = factory(deps);
     if (root.Liner) root.Liner.ExportCenter = root.Lossy.ExportCenter;
@@ -36,13 +40,15 @@
     JSON: 'json',
     PDF: 'pdf',
     DOCX: 'docx',
-    PNG: 'png'
+    PNG: 'png',
+    HTML: 'html'
   };
 
   const EXPORT_PROFILES = {
     AI: 'ai',
     HUMAN: 'human',
-    COMPACT: 'compact'
+    COMPACT: 'compact',
+    OBSIDIAN: 'obsidian'
   };
 
   const DEFAULT_PROFILE_BY_FORMAT = {
@@ -51,7 +57,8 @@
     [EXPORT_FORMATS.JSON]: 'canonical',
     [EXPORT_FORMATS.PDF]: EXPORT_PROFILES.HUMAN,
     [EXPORT_FORMATS.DOCX]: EXPORT_PROFILES.HUMAN,
-    [EXPORT_FORMATS.PNG]: EXPORT_PROFILES.HUMAN
+    [EXPORT_FORMATS.PNG]: EXPORT_PROFILES.HUMAN,
+    [EXPORT_FORMATS.HTML]: EXPORT_PROFILES.HUMAN
   };
 
   const ASSET_AVAILABILITY = {
@@ -436,10 +443,18 @@
   // --- 2. FORMATEADORES ---
 
 
+  function isInternalToolPayload(msg) {
+    const t = String(msg?.text ?? msg?.content?.text ?? '').trim();
+    return /^\{[\s\S]*"path"\s*:\s*"\/Automations\//i.test(t);
+  }
+
   function cleanExportText(text) {
     // Preserve literal examples in fenced code; remove only ChatGPT control tokens.
     return String(text || '').split(/(```[\s\S]*?```)/g).map((part, i) => i % 2 ? part : part
       .replace(/\uE200[\s\S]*?\uE201/g, '')
+      .replace(/<Cite\b[^>]*\/>/gi, '')
+      .replace(/<SuggestAutomation\b[^>]*\/>/gi, '')
+      .replace(/<DisplayAutomation\b[^>]*\/>/gi, '')
       .replace(/!?\[([^\]]*)\]\(<?app:\/\/[^)>]+>?\)/g, (_, label) => label.replace(/^\$/, ''))
       .replace(/\[Imagen: (?:sediment:\/\/|file-)[^\]]*\]/g, '')).join('');
   }
@@ -464,7 +479,11 @@
       if (!target || !/^(https?:|data:image\/|assets\/)/i.test(target)) return '> [Recurso visual no disponible: ' + label + ']';
       return '![' + label + '](<' + target.replace(/>/g, '%3E') + '>)';
     };
-    const text = cleanExportText(typeof msg.text === 'string' ? msg.text : msg.content?.text);
+    const widgets = deps.chatgptWidgets || (typeof globalThis !== 'undefined' ? globalThis.Lossy?.ChatGPTWidgets : null);
+    let text = cleanExportText(typeof msg.text === 'string' ? msg.text : msg.content?.text);
+    if (!options.preserveRawWidgets && widgets && typeof widgets.renderWidgetsToMarkdown === 'function') {
+      text = widgets.renderWidgetsToMarkdown(text);
+    }
     const body = text.split(/(```[\s\S]*?```)/g).map((part,i) => i % 2 ? part : part.replace(/!\[([^\]]*)\]\(<?([^)>]+)>?\)/g, (original, alt, url) => {
       const found = images.find(a => a.sourceURL === url || a.url === url || a.dataURI === url);
       return found ? render(found, alt) : (strategy === 'omit' ? '' : original);
@@ -472,10 +491,29 @@
     return body + images.map(a => { const image = render(a); return image ? '\n\n' + image : ''; }).join('');
   }
 
+  function formatCitationsMarkdown(msg) {
+    const raw = (Array.isArray(msg?.content?.citations) && msg.content.citations.length)
+      ? msg.content.citations
+      : (Array.isArray(msg?.references) ? msg.references : []);
+    if (!raw.length) return '';
+    const seen = new Set();
+    const links = [];
+    for (const c of raw) {
+      const url = String(c?.url || '').trim();
+      if (!/^https?:\/\//i.test(url) || seen.has(url)) continue;
+      seen.add(url);
+      const label = String(c.title || url).replace(/[\[\]\r\n]/g, ' ').trim();
+      links.push(`[${links.length + 1}] [${label}](<${url.replace(/>/g, '%3E')}>)`);
+    }
+    return links.length ? `\n\n> **Fuentes:** ${links.join(' · ')}` : '';
+  }
+
   function formatMessageMarkdown(message, index, options = {}) {
     const text = markdownResources(message, index, options);
     const blocks = message.codeBlocks || message.content?.codeBlocks || [];
-    return text + (!text.includes('```') ? blocks.map(block => '\n\n```' + (block.language || '') + '\n' + (block.code || '') + '\n```').join('') : '');
+    const codePart = !text.includes('```') ? blocks.map(block => '\n\n```' + (block.language || '') + '\n' + (block.code || '') + '\n```').join('') : '';
+    const citationsPart = options.includeCitations !== false ? formatCitationsMarkdown(message) : '';
+    return text + codePart + citationsPart;
   }
 
   function formatAsMarkdown(entity, profile = EXPORT_PROFILES.AI, options = {}) {
@@ -495,6 +533,43 @@
     });
 
     const isClip = entity.entityType === 'clip' || (entity.canonicalId && entity.canonicalId.startsWith('clip_'));
+
+    if (profile === EXPORT_PROFILES.OBSIDIAN) {
+      const isoDate = new Date(entity.updatedAt || entity.createdAt || Date.now()).toISOString().slice(0, 10);
+      const sourceUrl = entity.source?.url || entity.sourceURL || '';
+      const platTag = platform.toLowerCase().replace(/[^a-z0-9_-]/g, '');
+      const lines = [
+        '---',
+        `title: ${JSON.stringify(title)}`,
+        `platform: ${JSON.stringify(platTag)}`,
+        `model: ${JSON.stringify(model)}`,
+        `date: ${isoDate}`,
+        `messages: ${messages.length}`,
+        sourceUrl ? `source: ${JSON.stringify(sourceUrl)}` : null,
+        `tags: [lossy, ai-chat, ${platTag || 'ai'}]`,
+        '---',
+        '',
+        `# ${title}`,
+        '',
+        `> [!info] Exportado localmente con Lossy (${platform} · ${messages.length} mensajes)`
+      ].filter(v => v !== null);
+      lines.push('');
+
+      messages.forEach((msg, idx) => {
+        const isUser = msg.role === 'user';
+        const author = msg.author || (isUser ? 'Usuario' : platform);
+        const text = (markdownResources(msg, idx, options) + formatCitationsMarkdown(msg)).trim();
+        lines.push(`## ${author}`, '', text, '');
+        const codeBlocks = Array.isArray(msg.codeBlocks) ? msg.codeBlocks : (Array.isArray(msg.content?.codeBlocks) ? msg.content.codeBlocks : []);
+        if (codeBlocks.length > 0 && !text.includes('```')) {
+          codeBlocks.forEach(cb => {
+            lines.push(`\`\`\`${cb.language || ''}`, cb.code || '', '```', '');
+          });
+        }
+      });
+
+      return lines.join('\n');
+    }
 
     if (profile === EXPORT_PROFILES.AI) {
       // Perfil AI: Máxima claridad semántica, títulos estándar, delimitadores de rol H2
@@ -517,7 +592,7 @@
         const isUser = msg.role === 'user';
         const isAssistant = msg.role === 'assistant';
         const roleLabel = isUser ? 'User' : (isAssistant ? 'Assistant' : (msg.role || 'Tool'));
-        const text = markdownResources(msg, idx, options).trim();
+        const text = (markdownResources(msg, idx, options) + formatCitationsMarkdown(msg)).trim();
 
         lines.push(`## ${roleLabel}`, '', text, '');
 
@@ -549,7 +624,7 @@
       const isUser = msg.role === 'user';
       const isAssistant = msg.role === 'assistant';
       const author = msg.author || (isUser ? 'Usuario' : (isAssistant ? 'ChatGPT' : 'Herramienta'));
-      const text = markdownResources(msg, idx, options).trim();
+      const text = (markdownResources(msg, idx, options) + formatCitationsMarkdown(msg)).trim();
       const timeStr = msg.timestamp ? ` · ${new Date(msg.timestamp).toLocaleTimeString()}` : '';
 
       lines.push(`### ${author}${timeStr}`, '', text, '');
@@ -598,7 +673,11 @@
       const isUser = msg.role === 'user';
       const isAssistant = msg.role === 'assistant';
       const roleLabel = isUser ? 'USER' : (isAssistant ? 'ASSISTANT' : (msg.role || 'TOOL').toUpperCase());
-      const text = cleanExportText(typeof msg.text === 'string' ? msg.text : msg.content?.text).trim();
+      const widgets = deps.chatgptWidgets || (typeof globalThis !== 'undefined' ? globalThis.Lossy?.ChatGPTWidgets : null);
+      let text = cleanExportText(typeof msg.text === 'string' ? msg.text : msg.content?.text).trim();
+      if (widgets && typeof widgets.renderWidgetsToPlainText === 'function') {
+        text = widgets.renderWidgetsToPlainText(text).trim();
+      }
 
       lines.push(`${roleLabel}:`, text, '');
 
@@ -724,7 +803,15 @@
         }});
       }
       if (format !== 'json') {
-        const messages = (entity.selectedMessages || entity.messages || []).filter(m => exportOptions.includeTechnicalEvents || (m.isConversational !== false && ['user','assistant'].includes(m.role))).map(m => ({...m, ...(typeof m.text === 'string' ? {text:cleanExportText(m.text)} : {}), ...(m.content ? {content:{...m.content,text:cleanExportText(m.content.text)}} : {})}));
+        const widgets = deps.chatgptWidgets || (typeof globalThis !== 'undefined' ? globalThis.Lossy?.ChatGPTWidgets : null);
+        const transformText = raw => {
+          const cleaned = cleanExportText(raw);
+          if (['pdf', 'docx', 'word', 'png', 'image'].includes(format) && widgets && typeof widgets.renderWidgetsToPlainText === 'function') {
+            return widgets.renderWidgetsToPlainText(cleaned);
+          }
+          return cleaned;
+        };
+        const messages = (entity.selectedMessages || entity.messages || []).filter(m => exportOptions.includeTechnicalEvents || (m.isConversational !== false && ['user','assistant'].includes(m.role) && !isInternalToolPayload(m))).map(m => ({...m, ...(typeof m.text === 'string' ? {text:transformText(m.text)} : {}), ...(m.content ? {content:{...m.content,text:transformText(m.content.text)}} : {})}));
         entity = { ...entity, messages, ...(entity.selectedMessages ? { selectedMessages: messages } : {}) };
       }
       const effectiveProfile = profile || DEFAULT_PROFILE_BY_FORMAT[format] || EXPORT_PROFILES.HUMAN;
@@ -898,6 +985,23 @@
             data: docxBytes,
             isBinary: true,
             format: 'docx',
+            profile: effectiveProfile,
+            assets
+          };
+        }
+
+        case 'html': {
+          const hb = deps.htmlBuilder || (typeof globalThis !== 'undefined' ? (globalThis.Lossy?.HtmlBuilder || globalThis.HtmlBuilder) : null);
+          if (!hb || typeof hb.buildStandaloneHtml !== 'function') {
+            throw new Error('HtmlBuilder no está disponible para generar el archivo HTML');
+          }
+          const htmlStr = hb.buildStandaloneHtml(entity, { ...exportOptions, assets, assetBinaryMap });
+          return {
+            filename,
+            mimeType: 'text/html;charset=utf-8',
+            data: htmlStr,
+            isBinary: false,
+            format: 'html',
             profile: effectiveProfile,
             assets
           };

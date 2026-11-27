@@ -33,15 +33,28 @@
       "js": [
         "src/core/canonical/canonical_schema.js",
         "src/core/canonical_model.js",
+        "src/core/chatgpt_widgets.js",
         "src/core/portability/zip_builder.js",
         "src/core/portability/pdf_builder.js",
         "src/core/portability/docx_builder.js",
+        "src/core/portability/html_builder.js",
         "src/core/portability/export_center.js",
         "src/core/i18n/en_strings.js",
         "src/core/i18n/translator.js",
         "src/platforms/chatgpt/chatgpt_assets.js",
         "src/platforms/chatgpt/structured/chatgpt_structured_acquisition.js",
         "src/content/content_script.js"
+      ],
+      "run_at": "document_idle"
+    },
+    {
+      "matches": [
+        "https://claude.ai/*",
+        "https://gemini.google.com/*"
+      ],
+      "js": [
+        "src/platforms/multi_platform_adapter.js",
+        "src/content/multi_platform_content.js"
       ],
       "run_at": "document_idle"
     }
@@ -55,6 +68,9 @@
   "host_permissions": [
     "https://chatgpt.com/*",
     "https://chat.openai.com/*",
+    "https://claude.ai/*",
+    "https://gemini.google.com/*",
+    "https://*.googleusercontent.com/*",
     "https://*.oaiusercontent.com/*",
     "https://files.oaiusercontent.com/*"
   ],

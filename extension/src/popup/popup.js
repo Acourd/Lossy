@@ -302,10 +302,13 @@ function initPopup() {
       b.disabled = true;
       b.title = 'Captura requerida para exportar';
     });
+    const btnQuickCopy = document.getElementById('btn-quick-copy');
+    if (btnQuickCopy) btnQuickCopy.disabled = true;
     document.querySelectorAll('.btn-popup-format-choice').forEach(b => {
       b.disabled = true;
       b.title = 'Captura requerida para exportar';
     });
+    updateQuickMdCard();
   }
 
   /**
@@ -313,6 +316,9 @@ function initPopup() {
    */
   function enableActions() {
     updateAssetReadiness();
+    updateQuickMdCard();
+    const btnQuickCopy = document.getElementById('btn-quick-copy');
+    if (btnQuickCopy) btnQuickCopy.disabled = false;
     if (btnExportMd) btnExportMd.disabled = false;
     if (btnExportJson) btnExportJson.disabled = false;
     if (btnPopupExport) {
@@ -403,10 +409,14 @@ function initPopup() {
       }
 
       currentTab = tab;
-      const isChatGPT = tab.url.includes('chatgpt.com') || tab.url.includes('chat.openai.com');
+      const detectedPlat = window.Lossy?.MultiPlatform?.detectPlatform
+        ? window.Lossy.MultiPlatform.detectPlatform(tab.url)
+        : ((tab.url.includes('chatgpt.com') || tab.url.includes('chat.openai.com'))
+            ? { platform: 'chatgpt', label: 'ChatGPT', conversationId: (tab.url.match(/\/c\/([a-zA-Z0-9_-]+)/) || [])[1] || null }
+            : null);
 
-      if (!isChatGPT) {
-        setStatus('inactive', 'Pestaña no compatible', 'Abre una conversación en ChatGPT');
+      if (!detectedPlat) {
+        setStatus('inactive', 'Pestaña no compatible', 'Abre una conversación en ChatGPT, Claude o Gemini');
         showStatusAction('Abrir ChatGPT', () => {
           chrome.tabs.create({ url: 'https://chatgpt.com' });
           window.close();
@@ -417,12 +427,13 @@ function initPopup() {
         return;
       }
 
-      // ChatGPT detectado pasivamente
+      // Plataforma compatible detectada pasivamente (ChatGPT, Claude o Gemini)
       hideStatusAction();
       convCard.classList.remove('hidden');
 
-      const match = tab.url.match(/\/c\/([a-zA-Z0-9_-]+)/);
-      currentConvId = match ? match[1] : null;
+      currentConvId = detectedPlat.conversationId;
+      const activePlatform = detectedPlat.platform;
+      const activePlatformLabel = detectedPlat.label;
 
       // Consultar estado de página de forma ligera
       let pageStatus = null;
@@ -447,13 +458,13 @@ function initPopup() {
       const db = typeof LinerDB !== 'undefined' ? new LinerDB() : null;
       let stored = null;
       if (db && currentConvId) {
-        stored = await db.getConversation(`conv_chatgpt_${currentConvId}`);
+        stored = await db.getConversation(`conv_${activePlatform}_${currentConvId}`);
       }
 
       // Búsqueda estricta por identidad canónica exacta (cero matches ambiguos por URL genérica)
       if (db && !stored && currentConvId) {
         const metaList = await db.listMetadata();
-        const matchMeta = metaList.find(m => m.sourceConversationId === currentConvId || (m.canonicalId && m.canonicalId === `conv_chatgpt_${currentConvId}`));
+        const matchMeta = metaList.find(m => m.sourceConversationId === currentConvId || (m.canonicalId && m.canonicalId === `conv_${activePlatform}_${currentConvId}`));
         if (matchMeta) {
           stored = await db.getConversation(matchMeta.canonicalId);
         }
@@ -464,9 +475,11 @@ function initPopup() {
         stored = null;
       }
 
-      const pageTitle = (pageStatus && pageStatus.title) || (tab.title ? tab.title.replace(' - ChatGPT', '').trim() : 'Conversación ChatGPT');
+      const pageTitle = (pageStatus && pageStatus.title) || (tab.title ? tab.title.replace(/\s*[-–|]\s*(?:ChatGPT|Claude|(?:Google\s+)?Gemini)\s*$/i, '').trim() : `Conversación ${activePlatformLabel}`);
       const observedModel = (pageStatus && pageStatus.model) || (stored && stored.model) || null;
-      platformTag.textContent = observedModel ? `CHATGPT · ${observedModel}` : 'CHATGPT';
+      platformTag.textContent = observedModel ? `${activePlatformLabel.toUpperCase()} · ${observedModel}` : activePlatformLabel.toUpperCase();
+      const convEyebrow = document.getElementById('conv-eyebrow');
+      if (convEyebrow) convEyebrow.textContent = `CONVERSACIÓN · ${activePlatformLabel.toUpperCase()}`;
       const visibleTurns = (pageStatus && typeof pageStatus.visibleTurnsCount === 'number') ? pageStatus.visibleTurnsCount : null;
 
       if (stored) {
@@ -509,6 +522,7 @@ function initPopup() {
         extractedData = null;
         convTitle.textContent = pageTitle;
         msgCount.textContent = (visibleTurns !== null) ? `Aún no capturada (~${visibleTurns} turnos)` : 'Aún no capturada (Captura requerida para exportar)';
+        updateMetricBand(visibleTurns !== null ? `~${visibleTurns}` : '—', '—', '—');
         if (storedTimeMeta) storedTimeMeta.classList.add('hidden');
 
         setStatus('warning', 'ChatGPT', 'Conversación detectada (Captura requerida para exportar)');
@@ -623,10 +637,12 @@ function initPopup() {
             const db = typeof LinerDB !== 'undefined' ? new LinerDB() : null;
             if(!db && totalMessages>0)throw new Error('Almacenamiento no disponible');
             if (db && totalMessages > 0) {
+              const detectedSrc = window.Lossy?.MultiPlatform?.detectPlatform?.(currentTab?.url) || { platform: 'chatgpt', label: 'ChatGPT' };
+              const srcPlat = extractedData.source?.platform || detectedSrc.platform || 'chatgpt';
               const canonicalConv = {
-                canonicalId: `conv_chatgpt_${targetConvId || Date.now()}`,
-                title: extractedData.title || meta.title || 'Conversación ChatGPT',
-                source: extractedData.source || { platform: 'chatgpt', conversationId: targetConvId, url: currentTab.url, acquisitionMethod: 'dom-harvest' },
+                canonicalId: extractedData.canonicalId || `conv_${srcPlat}_${targetConvId || Date.now()}`,
+                title: extractedData.title || meta.title || `Conversación ${detectedSrc.label}`,
+                source: extractedData.source || { platform: srcPlat, conversationId: targetConvId, url: currentTab.url, acquisitionMethod: 'dom-harvest' },
                 model: extractedData.model || meta.model || null,
                 createdAt: extractedData.createdAt || meta.exportedAt || new Date().toISOString(),
                 updatedAt: new Date().toISOString(),
@@ -721,9 +737,10 @@ function initPopup() {
       if (typeof chrome !== 'undefined' && chrome.tabs && chrome.tabs.query) {
         const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
         if (tab && tab.url) {
+          const detected = window.Lossy?.MultiPlatform?.detectPlatform?.(tab.url);
           const match = tab.url.match(/\/c\/([a-zA-Z0-9_-]+)/);
-          const liveId = match ? match[1] : null;
-          const dataConvId = extractedData.source?.conversationId || (extractedData.canonicalId ? extractedData.canonicalId.replace('conv_chatgpt_', '').replace('conv_lossy_', '') : null);
+          const liveId = detected ? detected.conversationId : (match ? match[1] : null);
+          const dataConvId = extractedData.source?.conversationId || (extractedData.canonicalId ? extractedData.canonicalId.replace(/^conv_(?:chatgpt|claude|gemini|lossy)_/, '') : null);
           if (liveId && dataConvId && liveId !== dataConvId) {
             showFeedback('Error de identidad: los datos corresponden a otra conversación. Recaptura requerida.', true);
             extractedData = null;
@@ -776,7 +793,75 @@ function initPopup() {
     });
   }
 
+  function countConversationImages(entity) {
+    if (!entity || typeof entity !== 'object') return 0;
+    const summaryTotal = window.Lossy?.ChatGPTAssets?.summary(entity)?.total || 0;
+    let inlineCount = 0;
+    const messages = Array.isArray(entity.selectedMessages)
+      ? entity.selectedMessages
+      : (Array.isArray(entity.messages) ? entity.messages : []);
+    for (const msg of messages) {
+      const text = typeof msg?.text === 'string' ? msg.text : (msg?.content?.text || '');
+      const matches = text.match(/!\[[^\]]*\]\([^)]+\)/g);
+      if (matches) inlineCount += matches.length;
+    }
+    return Math.max(summaryTotal, inlineCount);
+  }
+
+  function formatCompactRelativeTime(isoString) {
+    if (!isoString) return 'Ahora';
+    try {
+      const diffSec = Math.max(0, Math.floor((Date.now() - new Date(isoString).getTime()) / 1000));
+      if (diffSec < 60) return 'Ahora';
+      const diffMin = Math.floor(diffSec / 60);
+      if (diffMin < 60) return `${diffMin}m`;
+      const diffHours = Math.floor(diffMin / 60);
+      if (diffHours < 24) return `${diffHours}h`;
+      return `${Math.floor(diffHours / 24)}d`;
+    } catch (_) {
+      return 'Ahora';
+    }
+  }
+
+  function updateMetricBand(msgVal, imgVal, updatedVal) {
+    const mEl = document.getElementById('metric-messages');
+    const iEl = document.getElementById('metric-images');
+    const uEl = document.getElementById('metric-updated');
+    if (mEl && msgVal !== undefined) mEl.textContent = String(msgVal);
+    if (iEl && imgVal !== undefined) iEl.textContent = String(imgVal);
+    if (uEl && updatedVal !== undefined) uEl.textContent = String(updatedVal);
+  }
+
+  function updateQuickMdCard() {
+    const mdBtn = document.getElementById('btn-quick-md');
+    const imageCount = extractedData ? countConversationImages(extractedData) : 0;
+    if (extractedData) {
+      const totalMsgs = Array.isArray(extractedData.messages) ? extractedData.messages.length : (extractedData.metadata?.totalMessages || 0);
+      const updatedIso = extractedData.updatedAt || extractedData.createdAt || extractedData.metadata?.exportedAt;
+      updateMetricBand(totalMsgs, imageCount, formatCompactRelativeTime(updatedIso));
+    }
+    if (!mdBtn) return;
+    const noteEl = mdBtn.querySelector('.quick-format-note');
+    const badgeEl = mdBtn.querySelector('.quick-format-badge');
+    if (!extractedData) {
+      if (noteEl) noteEl.textContent = 'Detección auto';
+      if (badgeEl) badgeEl.textContent = '';
+      delete mdBtn.dataset.mdMode;
+      return;
+    }
+    if (imageCount === 0) {
+      if (noteEl) noteEl.textContent = 'Solo texto';
+      if (badgeEl) badgeEl.textContent = '1-clic .md';
+      mdBtn.dataset.mdMode = 'text';
+    } else {
+      if (noteEl) noteEl.textContent = `Texto + ${imageCount} img`;
+      if (badgeEl) badgeEl.textContent = 'ZIP / .md';
+      mdBtn.dataset.mdMode = 'images';
+    }
+  }
+
   function updateAssetReadiness() {
+    updateQuickMdCard();
     const el=document.getElementById('asset-readiness');
     if (!el) return;
     const info=window.Lossy?.ChatGPTAssets?.summary(extractedData || {});
@@ -857,8 +942,13 @@ function initPopup() {
         const options = Object.assign({ includeTechnicalEvents: incTech }, customOptions);
 
         if (format === 'md' && !options.imageStrategy) {
-          options.imageStrategy=await chooseMarkdownStrategy();
-          if(!options.imageStrategy)return;
+          const imageCount = countConversationImages(extractedData);
+          if (imageCount === 0) {
+            options.imageStrategy = 'omit';
+          } else {
+            options.imageStrategy = await chooseMarkdownStrategy();
+            if (!options.imageStrategy) return;
+          }
         }
         if(format !== 'json' && options.imageStrategy !== 'omit')await recoverStoredImages();
         if(!await assertActiveTabIdentityMatches())return;
@@ -914,11 +1004,32 @@ function initPopup() {
   document.querySelectorAll('.btn-popup-format-choice').forEach(choiceBtn => {
     choiceBtn.addEventListener('click', () => {
       const fmt = choiceBtn.dataset.format;
-      if (fmt) {
+      if (fmt === 'obsidian') {
+        triggerExport(choiceBtn, () => exportWithCenter('md', 'obsidian', { imageStrategy: 'omit' }));
+      } else if (fmt) {
         triggerExport(choiceBtn, () => exportWithCenter(fmt, null, fmt === 'pdf' ? {quickPdf:true} : {}));
       }
     });
   });
+
+  const copyCleanHandler = btn => {
+    if (!btn) return;
+    btn.addEventListener('click', () => {
+      triggerExport(btn, async () => {
+        if (!extractedData) return;
+        const isLiveMatch = await assertActiveTabIdentityMatches();
+        if (!isLiveMatch) return;
+        const exportCenterModule = (window.Lossy && window.Lossy.ExportCenter) || null;
+        const mdText = exportCenterModule?.formatAsMarkdown
+          ? exportCenterModule.formatAsMarkdown(extractedData, 'human', { imageStrategy: 'omit' })
+          : serializeToMarkdownBrowser(extractedData);
+        await navigator.clipboard.writeText(mdText);
+        showFeedback('Conversación copiada al portapapeles', false);
+      });
+    });
+  };
+  copyCleanHandler(document.getElementById('btn-popup-copy-clean'));
+  copyCleanHandler(document.getElementById('btn-quick-copy'));
 
   if (btnQuickMd) {
     btnQuickMd.addEventListener('click', () => triggerExport(btnQuickMd, () => exportWithCenter('md')));
@@ -932,12 +1043,13 @@ function initPopup() {
 
   async function initQuickExports() {
     const exportCenterModule = (window.Lossy && window.Lossy.ExportCenter) || null;
-    let pinned = ['md', 'pdf', 'docx'];
+    let pinned = ['md', 'pdf', 'docx', 'html'];
     if (exportCenterModule && typeof exportCenterModule.getPinnedQuickExports === 'function') {
       try {
         const customPinned = await exportCenterModule.getPinnedQuickExports();
         if (Array.isArray(customPinned) && customPinned.length > 0) {
-          pinned = customPinned.slice(0, 3);
+          pinned = customPinned.slice(0, 4);
+          if (pinned.length === 3 && !pinned.includes('html')) pinned.push('html');
         }
       } catch (_) {}
     }
@@ -949,6 +1061,7 @@ function initPopup() {
       md: { label: 'MD', cls: 'quick-chip-md', icon: '<svg viewBox="0 0 16 16" width="12" height="12" fill="none" stroke="currentColor" stroke-width="1.8"><rect x="2" y="3" width="12" height="10" rx="2"/><path d="M5 10V6l2 2 2-2v4M11 6v4"/></svg>' },
       pdf: { label: 'PDF', cls: 'quick-chip-pdf', icon: '<svg viewBox="0 0 16 16" width="12" height="12" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M3 2h7l3 3v9H3z"/><path d="M6 9h4M6 12h2"/></svg>' },
       docx: { label: 'DOCX', cls: 'quick-chip-docx', icon: '<svg viewBox="0 0 16 16" width="12" height="12" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M3 2h7l3 3v9H3z"/><path d="M5 8l1.5 4 1.5-4 1.5 4 1.5-4"/></svg>' },
+      html: { label: 'HTML', cls: 'quick-chip-html', icon: '<svg viewBox="0 0 16 16" width="12" height="12" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M5.5 4.5 2 8l3.5 3.5M10.5 4.5 14 8l-3.5 3.5M9 3l-2 10"/></svg>' },
       txt: { label: 'TXT', cls: 'quick-chip-txt', icon: '<svg viewBox="0 0 16 16" width="12" height="12" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M3 2h10v12H3z"/><path d="M6 6h4M8 6v6"/></svg>' },
       json: { label: 'JSON', cls: 'quick-chip-json', icon: '<svg viewBox="0 0 16 16" width="12" height="12" fill="none" stroke="currentColor" stroke-width="1.8"><rect x="2" y="2" width="12" height="12" rx="2"/><path d="M6 5c-1 0-1 1-1 3s0 3 1 3M10 5c1 0 1 1 1 3s0 3-1 3"/></svg>' },
       png: { label: 'PNG', cls: 'quick-chip-png', icon: '<svg viewBox="0 0 16 16" width="12" height="12" fill="none" stroke="currentColor" stroke-width="1.8"><rect x="2" y="2" width="12" height="12" rx="2"/><circle cx="6" cy="6" r="1.5"/><path d="m14 11-3-3-5 5"/></svg>' }
@@ -964,12 +1077,14 @@ function initPopup() {
       btn.disabled = !extractedData;
       btn.title = extractedData ? `Exportación rápida ${meta.label}` : 'Captura requerida para exportar';
       btn.classList.add('quick-format-card');
-      const notes={md:'Texto e imágenes',pdf:'Seleccionar y revisar',docx:'Documento editable',txt:'Texto sin formato',json:'Datos originales',png:'Vista en imagen'};
-      btn.innerHTML = meta.icon+'<span class="quick-format-label">'+meta.label+'</span><span class="quick-format-note">'+notes[fmt]+'</span>';
+      const notes={md:'Detección auto',pdf:'Seleccionar y revisar',docx:'Documento editable',html:'Archivo navegable',txt:'Texto sin formato',json:'Datos originales',png:'Vista en imagen'};
+      const badges={md:'',pdf:'Gráficas',docx:'Tablas',html:'Offline',txt:'',json:'',png:''};
+      btn.innerHTML = '<span class="quick-icon-wrap" aria-hidden="true">'+meta.icon+'</span><span class="quick-format-label">'+meta.label+'</span><span class="quick-format-note">'+notes[fmt]+'</span><span class="quick-format-badge">'+(badges[fmt]||'')+'</span>';
       btn.setAttribute('aria-label','Exportar '+meta.label);
       btn.addEventListener('click', () => triggerExport(btn, () => exportWithCenter(fmt)));
       container.appendChild(btn);
     });
+    updateQuickMdCard();
   }
 
   if (typeof chrome !== 'undefined' && chrome.storage && chrome.storage.onChanged) {

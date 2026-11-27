@@ -1001,7 +1001,7 @@
         e.stopPropagation();
         const convId = btn.dataset.id;
         document.querySelectorAll('#library-table-body tr').forEach(r => r.classList.toggle('is-inspecting', r.dataset.id === convId));
-        openInspector(convId);
+        openFullReader(convId);
       });
     });
 
@@ -1010,15 +1010,15 @@
       const convId = tr.dataset.id;
       if (!convId) return;
 
-      // Doble click: abrir lector de mensajes
+      // Doble click: abrir lector completo de mensajes
       tr.addEventListener('dblclick', (e) => {
         if (e.target.closest('input, button, a, .drag-handle, .btn-row-menu')) return;
         document.querySelectorAll('#library-table-body tr').forEach(r => r.classList.remove('is-inspecting'));
         tr.classList.add('is-inspecting');
-        openInspector(convId, { openMessages: true });
+        openFullReader(convId);
       });
 
-      // Click desktop en fila (Shift+Click rango, Ctrl/Cmd+Click toggle, Single Click inspeccionar)
+      // Click desktop en fila (Shift+Click rango, Ctrl/Cmd+Click toggle, Single Click abrir vista completa)
       tr.addEventListener('click', (e) => {
         if (e.target.closest('input, button, a, .drag-handle, .btn-row-menu, .btn-inspect, .btn-inspect-title')) {
           return;
@@ -1044,11 +1044,11 @@
           lastSelectedRowIndex = currentIndex;
           updateBulkActionBar();
         } else {
-          // Single Click: seleccionar / inspeccionar fila
+          // Single Click: abrir conversación directamente en pantalla completa
           document.querySelectorAll('#library-table-body tr').forEach(r => r.classList.remove('is-inspecting'));
           tr.classList.add('is-inspecting');
           lastSelectedRowIndex = currentIndex;
-          openInspector(convId);
+          openFullReader(convId);
         }
       });
 
@@ -1083,8 +1083,8 @@
 
         if (isClip) {
           return [
-            { label: 'Ver clip', onClick: () => openInspector(targetConvId) },
-            { label: 'Ver mensajes', onClick: () => openInspector(targetConvId, { openMessages: true }) },
+            { label: 'Ver clip', onClick: () => openFullReader(targetConvId) },
+            { label: 'Ver mensajes', onClick: () => openFullReader(targetConvId) },
             { label: 'Exportar', onClick: () => openExportCenterModal([targetConvId]) },
             { label: 'Añadir a proyecto', onClick: () => openCollectionPicker([targetConvId]) },
             { label: 'Continuar en otra IA', onClick: () => {
@@ -1100,8 +1100,8 @@
         }
 
         return [
-          { label: 'Ver detalles', onClick: () => openInspector(targetConvId) },
-          { label: 'Ver mensajes', onClick: () => openInspector(targetConvId, { openMessages: true }) },
+          { label: 'Ver detalles', onClick: () => openFullReader(targetConvId) },
+          { label: 'Ver mensajes', onClick: () => openFullReader(targetConvId) },
           { label: 'Exportar', onClick: () => openExportCenterModal([targetConvId]) },
           { label: 'Abrir origen en ChatGPT', onClick: () => {
             const url = conv.source?.url || `https://chatgpt.com/c/${conv.source?.conversationId || ''}`;
@@ -2136,6 +2136,8 @@
       let filtered = rawMessages.filter(m => {
         if (!m) return false;
         if (includeTechnical) return true;
+        const rawT = String(m.text ?? m.content?.text ?? '').trim();
+        if (/^\{[\s\S]*"path"\s*:\s*"\/Automations\//i.test(rawT)) return false;
         return m.isConversational !== false && m.nodeCategory !== 'tool' && m.nodeCategory !== 'system' && m.role !== 'tool' && m.role !== 'system';
       });
 
@@ -2178,14 +2180,16 @@
           const isUser = msg.role === 'user';
           const isAssistant = msg.role === 'assistant';
           const roleBadgeClass = isUser ? 'reader-role-user' : (isAssistant ? 'reader-role-assistant' : 'reader-role-tool');
-          const roleLabel = isUser ? 'USUARIO' : (isAssistant ? 'CHATGPT' : (msg.role || 'SISTEMA').toUpperCase());
+          const srcPlat = (entity.source?.platform || entity.sourcePlatform || 'chatgpt').toLowerCase();
+          const aiRoleLabel = srcPlat === 'gemini' ? 'GEMINI' : (srcPlat === 'claude' ? 'CLAUDE' : 'CHATGPT');
+          const roleLabel = isUser ? 'USUARIO' : (isAssistant ? aiRoleLabel : (msg.role || 'SISTEMA').toUpperCase());
           const author = msg.author || roleLabel;
           const rawText = extractMessageText(msg);
           const isSearchMatch = matchingOriginalIndices.has(originalIdx);
           const searchMatchClass = isSearchMatch ? 'reader-search-match' : '';
           
           const formatter=window.Lossy.ExportCenter;
-          const markdown=formatter.formatMessageMarkdown(msg,originalIdx,{assets:readerAssets,assetBinaryMap:readerAssetMap,imageStrategy:'embed'});
+          const markdown=formatter.formatMessageMarkdown(msg,originalIdx,{assets:readerAssets,assetBinaryMap:readerAssetMap,imageStrategy:'embed',preserveRawWidgets:true});
           const displayText=window.Lossy.DocumentModel.renderMarkdown(markdown);
 
           const isChecked = fullReaderSelectedIndices.has(originalIdx);
@@ -3590,13 +3594,13 @@
         });
 
         tbody.querySelectorAll('.btn-inspect, .btn-inspect-title').forEach(b => {
-          b.addEventListener('click', () => openInspector(b.dataset.id));
+          b.addEventListener('click', () => openFullReader(b.dataset.id));
         });
 
         function getRowMenuItems(targetId) {
           const isClip = targetId && (targetId.startsWith('clip_') || (convs.find(c => c.canonicalId === targetId)?.entityType === 'clip'));
           return [
-            { label: 'Ver detalles', onClick: () => openInspector(targetId) },
+            { label: 'Ver detalles', onClick: () => openFullReader(targetId) },
             { label: 'Quitar de este proyecto', onClick: () => doRemove(targetId) },
             { label: 'Añadir a otra proyecto', onClick: () => openCollectionPicker([targetId]) },
             { label: 'Continuar en otra IA', onClick: () => {
@@ -4103,7 +4107,7 @@
         `).join('');
 
         logBox.querySelectorAll('.btn-inspect-diag').forEach(btn => {
-          btn.addEventListener('click', () => openInspector(btn.dataset.id));
+          btn.addEventListener('click', () => openFullReader(btn.dataset.id));
         });
       } else {
         logBox.innerHTML = '<p class="text-muted">Sin avisos de truncamiento ni fallos en la biblioteca local.</p>';
