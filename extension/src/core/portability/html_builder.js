@@ -64,11 +64,40 @@
   }
 
   function renderSimpleMarkdownToHtml(text, opts = {}) {
-    const src = String(text || '').replace(/\r\n/g, '\n');
+    let src = String(text || '').replace(/\r\n/g, '\n');
     const blocks = [];
     const codeSlots = [];
+    const widgetSlots = [];
 
-    // 1. Preserve fenced code blocks (CommonMark-compliant: 0-3 spaces, backticks or tildes, info strings, trailing spaces)
+    // 1. Render DIL visual widgets only outside CommonMark code blocks (container fences, tildes, and indented code)
+    if (widgets && typeof widgets.findTopLevelWidgetRanges === 'function') {
+      const segs = typeof widgets.splitFencedCodeSegments === 'function'
+        ? widgets.splitFencedCodeSegments(src)
+        : [{ isCode: false, text: src }];
+      src = segs.map(seg => {
+        if (seg.isCode) return seg.text;
+        let part = seg.text;
+        const ranges = widgets.findTopLevelWidgetRanges(part);
+        if (ranges.length) {
+          let rebuilt = '';
+          let cursor = 0;
+          for (const r of ranges) {
+            rebuilt += widgets.stripControlTokensOnly(part.slice(cursor, r.start));
+            const idx = widgetSlots.length;
+            widgetSlots.push(widgets.renderWidgetBlockToHtml(r.raw));
+            rebuilt += `\n\n@@WIDGET${idx}@@\n\n`;
+            cursor = r.end;
+          }
+          rebuilt += widgets.stripControlTokensOnly(part.slice(cursor));
+          part = rebuilt;
+        } else {
+          part = widgets.stripControlTokensOnly(part);
+        }
+        return part;
+      }).join('\n');
+    }
+
+    // 2. Preserve fenced code blocks (CommonMark-compliant: 0-3 spaces, backticks or tildes, info strings, trailing spaces)
     const srcLines = src.split('\n');
     const outLines = [];
     let inFence = false;
@@ -116,27 +145,7 @@
       );
       outLines.push('', `@@CODE${idx}@@`, '');
     }
-    let work = outLines.join('\n');
-
-    // 2. Render DIL visual widgets into safe HTML slots
-    const widgetSlots = [];
-    if (widgets && typeof widgets.findTopLevelWidgetRanges === 'function') {
-      const ranges = widgets.findTopLevelWidgetRanges(work);
-      if (ranges.length) {
-        let rebuilt = '';
-        let cursor = 0;
-        for (const r of ranges) {
-          rebuilt += work.slice(cursor, r.start);
-          const idx = widgetSlots.length;
-          widgetSlots.push(widgets.renderWidgetBlockToHtml(r.raw));
-          rebuilt += `\n\n@@WIDGET${idx}@@\n\n`;
-          cursor = r.end;
-        }
-        rebuilt += work.slice(cursor);
-        work = rebuilt;
-      }
-      work = widgets.stripControlTokensOnly(work);
-    }
+    const work = outLines.join('\n');
 
     // 3. Parse lines into paragraphs, headings, lists, tables, blockquotes
     const lines = work.split('\n');

@@ -970,14 +970,41 @@
 
   // --- 5. DETECCIÓN DE BLOQUES DIL TOP-LEVEL Y LIMPIEZA GLOBAL ---
 
+  function isEscapedAt(str, idx) {
+    let bs = 0;
+    for (let k = idx - 1; k >= 0 && str[k] === '\\'; k--) bs++;
+    return (bs % 2) === 1;
+  }
+
+  function isBlockInterruptLine(line) {
+    const ln = String(line || '').replace(/\r$/, '');
+    if (/^[ \t]*$/.test(ln)) return true;
+    if (/^ {0,3}(?:#{1,6}(?:[ \t]|$)|>|(?:[-+*]|\d{1,9}[.)])(?:[ \t]|$)|=+ *$|`{3,}[^`]*$|~{3,}.*$)/.test(ln)) return true;
+    if (/^ {0,3}(?:(?:\*[ \t]*){3,}|(?:-[ \t]*){3,}|(?:_[ \t]*){3,})$/.test(ln)) return true;
+    return false;
+  }
+
+  function inlineSpanCrossesBlockBreak(s, contentStart, closePos) {
+    const firstNl = s.indexOf('\n', contentStart);
+    if (firstNl === -1 || firstNl >= closePos) return false;
+    let lineStart = firstNl + 1;
+    while (lineStart <= closePos) {
+      let lineEnd = s.indexOf('\n', lineStart);
+      if (lineEnd === -1) lineEnd = s.length;
+      if (isBlockInterruptLine(s.slice(lineStart, lineEnd))) return true;
+      if (lineEnd >= closePos) break;
+      lineStart = lineEnd + 1;
+    }
+    return false;
+  }
+
   function stripInlineControlTags(text, mode) {
     let out = String(text || '');
-    // Eliminar citas internas de ChatGPT y etiquetas de automatización
-    out = out.replace(/<Cite\b[^>]*\/>/gi, '');
-    out = out.replace(/<SuggestAutomation\b[^>]*\/>/gi, '');
-    out = out.replace(/<DisplayAutomation\b[^>]*\/>/gi, '');
+    // Eliminar citas internas de ChatGPT y etiquetas de automatización (siempre que no estén escapadas con '\')
+    out = out.replace(/<(?:Cite|SuggestAutomation|DisplayAutomation)\b[^>]*\/>/gi, (m, offset, str) => (isEscapedAt(str, offset) ? m : ''));
     // Limpiar <text color="...">...</text> inline (ej. dentro de tablas Markdown)
-    out = out.replace(/<text\b([^>]*)>([\s\S]*?)<\/text>/gi, (_, rawAttrs, inner) => {
+    out = out.replace(/<text\b([^>]*)>([\s\S]*?)<\/text>/gi, (m, rawAttrs, inner, offset, str) => {
+      if (isEscapedAt(str, offset)) return m;
       const clean = inner.trim();
       if (mode === 'html') {
         const attrs = parseAttrs(rawAttrs);
@@ -988,12 +1015,14 @@
       return clean;
     });
     // Limpiar <caption>...</caption> sueltos fuera de tarjetas
-    out = out.replace(/<caption\b[^>]*>([\s\S]*?)<\/caption>/gi, (_, inner) => {
+    out = out.replace(/<caption\b[^>]*>([\s\S]*?)<\/caption>/gi, (m, inner, offset, str) => {
+      if (isEscapedAt(str, offset)) return m;
       const clean = inner.trim();
       return mode === 'html' ? `<p class="lossy-widget-caption">${renderInlineMdToHtml(clean)}</p>` : `*${clean}*`;
     });
     // Limpiar <Link url=...>...</Link> sueltos
-    out = out.replace(/<Link\b([^>]*)>([\s\S]*?)<\/Link>/gi, (_, rawAttrs, inner) => {
+    out = out.replace(/<Link\b([^>]*)>([\s\S]*?)<\/Link>/gi, (m, rawAttrs, inner, offset, str) => {
+      if (isEscapedAt(str, offset)) return m;
       const attrs = parseAttrs(rawAttrs);
       const url = String(attrs.url || '');
       const label = inner.trim();
@@ -1002,25 +1031,23 @@
       }
       return label;
     });
-    out = out.replace(/<divider\s*\/>/gi, mode === 'html' ? '<hr class="lossy-widget-divider">' : '\n---\n');
+    out = out.replace(/<divider\s*\/>/gi, (m, offset, str) => {
+      if (isEscapedAt(str, offset)) return m;
+      return mode === 'html' ? '<hr class="lossy-widget-divider">' : '\n---\n';
+    });
     return out;
   }
 
   /**
    * Construye una copia de longitud 1:1 donde los tramos de código inline (single o multi-línea,
-   * sin cruzar líneas en blanco) y las etiquetas escapadas con '\' (`\<`) quedan neutralizados con espacios.
+   * sin cruzar líneas en blanco ni fronteras de bloque CommonMark) y las etiquetas escapadas con '\' (`\<`) quedan neutralizados con espacios.
    */
   function sanitizeForWidgetScan(segment) {
     const s = String(segment || '');
     const chars = s.split('');
-    const isEscaped = idx => {
-      let bs = 0;
-      for (let k = idx - 1; k >= 0 && s[k] === '\\'; k--) bs++;
-      return (bs % 2) === 1;
-    };
     let i = 0;
     while (i < s.length) {
-      if (s[i] === '`' && !isEscaped(i)) {
+      if (s[i] === '`' && !isEscapedAt(s, i)) {
         let ticks = 0;
         while (i + ticks < s.length && s[i + ticks] === '`') ticks++;
         const delim = '`'.repeat(ticks);
@@ -1030,7 +1057,7 @@
           const pos = s.indexOf(delim, end);
           if (pos === -1) break;
           if (s[pos - 1] !== '`' && s[pos + ticks] !== '`') {
-            if (!/\r?\n[ \t]*\r?\n/.test(s.slice(i + ticks, pos))) {
+            if (!inlineSpanCrossesBlockBreak(s, i + ticks, pos)) {
               found = pos;
             }
             break;
@@ -1047,7 +1074,7 @@
         i += ticks;
         continue;
       }
-      if (s[i] === '<' && isEscaped(i)) {
+      if (s[i] === '<' && isEscapedAt(s, i)) {
         chars[i] = ' ';
       }
       i++;
@@ -1441,11 +1468,11 @@
         continue;
       }
 
-      if (inlineOpenTicks > 0 && (isBlank || hadMarker || curBqCount !== 0 || segments.length !== pendingSegCount)) {
+      if (inlineOpenTicks > 0 && (isBlank || hadMarker || curBqCount !== 0 || segments.length !== pendingSegCount || isBlockInterruptLine(rest))) {
         flushPendingInline();
       }
       const trimmedAfterLead = rest.slice(lead.idx);
-      if ((hadMarker || prevLineBlank) && lead.cols >= 4 && !isBlank && !(curBqCount === 0 && (widgetDepth > 0 || (inlineOpenTicks === 0 && isWidgetTagLine(trimmedAfterLead))))) {
+      if ((hadMarker || prevLineBlank) && lead.cols >= 4 && !isBlank && !(curBqCount === 0 && widgetDepth > 0)) {
         flushPendingInline();
         flush(false);
         inIndented = true;
@@ -1496,13 +1523,8 @@
     let out = '';
     let plainBuf = '';
     let i = 0;
-    const isEscaped = idx => {
-      let bs = 0;
-      for (let k = idx - 1; k >= 0 && s[k] === '\\'; k--) bs++;
-      return (bs % 2) === 1;
-    };
     while (i < s.length) {
-      if (s[i] === '`' && !isEscaped(i)) {
+      if (s[i] === '`' && !isEscapedAt(s, i)) {
         let ticks = 0;
         while (i + ticks < s.length && s[i + ticks] === '`') ticks++;
         const delim = '`'.repeat(ticks);
@@ -1512,7 +1534,7 @@
           const pos = s.indexOf(delim, end);
           if (pos === -1) break;
           if (s[pos - 1] !== '`' && s[pos + ticks] !== '`') {
-            if (!/\r?\n[ \t]*\r?\n/.test(s.slice(i + ticks, pos))) {
+            if (!inlineSpanCrossesBlockBreak(s, i + ticks, pos)) {
               found = pos;
             }
             break;
@@ -1541,9 +1563,7 @@
     return splitFencedCodeSegments(input).map(seg => {
       if (seg.isCode) return seg.text;
       return transformOutsideInlineCode(seg.text, s => s
-        .replace(/<Cite\b[^>]*\/>/gi, '')
-        .replace(/<SuggestAutomation\b[^>]*\/>/gi, '')
-        .replace(/<DisplayAutomation\b[^>]*\/>/gi, ''));
+        .replace(/<(?:Cite|SuggestAutomation|DisplayAutomation)\b[^>]*\/>/gi, (m, offset, str) => (isEscapedAt(str, offset) ? m : '')));
     }).join('\n');
   }
 
@@ -1584,6 +1604,8 @@
     expandDilDirectives,
     safeEvalExpr,
     parseWidgetAst,
+    splitFencedCodeSegments,
+    transformOutsideInlineCode,
     findTopLevelWidgetRanges,
     stripControlTokensOnly,
     renderWidgetsToMarkdown,

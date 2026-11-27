@@ -145,7 +145,15 @@
     if (lower.endsWith('.jpg') || lower.endsWith('.jpeg')) return 'image/jpeg';
     if (lower.endsWith('.gif')) return 'image/gif';
     if (lower.endsWith('.webp')) return 'image/webp';
+    if (lower.endsWith('.svg')) return 'image/svg+xml';
+    if (lower.endsWith('.avif')) return 'image/avif';
+    if (lower.endsWith('.bmp')) return 'image/bmp';
+    if (lower.endsWith('.ico')) return 'image/x-icon';
     if (lower.endsWith('.pdf')) return 'application/pdf';
+    if (lower.endsWith('.xhtml')) return 'application/xhtml+xml';
+    if (lower.endsWith('.html') || lower.endsWith('.htm')) return 'text/html';
+    if (lower.endsWith('.xml')) return 'application/xml';
+    if (lower.endsWith('.json')) return 'application/json';
     return '';
   }
 
@@ -676,6 +684,28 @@
     return /^\{[\s\S]*"path"\s*:\s*"\/Automations\//i.test(t);
   }
 
+  function isBlockInterruptLineMd(line) {
+    const ln = String(line || '').replace(/\r$/, '');
+    if (/^[ \t]*$/.test(ln)) return true;
+    if (/^ {0,3}(?:#{1,6}(?:[ \t]|$)|>|(?:[-+*]|\d{1,9}[.)])(?:[ \t]|$)|=+ *$|`{3,}[^`]*$|~{3,}.*$)/.test(ln)) return true;
+    if (/^ {0,3}(?:(?:\*[ \t]*){3,}|(?:-[ \t]*){3,}|(?:_[ \t]*){3,})$/.test(ln)) return true;
+    return false;
+  }
+
+  function inlineSpanCrossesBlockBreakMd(s, contentStart, closePos) {
+    const firstNl = s.indexOf('\n', contentStart);
+    if (firstNl === -1 || firstNl >= closePos) return false;
+    let lineStart = firstNl + 1;
+    while (lineStart <= closePos) {
+      let lineEnd = s.indexOf('\n', lineStart);
+      if (lineEnd === -1) lineEnd = s.length;
+      if (isBlockInterruptLineMd(s.slice(lineStart, lineEnd))) return true;
+      if (lineEnd >= closePos) break;
+      lineStart = lineEnd + 1;
+    }
+    return false;
+  }
+
   function splitInlineCodeSpans(str) {
     const s = String(str || '');
     const parts = [];
@@ -697,7 +727,9 @@
           const pos = s.indexOf(delim, end);
           if (pos === -1) break;
           if (s[pos - 1] !== '`' && s[pos + ticks] !== '`') {
-            found = pos;
+            if (!inlineSpanCrossesBlockBreakMd(s, i + ticks, pos)) {
+              found = pos;
+            }
             break;
           }
           end = pos + 1;
@@ -945,33 +977,109 @@
 
   function cleanExportText(text) {
     // Preserve literal examples in fenced, indented, and inline code; remove only ChatGPT control tokens.
+    const isEscaped = (str, idx) => {
+      let bs = 0;
+      for (let k = idx - 1; k >= 0 && str[k] === '\\'; k--) bs++;
+      return (bs % 2) === 1;
+    };
     return splitFencedCodeSegments(text).map(seg => seg.isCode ? seg.text : transformOutsideInlineCode(seg.text, s => s
       .replace(/\uE200[\s\S]*?\uE201/g, '')
-      .replace(/<Cite\b[^>]*\/>/gi, '')
-      .replace(/<SuggestAutomation\b[^>]*\/>/gi, '')
-      .replace(/<DisplayAutomation\b[^>]*\/>/gi, '')
+      .replace(/<(?:Cite|SuggestAutomation|DisplayAutomation)\b[^>]*\/>/gi, (m, offset, str) => (isEscaped(str, offset) ? m : ''))
       .replace(/!?\[([^\]]*)\]\(<?app:\/\/[^)>]+>?\)/g, (_, label) => label.replace(/^\$/, ''))
       .replace(/\[Imagen: (?:sediment:\/\/|file-)[^\]]*\]/g, ''))).join('\n');
   }
 
+  function isPlainUtf8Text(bytes) {
+    if (!bytes || typeof bytes.length !== 'number' || bytes.length === 0) return false;
+    const sampleLen = Math.min(bytes.length, 4096);
+    for (let i = 0; i < sampleLen; i++) {
+      const b = bytes[i];
+      if (b <= 0x08 || b === 0x0B || b === 0x0C || (b >= 0x0E && b <= 0x1F) || b === 0x7F) return false;
+    }
+    try {
+      const slice = bytes instanceof Uint8Array ? bytes.subarray(0, Math.min(bytes.length, 262144)) : Uint8Array.from(bytes.slice(0, 262144));
+      if (typeof TextDecoder !== 'undefined') {
+        // Avoid trailing partial multi-byte UTF-8 failure when sampling a slice larger than 4KB
+        const checkSlice = bytes.length <= 262144 ? slice : slice.subarray(0, Math.max(1, sampleLen - 4));
+        new TextDecoder('utf-8', { fatal: true }).decode(checkSlice);
+      }
+      return true;
+    } catch (_) {
+      return false;
+    }
+  }
+
+  function decodeBytesHeadUtf8(bytes, maxLen = 8192) {
+    const limit = Math.min(bytes.length, maxLen);
+    if (typeof TextDecoder !== 'undefined') {
+      const slice = bytes instanceof Uint8Array ? bytes.subarray(0, limit) : Uint8Array.from(bytes.slice(0, limit));
+      return new TextDecoder('utf-8', { fatal: false }).decode(slice);
+    }
+    let out = '';
+    for (let i = 0; i < limit; i++) out += String.fromCharCode(bytes[i]);
+    return out;
+  }
+
   function detectMarkupMimeType(bytes) {
     if (!bytes || typeof bytes.length !== 'number' || bytes.length === 0) return null;
-    const limit = Math.min(bytes.length, 2048);
-    let head = '';
-    for (let i = 0; i < limit; i++) head += String.fromCharCode(bytes[i]);
-    head = head.replace(/^\xEF\xBB\xBF/, '');
+    const head = decodeBytesHeadUtf8(bytes, 8192).replace(/^\uFEFF/, '');
     let trimmed = head.trimStart();
-    while (/^<!--/.test(trimmed)) {
-      const closeIdx = trimmed.indexOf('-->');
-      if (closeIdx === -1) break;
-      trimmed = trimmed.slice(closeIdx + 3).trimStart();
+    let hasXmlPrologue = false;
+    let hasXhtmlDoctype = false;
+    let hasHtmlDoctype = false;
+
+    const stripComments = s => {
+      let cur = s;
+      while (/^<!--/.test(cur)) {
+        const closeIdx = cur.indexOf('-->');
+        if (closeIdx === -1) break;
+        cur = cur.slice(closeIdx + 3).trimStart();
+      }
+      return cur;
+    };
+
+    trimmed = stripComments(trimmed);
+    if (/^<\?xml\b/i.test(trimmed)) {
+      hasXmlPrologue = true;
+      const endXml = trimmed.indexOf('?>');
+      trimmed = endXml !== -1 ? stripComments(trimmed.slice(endXml + 2).trimStart()) : '';
     }
-    if (/^(?:<!doctype\s+html\b|<html(?=[\s>/])|<head(?=[\s>/])|<body(?=[\s>/])|<script(?=[\s>/])|<style(?=[\s>/])|<title(?=[\s>/])|<meta(?=[\s>/])|<iframe(?=[\s>/])|<object(?=[\s>/])|<embed(?=[\s>/]))/i.test(trimmed)) {
-      return 'text/html';
+    while (/^<\?[\w-]+\b/i.test(trimmed)) {
+      const endPi = trimmed.indexOf('?>');
+      if (endPi === -1) break;
+      trimmed = stripComments(trimmed.slice(endPi + 2).trimStart());
+    }
+    const doctypeM = trimmed.match(/^<!doctype\s+([^>]+)>/i);
+    if (doctypeM) {
+      const dt = doctypeM[1];
+      if (/\bsvg\b/i.test(dt)) return 'image/svg+xml';
+      if (/\bxhtml\b/i.test(dt)) hasXhtmlDoctype = true;
+      else if (/\bhtml\b/i.test(dt)) hasHtmlDoctype = true;
+      trimmed = stripComments(trimmed.slice(doctypeM[0].length).trimStart());
     }
     if (/^<svg(?=[\s>/])/i.test(trimmed)) return 'image/svg+xml';
-    if (/^<\?xml\b/i.test(trimmed)) {
-      return /<svg(?=[\s>/])/i.test(trimmed) ? 'image/svg+xml' : 'application/xml';
+    if (/^<html(?=[\s>/])/i.test(trimmed)) {
+      const hasXhtmlNs = /xmlns\s*=\s*["']http:\/\/www\.w3\.org\/1999\/xhtml["']/i.test(head);
+      return (hasXmlPrologue || hasXhtmlDoctype || hasXhtmlNs) ? 'application/xhtml+xml' : 'text/html';
+    }
+    if (/^(?:<head|<body|<script|<style|<title|<meta|<iframe|<object|<embed)(?=[\s>/])/i.test(trimmed) || (hasHtmlDoctype && !hasXhtmlDoctype)) {
+      return 'text/html';
+    }
+    if (hasXmlPrologue) return 'application/xml';
+
+    if (isPlainUtf8Text(bytes)) {
+      const t = trimmed;
+      if (/^(?:\{|\[|true\b|false\b|null\b|-?\d|")/.test(t)) {
+        if (bytes.length <= 262144) {
+          try {
+            JSON.parse(decodeBytesHeadUtf8(bytes, bytes.length));
+            return 'application/json';
+          } catch (_) {}
+        } else if (/^(?:\{\s*"|\[\s*[\{\["\d\-tfn])/.test(t)) {
+          return 'application/json';
+        }
+      }
+      return 'text/plain';
     }
     return null;
   }
@@ -984,6 +1092,15 @@
       normMimeType(asset.mimeType).startsWith('image/') ||
       parseDataUriMimeType(asset.dataURI).startsWith('image/')
     );
+  }
+
+  function areContentMimesCompatible(expected, actual) {
+    if (!expected || !actual || expected === actual) return true;
+    const xhtmlDocs = ['application/xhtml+xml', 'text/html', 'application/xml'];
+    if (actual === 'application/xhtml+xml' && xhtmlDocs.includes(expected)) return true;
+    if (expected === 'application/xhtml+xml' && actual === 'text/html') return true;
+    if (expected === 'application/json' && actual === 'text/plain') return false;
+    return false;
   }
 
   function validateBinaryForImageAsset(asset, bytes, isEmbedded) {
@@ -999,10 +1116,10 @@
       return `Firma binaria incompatible (${magicMime} != ${expectedSummary})`;
     }
     const declaredImage = isDeclaredImageAsset(asset);
-    const markupMime = detectMarkupMimeType(bytes);
-    if (markupMime && (isEmbedded || declaredImage) && expectedMimes.some(expected => markupMime !== expected)) {
-      const expectedSummary = expectedMimes.find(m => m !== markupMime) || 'imagen';
-      return `Contenido incompatible (${markupMime} != ${expectedSummary})`;
+    const contentMime = magicMime ? null : detectMarkupMimeType(bytes);
+    if (contentMime && (isEmbedded || declaredImage) && expectedMimes.some(expected => !areContentMimesCompatible(expected, contentMime))) {
+      const expectedSummary = expectedMimes.find(m => !areContentMimesCompatible(m, contentMime)) || 'imagen';
+      return `Contenido incompatible (${contentMime} != ${expectedSummary})`;
     }
     if ((isEmbedded || declaredImage) && isGenericMimeType(normMimeType(asset?.mimeType)) && extMime && extMime.startsWith('image/') && extMime !== 'image/svg+xml' && !magicMime) {
       return `Firma binaria no válida para imagen (${extMime})`;

@@ -49,30 +49,42 @@
   md.render=function(src,env){
    if(!widgets||typeof widgets.findTopLevelWidgetRanges!=='function')return rawRender(src,env);
    const blocks=[],inlines=[];
-   const processed=String(src||'').split(/(```[\s\S]*?```)/g).map((part,idx)=>{
-    if(idx%2===1)return part;
+   const isEscaped=(str,idx)=>{let bs=0;for(let k=idx-1;k>=0&&str[k]==='\\';k--)bs++;return (bs%2)===1;};
+   const segs=typeof widgets.splitFencedCodeSegments==='function'
+    ?widgets.splitFencedCodeSegments(src)
+    :String(src||'').split(/(```[\s\S]*?```)/g).map((text,idx)=>({isCode:idx%2===1,text}));
+   const processed=segs.map(seg=>{
+    if(seg.isCode)return seg.text;
+    const part=seg.text;
     const ranges=widgets.findTopLevelWidgetRanges(part);
     let out='',cursor=0;
-    const cleanInline=seg=>{
-     let s=widgets.stripControlTokensOnly(seg);
-     s=s.replace(/<text\b([^>]*)>([\s\S]*?)<\/text>/gi,(_,a,inner)=>{
-      const colorMatch=String(a||'').match(/color\s*=\s*["']([^"']+)["']/i);
-      const colorMap={success:'#15803d',warning:'#b45309',danger:'#b91c1c',error:'#b91c1c',secondary:'#5c7068',muted:'#6b7f77'};
-      const hex=colorMatch&&colorMap[colorMatch[1].toLowerCase()];
-      const id='LOSSYINLINE'+inlines.length+'END';
-      inlines.push(hex?'<span style="color:'+hex+';font-weight:600">'+escape(inner.trim())+'</span>':escape(inner.trim()));
-      return id;
+    const transformPlain=(chunk,fn)=>typeof widgets.transformOutsideInlineCode==='function'?widgets.transformOutsideInlineCode(chunk,fn):fn(chunk);
+    const cleanInline=segText=>{
+     let s=widgets.stripControlTokensOnly(segText);
+     s=transformPlain(s,plain=>{
+      let p=plain.replace(/<text\b([^>]*)>([\s\S]*?)<\/text>/gi,(m,a,inner,offset,str)=>{
+       if(isEscaped(str,offset))return m;
+       const colorMatch=String(a||'').match(/color\s*=\s*["']([^"']+)["']/i);
+       const colorMap={success:'#15803d',warning:'#b45309',danger:'#b91c1c',error:'#b91c1c',secondary:'#5c7068',muted:'#6b7f77'};
+       const hex=colorMatch&&colorMap[colorMatch[1].toLowerCase()];
+       const id='LOSSYINLINE'+inlines.length+'END';
+       inlines.push(hex?'<span style="color:'+hex+';font-weight:600">'+escape(inner.trim())+'</span>':escape(inner.trim()));
+       return id;
+      });
+      p=p.replace(/<caption\b[^>]*>([\s\S]*?)<\/caption>/gi,(m,inner,offset,str)=>{
+       if(isEscaped(str,offset))return m;
+       const id='LOSSYBLOCK'+blocks.length+'END';
+       blocks.push('<p class="lossy-widget-caption">'+escape(widgets.stripControlTokensOnly(inner).trim())+'</p>');
+       return '\n\n'+id+'\n\n';
+      });
+      p=p.replace(/<Link\b[^>]*url\s*=\s*(?:"([^"]*)"|'([^']*)'|\{([^}]*)\})[^>]*>([\s\S]*?)<\/Link>/gi,(m,u1,u2,_u3,label,offset,str)=>{
+       if(isEscaped(str,offset))return m;
+       const url=u1||u2||'';
+       return /^https?:\/\//i.test(url)?'['+label.trim()+']('+url+')':label.trim();
+      });
+      p=p.replace(/<divider\s*\/>/gi,(m,offset,str)=>isEscaped(str,offset)?m:'\n\n---\n\n');
+      return p;
      });
-     s=s.replace(/<caption\b[^>]*>([\s\S]*?)<\/caption>/gi,(_,inner)=>{
-      const id='LOSSYBLOCK'+blocks.length+'END';
-      blocks.push('<p class="lossy-widget-caption">'+escape(widgets.stripControlTokensOnly(inner).trim())+'</p>');
-      return '\n\n'+id+'\n\n';
-     });
-     s=s.replace(/<Link\b[^>]*url\s*=\s*(?:"([^"]*)"|'([^']*)'|\{([^}]*)\})[^>]*>([\s\S]*?)<\/Link>/gi,(_,u1,u2,_u3,label)=>{
-      const url=u1||u2||'';
-      return /^https?:\/\//i.test(url)?'['+label.trim()+']('+url+')':label.trim();
-     });
-     s=s.replace(/<divider\s*\/>/gi,'\n\n---\n\n');
      return s;
     };
     for(const r of ranges){
@@ -84,7 +96,7 @@
     }
     out+=cleanInline(part.slice(cursor));
     return out;
-   }).join('');
+   }).join('\n');
    let html=rawRender(processed,env);
    blocks.forEach((b,i)=>{html=html.replace('<p>LOSSYBLOCK'+i+'END</p>',b).replace('LOSSYBLOCK'+i+'END',b);});
    inlines.forEach((v,i)=>{html=html.replace('LOSSYINLINE'+i+'END',v);});
