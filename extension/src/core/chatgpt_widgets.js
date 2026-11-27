@@ -976,12 +976,11 @@
     return (bs % 2) === 1;
   }
 
-  function isSingleLineNonParaBlock(cols, trimmed, inPara = false) {
+  function isSingleLineNonParaBlock(cols, trimmed, canSetext = false) {
     if (cols > 3) return false;
     if (/^#{1,6}(?:[ \t]|$)/.test(trimmed)) return true;
     if (/^(?:(?:\*[ \t]*){3,}|(?:-[ \t]*){3,}|(?:_[ \t]*){3,})$/.test(trimmed)) return true;
-    if (/^=+ *$/.test(trimmed)) return true;
-    if (inPara && /^-+[ \t]*$/.test(trimmed)) return true;
+    if (canSetext && /^(?:=+|-+)[ \t]*$/.test(trimmed)) return true;
     return false;
   }
 
@@ -1089,7 +1088,7 @@
           const tailLead = measureLeadCols(rest, col);
           const tailTrim = rest.slice(tailLead.idx);
           const tailInterrupts =
-            isSingleLineNonParaBlock(tailLead.cols, tailTrim, inParagraph) ||
+            isSingleLineNonParaBlock(tailLead.cols, tailTrim, false) ||
             matchBqPrefix(rest, col).ok ||
             (tailLead.cols <= 3 && /^(`{3,}[^`]*|~{3,}.*)$/.test(tailTrim)) ||
             (tailLead.cols <= 3 && /^(?:[-+*]|\d{1,9}[.)])(?:[ \t]|$)/.test(tailTrim));
@@ -1121,19 +1120,19 @@
         const curBqCount = containers.filter(c => c.type === 'bq').length;
         const isBlank = rest.trim().length === 0;
         const trimmedAfterLead = rest.slice(lead.idx);
-        return { rest, col, lead, curBqCount, hadMarker, isBlank, trimmedAfterLead };
+        return { rest, col, lead, curBqCount, hadMarker, isBlank, trimmedAfterLead, exitedAnyContainer };
       }
     };
   }
 
-  function isBlockInterruptLine(line, inList = false, inPara = true) {
+  function isBlockInterruptLine(line, inList = false, canSetext = true, prevPara = canSetext) {
     const ln = String(line || '').replace(/\r$/, '');
     if (/^[ \t]*$/.test(ln)) return true;
-    if (/^ {0,3}(?:#{1,6}(?:[ \t]|$)|>|`{3,}[^`]*$|~{3,}.*$|==* *$)/.test(ln)) return true;
+    if (/^ {0,3}(?:#{1,6}(?:[ \t]|$)|>|`{3,}[^`]*$|~{3,}.*$)/.test(ln)) return true;
     if (/^ {0,3}(?:(?:\*[ \t]*){3,}|(?:-[ \t]*){3,}|(?:_[ \t]*){3,})$/.test(ln)) return true;
-    if (inPara && /^ {0,3}-+[ \t]*$/.test(ln)) return true;
+    if (canSetext && /^ {0,3}(?:=+|-+)[ \t]*$/.test(ln)) return true;
     if (/^ {0,3}(?:[-+*][ \t]+\S|1[.)][ \t]+\S)/.test(ln)) return true;
-    if ((!inPara || inList) && /^ {0,3}\d{1,9}[.)](?:[ \t]|$)/.test(ln)) return true;
+    if ((!prevPara || inList) && /^ {0,3}\d{1,9}[.)](?:[ \t]|$)/.test(ln)) return true;
     return false;
   }
 
@@ -1155,8 +1154,9 @@
     for (let li = 0; li <= closeLineIdx; li++) {
       const rawLine = lines[li].replace(/\r$/, '');
       const prevPara = stepper.inParagraph;
-      const { lead, hadMarker, isBlank, trimmedAfterLead } = stepper.step(rawLine);
-      const isNonPara = !isBlank && isSingleLineNonParaBlock(lead.cols, trimmedAfterLead, prevPara);
+      const { lead, hadMarker, isBlank, trimmedAfterLead, exitedAnyContainer } = stepper.step(rawLine);
+      const canSetext = prevPara && !exitedAnyContainer && !hadMarker;
+      const isNonPara = !isBlank && isSingleLineNonParaBlock(lead.cols, trimmedAfterLead, canSetext);
       const isFenceOpen = !isBlank && lead.cols <= 3 && /^(`{3,}[^`]*|~{3,}.*)$/.test(trimmedAfterLead);
       const isIndented = !isBlank && (hadMarker || !stepper.inParagraph) && lead.cols >= 4;
 
@@ -1553,7 +1553,7 @@
 
       if (buf.length === 0) bufInitContainers = beforeLineContainers;
       const prevPara = stepper.inParagraph;
-      const { rest, lead, curBqCount, hadMarker, isBlank, trimmedAfterLead } = stepper.step(line);
+      const { rest, lead, curBqCount, hadMarker, isBlank, trimmedAfterLead, exitedAnyContainer } = stepper.step(line);
 
       if (inIndented) {
         if (curBqCount >= indentedBqCount && (lead.cols >= 4 || isBlank)) {
@@ -1580,8 +1580,9 @@
         continue;
       }
 
-      const lineIsNonParaBlock = !isBlank && isSingleLineNonParaBlock(lead.cols, trimmedAfterLead, prevPara && !hadMarker && beforeLineContainers.length === stepper.containers.length);
-      if (inlineOpenTicks > 0 && (isBlank || hadMarker || segments.length !== pendingSegCount || isBlockInterruptLine(rest, inlineOpenInList, true))) {
+      const canSetext = prevPara && !exitedAnyContainer && !hadMarker;
+      const lineIsNonParaBlock = !isBlank && isSingleLineNonParaBlock(lead.cols, trimmedAfterLead, canSetext);
+      if (inlineOpenTicks > 0 && (isBlank || hadMarker || segments.length !== pendingSegCount || isBlockInterruptLine(rest, inlineOpenInList, canSetext, prevPara))) {
         flushPendingInline();
       }
       if ((hadMarker || !stepper.inParagraph) && lead.cols >= 4 && !isBlank && !(curBqCount === 0 && widgetDepth > 0)) {

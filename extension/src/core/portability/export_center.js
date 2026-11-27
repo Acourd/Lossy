@@ -684,12 +684,11 @@
     return /^\{[\s\S]*"path"\s*:\s*"\/Automations\//i.test(t);
   }
 
-  function isSingleLineNonParaBlockMd(cols, trimmed, inPara = false) {
+  function isSingleLineNonParaBlockMd(cols, trimmed, canSetext = false) {
     if (cols > 3) return false;
     if (/^#{1,6}(?:[ \t]|$)/.test(trimmed)) return true;
     if (/^(?:(?:\*[ \t]*){3,}|(?:-[ \t]*){3,}|(?:_[ \t]*){3,})$/.test(trimmed)) return true;
-    if (/^=+ *$/.test(trimmed)) return true;
-    if (inPara && /^-+[ \t]*$/.test(trimmed)) return true;
+    if (canSetext && /^(?:=+|-+)[ \t]*$/.test(trimmed)) return true;
     return false;
   }
 
@@ -797,7 +796,7 @@
           const tailLead = measureLeadColsMd(rest, col);
           const tailTrim = rest.slice(tailLead.idx);
           const tailInterrupts =
-            isSingleLineNonParaBlockMd(tailLead.cols, tailTrim, inParagraph) ||
+            isSingleLineNonParaBlockMd(tailLead.cols, tailTrim, false) ||
             matchBqPrefixMd(rest, col).ok ||
             (tailLead.cols <= 3 && /^(`{3,}[^`]*|~{3,}.*)$/.test(tailTrim)) ||
             (tailLead.cols <= 3 && /^(?:[-+*]|\d{1,9}[.)])(?:[ \t]|$)/.test(tailTrim));
@@ -829,7 +828,7 @@
         const curBqCount = containers.filter(c => c.type === 'bq').length;
         const isBlank = rest.trim().length === 0;
         const trimmedAfterLead = rest.slice(lead.idx);
-        return { rest, col, lead, curBqCount, hadMarker, isBlank, trimmedAfterLead };
+        return { rest, col, lead, curBqCount, hadMarker, isBlank, trimmedAfterLead, exitedAnyContainer };
       }
     };
   }
@@ -852,8 +851,9 @@
     for (let li = 0; li <= closeLineIdx; li++) {
       const rawLine = lines[li].replace(/\r$/, '');
       const prevPara = stepper.inParagraph;
-      const { lead, hadMarker, isBlank, trimmedAfterLead } = stepper.step(rawLine);
-      const isNonPara = !isBlank && isSingleLineNonParaBlockMd(lead.cols, trimmedAfterLead, prevPara);
+      const { lead, hadMarker, isBlank, trimmedAfterLead, exitedAnyContainer } = stepper.step(rawLine);
+      const canSetext = prevPara && !exitedAnyContainer && !hadMarker;
+      const isNonPara = !isBlank && isSingleLineNonParaBlockMd(lead.cols, trimmedAfterLead, canSetext);
       const isFenceOpen = !isBlank && lead.cols <= 3 && /^(`{3,}[^`]*|~{3,}.*)$/.test(trimmedAfterLead);
       const isIndented = !isBlank && (hadMarker || !stepper.inParagraph) && lead.cols >= 4;
 
@@ -989,7 +989,8 @@
       }
 
       if (buf.length === 0) bufInitContainers = beforeLineContainers;
-      const { lead, curBqCount, hadMarker, isBlank, trimmedAfterLead } = stepper.step(line);
+      const prevPara = stepper.inParagraph;
+      const { lead, curBqCount, hadMarker, isBlank, trimmedAfterLead, exitedAnyContainer } = stepper.step(line);
 
       if (inIndented) {
         if (curBqCount >= indentedBqCount && (lead.cols >= 4 || isBlank)) {
@@ -1024,7 +1025,8 @@
         continue;
       }
 
-      const lineIsNonParaBlock = !isBlank && isSingleLineNonParaBlockMd(lead.cols, trimmedAfterLead, stepper.inParagraph && !hadMarker && beforeLineContainers.length === stepper.containers.length);
+      const canSetext = prevPara && !exitedAnyContainer && !hadMarker;
+      const lineIsNonParaBlock = !isBlank && isSingleLineNonParaBlockMd(lead.cols, trimmedAfterLead, canSetext);
       buf.push(line);
       stepper.inParagraph = !isBlank && !lineIsNonParaBlock;
     }
