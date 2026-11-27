@@ -1205,14 +1205,34 @@
   function verifyAcquiredIdentity(ext, { expectedConvId, expectedPlatform, expectedCanonicalId }) {
     const receivedConvId = ext?.source?.conversationId;
     if (!receivedConvId || receivedConvId !== expectedConvId) {
-      throw new Error(`SOURCE_IDENTITY_MISMATCH: Se esperaba ${expectedConvId} pero se recibió ${receivedConvId || 'desconocido'}.`);
+      const err = new Error(`SOURCE_IDENTITY_MISMATCH: Se esperaba ${expectedConvId} pero se recibió ${receivedConvId || 'desconocido'}.`);
+      err.code = 'SOURCE_IDENTITY_MISMATCH';
+      err.nonRetryable = true;
+      throw err;
     }
     const receivedPlatform = ext?.source?.platform ? String(ext.source.platform).toLowerCase().trim() : null;
     if (expectedPlatform && (!receivedPlatform || receivedPlatform !== expectedPlatform)) {
-      throw new Error(`SOURCE_IDENTITY_MISMATCH: Proveedor incompatible (esperado ${expectedPlatform}, recibido ${receivedPlatform || 'desconocido'}).`);
+      const err = new Error(`SOURCE_IDENTITY_MISMATCH: Proveedor incompatible (esperado ${expectedPlatform}, recibido ${receivedPlatform || 'desconocido'}).`);
+      err.code = 'SOURCE_IDENTITY_MISMATCH';
+      err.nonRetryable = true;
+      throw err;
     }
-    if (expectedCanonicalId && ext?.canonicalId && ext.canonicalId !== expectedCanonicalId) {
-      throw new Error(`SOURCE_IDENTITY_MISMATCH: CanonicalId incompatible (${ext.canonicalId} != ${expectedCanonicalId}).`);
+    if (expectedCanonicalId && (!ext?.canonicalId || ext.canonicalId !== expectedCanonicalId)) {
+      const err = new Error(`SOURCE_IDENTITY_MISMATCH: CanonicalId incompatible (${ext?.canonicalId || 'ausente'} != ${expectedCanonicalId}).`);
+      err.code = 'SOURCE_IDENTITY_MISMATCH';
+      err.nonRetryable = true;
+      throw err;
+    }
+    const receivedUrl = String(ext?.source?.url || '');
+    if (receivedUrl) {
+      if ((expectedPlatform === 'claude' && /chatgpt\.com|gemini\.google\.com/i.test(receivedUrl)) ||
+          (expectedPlatform === 'gemini' && /chatgpt\.com|claude\.ai/i.test(receivedUrl)) ||
+          (expectedPlatform === 'chatgpt' && /claude\.ai|gemini\.google\.com/i.test(receivedUrl))) {
+        const err = new Error(`SOURCE_IDENTITY_MISMATCH: URL de origen incompatible con ${expectedPlatform}.`);
+        err.code = 'SOURCE_IDENTITY_MISMATCH';
+        err.nonRetryable = true;
+        throw err;
+      }
     }
   }
 
@@ -1249,68 +1269,88 @@
         currentActiveJob = updatedJob;
         updateGlobalJobTray(updatedJob);
       });
-      engine.run(async (it) => {
-        const itemTitle = (it && it.title) ? it.title : item.title;
-        job.currentItemTitle = itemTitle;
-        updateGlobalJobTray(job);
-        return { id: item.id, title: itemTitle };
-      }).catch(console.warn);
-    }
-
-    if (typeof chrome !== 'undefined' && chrome.tabs && chrome.tabs.query && conv.source?.conversationId) {
+      showToast(`Actualizando captura de "${conv.title}"...`);
       try {
-        const cfg = platformTabQueryConfig(expectedPlatform);
-        const tabs = await chrome.tabs.query({ url: cfg.urls });
-        if (tabs && tabs.length > 0) {
+        await engine.run(async (it) => {
+          if (captureWipeEpoch !== null && typeof db.getWipeEpoch === 'function' && db.getWipeEpoch() !== captureWipeEpoch) {
+            throw new Error('WRITE_ABORTED_BY_CLEAR_ALL');
+          }
+          const itemTitle = (it && it.title) ? it.title : item.title;
+          job.currentItemTitle = itemTitle;
+          updateGlobalJobTray(job);
+
+          if (!(typeof chrome !== 'undefined' && chrome.tabs && chrome.tabs.query && conv.source?.conversationId)) {
+            const err = new Error('No hay contexto de pestañas disponible para actualizar la captura.');
+            err.nonRetryable = true;
+            throw err;
+          }
+
+          const cfg = platformTabQueryConfig(expectedPlatform);
+          const tabs = await chrome.tabs.query({ url: cfg.urls });
+          if (!tabs || tabs.length === 0) {
+            showToast(`No se encontró ninguna pestaña abierta de ${expectedPlatform}.`);
+            const err = new Error(`No hay pestaña abierta de ${expectedPlatform}.`);
+            err.nonRetryable = true;
+            throw err;
+          }
+
           const exactTab = tabs.find(t => cfg.matchTab(t, conv.source.conversationId));
           if (!exactTab && !cfg.allowStructuredFallback) {
             showToast(`No se encontró una pestaña activa para esta conversación de ${expectedPlatform}.`);
-            return;
+            const err = new Error(`Sin pestaña activa para ${expectedPlatform}.`);
+            err.nonRetryable = true;
+            throw err;
           }
+
           const targetTab = exactTab || tabs[0];
           const isStructuredOnly = !exactTab;
           const action = isStructuredOnly ? 'ACQUIRE_STRUCTURED_ONLY' : 'ACQUIRE_CONVERSATION';
 
           const res = await safeTabMessagingWithAutoInject(targetTab.id, { action, conversationId: conv.source.conversationId, platform: expectedPlatform });
           if (captureWipeEpoch !== null && typeof db.getWipeEpoch === 'function' && db.getWipeEpoch() !== captureWipeEpoch) {
-            return;
+            throw new Error('WRITE_ABORTED_BY_CLEAR_ALL');
           }
-          if (res && res.success && res.data) {
-            // SOURCE IDENTITY INVARIANT (fail-closed across both UUID & provider):
-            try {
-              verifyAcquiredIdentity(res.data, {
-                expectedConvId: conv.source.conversationId,
-                expectedPlatform,
-                expectedCanonicalId: conv.canonicalId
-              });
-            } catch (idErr) {
-              console.error('[Liner Workspace] Violación de invariante:', idErr.message);
-              showToast(idErr.message, { isError: true });
-              return;
-            }
-            await db.saveConversation(res.data, captureWipeEpoch !== null ? { expectedWipeEpoch: captureWipeEpoch } : undefined);
-            await loadLibraryData();
-            showToast(`Captura de "${conv.title}" actualizada con éxito.`);
-            if (currentActiveConversation && currentActiveConversation.canonicalId === canonicalId) {
-              openInspector(canonicalId);
-            }
-          } else if (res && !res.success) {
-            if (res.isConnectionError) {
+
+          if (!res || !res.success || !res.data) {
+            if (res && res.isConnectionError) {
               console.warn('[Liner Workspace] Error comunicando con pestaña:', res.error);
-              showToast('No se pudo conectar con la pestaña de ChatGPT.');
+              showToast(`No se pudo conectar con la pestaña de ${expectedPlatform}.`);
             } else {
-              showToast(res.error || 'No se pudo actualizar la captura.');
+              showToast(res?.error || 'No se pudo actualizar la captura.');
             }
+            const err = new Error(res?.error || 'Error al adquirir conversación');
+            if (res && !res.isConnectionError) err.nonRetryable = true;
+            throw err;
           }
-        } else {
-          showToast('No se encontró ninguna pestaña abierta de ChatGPT.');
-        }
+
+          // SOURCE IDENTITY INVARIANT (fail-closed across UUID, platform, and canonicalId):
+          try {
+            verifyAcquiredIdentity(res.data, {
+              expectedConvId: conv.source.conversationId,
+              expectedPlatform,
+              expectedCanonicalId: conv.canonicalId
+            });
+          } catch (idErr) {
+            console.error('[Liner Workspace] Violación de invariante:', idErr.message);
+            showToast(idErr.message, { isError: true });
+            throw idErr;
+          }
+
+          await db.saveConversation(res.data, captureWipeEpoch !== null ? { expectedWipeEpoch: captureWipeEpoch } : undefined);
+          await loadLibraryData();
+          showToast(`Captura de "${conv.title}" actualizada con éxito.`);
+          if (currentActiveConversation && currentActiveConversation.canonicalId === canonicalId) {
+            openInspector(canonicalId);
+          }
+          return { id: item.id, title: itemTitle };
+        });
       } catch (err) {
         console.warn('[Liner Workspace] Error en startSingleCapture:', err);
       }
+      return;
     }
 
-    showToast(`Actualizando captura de "${conv.title}"...`);
+    showToast('JobEngine no disponible en memoria.');
   }
 
   // --- SIDE INSPECTOR DRAWER ---

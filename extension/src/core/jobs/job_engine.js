@@ -277,6 +277,12 @@
               this._abortSignal = true;
               return;
             }
+            if (err.nonRetryable || err.code === 'SOURCE_IDENTITY_MISMATCH') {
+              item.status = ITEM_STATUS.FAILED;
+              item.error = err.message || 'Error fatal no reintentable';
+              this._syncJobCounters(runJob);
+              break;
+            }
             if (err.message === 'HTTP_429_RATE_LIMITED' && err.retryAfterSeconds) {
               await waitMs((err.retryAfterSeconds + 1) * 1000);
             }

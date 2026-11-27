@@ -316,16 +316,46 @@ test('R34 P1-1: captura en lote y simple rechaza respuesta de otro proveedor con
   assert.equal(activeJob.items[0].status, ITEM_STATUS.FAILED);
   assert.match(activeJob.items[0].error, /SOURCE_IDENTITY_MISMATCH/);
 
-  // También verifica defensa directa en retainLocalCapture ante cruce de plataforma
-  await db.saveConversation({
-    canonicalId: claudeCanonicalId,
-    title: 'Inyección directa cross-platform',
-    source: { platform: 'chatgpt', conversationId: sharedUuid },
-    messages: [{ id: 'x2', role: 'assistant', text: 'Inyectado' }]
-  });
+  // También verifica defensa directa ante cruce de plataforma o de conversationId con mismo canonicalId
+  await assert.rejects(
+    db.saveConversation({
+      canonicalId: claudeCanonicalId,
+      title: 'Inyección directa cross-platform',
+      source: { platform: 'chatgpt', conversationId: sharedUuid },
+      messages: [{ id: 'x2', role: 'assistant', text: 'Inyectado' }]
+    }),
+    /SOURCE_IDENTITY_MISMATCH/
+  );
+  await assert.rejects(
+    db.saveConversation({
+      canonicalId: claudeCanonicalId,
+      title: 'Inyección directa mismo proveedor distinta conv',
+      source: { platform: 'claude', conversationId: 'other-uuid-9999' },
+      messages: [{ id: 'x3', role: 'assistant', text: 'Mezclado' }]
+    }),
+    /SOURCE_IDENTITY_MISMATCH/
+  );
   const afterDirectSave = await db.getConversation(claudeCanonicalId);
   assert.equal(afterDirectSave.source.platform, 'claude');
   assert.equal(afterDirectSave.messages[0].text, 'Contenido original de Claude');
+
+  // También verifica rechazo cuando la respuesta omite canonicalId esperando claudeCanonicalId
+  const missingCanonHarness = createWorkspaceHarness({
+    db,
+    tabsQueryFn: async () => [{ id: 88, url: `https://claude.ai/chat/${sharedUuid}` }],
+    sendMessageFn: async () => ({
+      success: true,
+      data: {
+        title: 'Sin canonicalId',
+        source: { platform: 'claude', conversationId: sharedUuid, url: `https://claude.ai/chat/${sharedUuid}` },
+        messages: [{ id: 'x4', role: 'assistant', isConversational: true, text: 'Sin canonicalId' }]
+      }
+    })
+  });
+  missingCanonHarness.hooks.selectIds([claudeCanonicalId]);
+  await missingCanonHarness.hooks.startBulkCapture();
+  assert.equal(missingCanonHarness.hooks.getActiveEngine().activeJob.items[0].status, ITEM_STATUS.FAILED);
+  assert.match(missingCanonHarness.hooks.getActiveEngine().activeJob.items[0].error, /CanonicalId incompatible/);
 });
 
 test('R34 P1-2: Eliminar todo no lanza ReferenceError y otra instancia IndexedDB no reintroduce datos tras clearAll()', async () => {
@@ -371,7 +401,23 @@ test('R34 P1-2: Eliminar todo no lanza ReferenceError y otra instancia IndexedDB
   assert.equal(stores.metadata_index.size, 0);
   assert.ok(stores.diagnostics.get('__lossy_wipe_epoch__')?.epoch >= 2);
 
-  // 3. Una captura posterior legítima sí persiste limpiamente
+  // 3. Simula adquisición desde popup que captura snapshot antes de clearAll() y crea otra instancia nueva LinerDB al recibir respuesta
+  const dbPopupStart = new LinerDB(indexedDB);
+  const snapAtStart = await dbPopupStart.captureWipeSnapshot();
+  await dbPrimary.clearAll();
+  const dbPopupFreshSave = new LinerDB(indexedDB);
+  await assert.rejects(
+    dbPopupFreshSave.saveConversation({
+      canonicalId: 'conv_popup_after_wipe',
+      title: 'Fuga desde nueva instancia popup',
+      source: { platform: 'claude', conversationId: 'pop1' },
+      messages: [{ id: 'p1', role: 'assistant', content: { text: 'No debe sobrevivir' } }]
+    }, { expectedIdbWipeEpoch: snapAtStart.idbWipeEpoch }),
+    /WRITE_ABORTED_BY_CLEAR_ALL/
+  );
+  assert.equal(stores.conversations.size, 0);
+
+  // 4. Una captura posterior legítima sí persiste limpiamente
   await dbOtherInstance.saveConversation({
     canonicalId: 'conv_fresh_after_wipe',
     title: 'Nueva conversación legítima',
@@ -454,17 +500,30 @@ test('R34 P1-3: primera captura tras navegación SPA A->B en Claude y Gemini rec
       listeners[0](msg, { id: 'test-ext' }, resolve);
     });
 
-    // SIN captura previa en A, navegar SPA A -> B dejando el DOM de A
+    // SIN captura previa en A, navegar SPA A -> B dejando el DOM de A (o actualización parcial de A)
     historyObj.pushState({}, '', spec.urlB);
     const firstCaptureOnB = await callMsg({ action: 'ACQUIRE_CONVERSATION' });
     assert.equal(firstCaptureOnB.success, false, `${spec.platform}: la primera captura tras A->B debe rechazar DOM obsoleto`);
     assert.match(firstCaptureOnB.error, /STALE_DOM/);
 
-    // Cuando el DOM sí converge al nuevo contenido de B en ~160ms tras navegar a otro chat
-    setTimeout(() => { domText = `Contenido fresco de B (${spec.platform})`; }, 160);
+    // Actualización parcial de A sin llegar a B todavía -> sigue siendo obsoleto de A
+    domText = `Mensaje confidencial exclusivo de A (${spec.platform}) ... [editado parcialmente]`;
+    const partialAOnB = await callMsg({ action: 'ACQUIRE_CONVERSATION' });
+    assert.equal(partialAOnB.success, false, `${spec.platform}: actualización parcial de A tampoco puede pasar por B`);
+    assert.match(partialAOnB.error, /STALE_DOM/);
+
+    // Navegación A -> B -> C sin capturar nunca: DOM se actualiza en B y luego salta a C dejando contenido de B
+    domText = `Contenido real pero exclusivo de B (${spec.platform})`;
+    historyObj.pushState({}, '', spec.urlB.replace(/2|b/g, '3').replace(/bbbbbbbbbbbb/, 'cccccccccccc'));
+    const skippedBtoC = await callMsg({ action: 'ACQUIRE_CONVERSATION' });
+    assert.equal(skippedBtoC.success, false, `${spec.platform}: A->B->C sin captura previa no puede aceptar contenido de B como C`);
+    assert.match(skippedBtoC.error, /STALE_DOM/);
+
+    // Cuando el DOM sí converge al nuevo contenido de C en ~160ms
+    setTimeout(() => { domText = `Contenido fresco de C (${spec.platform})`; }, 160);
     const converged = await callMsg({ action: 'ACQUIRE_CONVERSATION' });
     assert.equal(converged.success, true);
-    assert.equal(converged.data.messages[0].text, `Contenido fresco de B (${spec.platform})`);
+    assert.equal(converged.data.messages[0].text, `Contenido fresco de C (${spec.platform})`);
   }
 });
 
@@ -485,12 +544,20 @@ test('R34 P1-4: content_script con montaje diferido de 400ms recoge exactamente 
     'data-message-id': t.id
   }, [t.text]);
 
+  let dynamicScrollHeight = 2400;
+  let pendingHeightTimer = null;
+
   const container = {
     get scrollTop() { return internalScrollTop; },
     set scrollTop(val) {
       internalScrollTop = val;
+      if (pendingHeightTimer) clearTimeout(pendingHeightTimer);
       if (pendingMountTimer) clearTimeout(pendingMountTimer);
-      // Simula virtualización diferida de 400ms exactos tras cualquier salto de scroll
+      // Simula cambio temprano de altura (skeleton/espaciador a 50ms) seguido por montaje diferido de turnos a 400ms
+      pendingHeightTimer = setTimeout(() => {
+        dynamicScrollHeight = 2400 + (val > 0 ? 40 : 0);
+      }, 50);
+      if (typeof pendingHeightTimer.unref === 'function') pendingHeightTimer.unref();
       pendingMountTimer = setTimeout(() => {
         if (val < 300) visibleRange = [0, 4];
         else if (val < 700) visibleRange = [2, 6];
@@ -500,7 +567,7 @@ test('R34 P1-4: content_script con montaje diferido de 400ms recoge exactamente 
       }, 400);
       if (typeof pendingMountTimer.unref === 'function') pendingMountTimer.unref();
     },
-    scrollHeight: 2400,
+    get scrollHeight() { return dynamicScrollHeight; },
     clientHeight: 800,
     tagName: 'DIV',
     dataset: {},
@@ -558,7 +625,8 @@ test('R34 P2-Cap-4: messageDomText conserva jerarquía anidada bajo marcadores o
 
   const domTree = makeElement('ol', { start: '10' }, [
     makeElement('li', {}, [
-      'Elemento diez',
+      makeElement('p', {}, ['Primer párrafo']),
+      makeElement('p', {}, ['Segundo párrafo']),
       makeElement('ul', {}, [
         makeElement('li', {}, [
           'Sub A',
@@ -571,17 +639,19 @@ test('R34 P2-Cap-4: messageDomText conserva jerarquía anidada bajo marcadores o
   ]);
 
   const mdText = sandbox.module.exports.messageDomText(domTree).trim();
-  assert.match(mdText, /10\. Elemento diez/);
+  assert.match(mdText, /10\. Primer párrafo/);
+  assert.match(mdText, /\n    Segundo párrafo/);
   assert.match(mdText, /\n    - Sub A/);
   assert.match(mdText, /\n      100\. Sub cien/);
 
   const md = new MarkdownIt({ html: false });
   const rendered = md.render(mdText);
-  // Debe haber un único <ol start="10"> que contenga <ul> y dentro <ol start="100"> sin salirse al nivel raíz
-  assert.match(rendered, /<ol start="10">[\s\S]*<ul>[\s\S]*<ol start="100">[\s\S]*Sub cien[\s\S]*<\/ol>[\s\S]*<\/ul>[\s\S]*<\/ol>/);
+  // Ambos párrafos y sublistas quedan estrictamente dentro de <ol start="10"> (cero bloques <pre> por falta de indentación)
+  assert.equal(rendered.includes('<pre>'), false, 'No debe degradar la sublista a bloque de código indentado');
+  assert.match(rendered, /<ol start="10">[\s\S]*Primer párrafo[\s\S]*Segundo párrafo[\s\S]*<ul>[\s\S]*<ol start="100">[\s\S]*Sub cien[\s\S]*<\/ol>[\s\S]*<\/ul>[\s\S]*<\/ol>/);
 });
 
-test('R34 P2-Exp-5: HtmlBuilder incluye bloques separados en codeBlocks aunque texto ya contenga otra cerca de código', () => {
+test('R34 P2-Exp-5: HtmlBuilder combina codeBlocks y content.codeBlocks sin omitir bloques cuando text ya tiene cercas', () => {
   const html = HtmlBuilder.buildStandaloneHtml({
     canonicalId: 'conv_html_cb',
     title: 'Bloques Mixtos',
@@ -590,6 +660,9 @@ test('R34 P2-Exp-5: HtmlBuilder incluye bloques separados en codeBlocks aunque t
       id: 'm1',
       role: 'assistant',
       isConversational: true,
+      codeBlocks: [
+        { language: 'js', code: 'const enTexto = true;' }
+      ],
       content: {
         text: 'Aquí hay código en texto:\n\n```js\nconst enTexto = true;\n```\n\nY otro aparte.',
         codeBlocks: [
@@ -602,7 +675,54 @@ test('R34 P2-Exp-5: HtmlBuilder incluye bloques separados en codeBlocks aunque t
 
   const inlineOccurrences = html.match(/const enTexto = true;/g) || [];
   assert.equal(inlineOccurrences.length, 1, 'No debe duplicar el bloque ya presente en el Markdown');
-  assert.ok(html.includes('def bloque_separado():'), 'Debe renderizar bloques separados en codeBlocks aunque ya exista una cerca en texto');
+  assert.ok(html.includes('def bloque_separado():'), 'Debe renderizar bloques en content.codeBlocks aunque msg.codeBlocks exista y ya haya una cerca en text');
+});
+
+test('R34 P2-UI-1 & Residual: startSingleCapture mantiene el trabajo running hasta terminar adquisición y bloquea solapamiento', async () => {
+  const db = new LinerDB();
+  const convId = 'conv_chatgpt_single_race';
+  await db.saveConversation({
+    canonicalId: convId,
+    title: 'Single Capture Race',
+    source: { platform: 'chatgpt', conversationId: 'single_race', url: 'https://chatgpt.com/c/single_race' },
+    messages: [{ id: 'm1', role: 'user', text: 'Inicial' }]
+  });
+
+  let releaseRpc = null;
+  let rpcCount = 0;
+  const harness = createWorkspaceHarness({
+    db,
+    tabsQueryFn: async () => [{ id: 55, url: 'https://chatgpt.com/c/single_race' }],
+    sendMessageFn: () => {
+      rpcCount++;
+      return new Promise(resolve => {
+        releaseRpc = () => resolve({
+          success: true,
+          data: {
+            canonicalId: convId,
+            title: 'Single Capture Updated',
+            source: { platform: 'chatgpt', conversationId: 'single_race', url: 'https://chatgpt.com/c/single_race' },
+            messages: [{ id: 'm1', role: 'user', text: 'Inicial' }, { id: 'm2', role: 'assistant', text: 'Actualizado' }],
+            integrity: { status: 'captured' }
+          }
+        });
+      });
+    }
+  });
+
+  const firstPromise = harness.hooks.startSingleCapture(convId);
+  await new Promise(r => setTimeout(r, 25));
+  assert.equal(harness.hooks.getActiveEngine().activeJob.status, JOB_STATUS.RUNNING, 'El trabajo debe permanecer RUNNING mientras la adquisición está en vuelo');
+
+  // Segunda captura individual simultánea mientras la primera sigue esperando RPC debe bloquearse
+  await harness.hooks.startSingleCapture(convId);
+  assert.equal(rpcCount, 1, 'No debe lanzar dos adquisiciones individuales simultáneas');
+
+  releaseRpc();
+  await firstPromise;
+  assert.equal(harness.hooks.getActiveEngine().activeJob.status, JOB_STATUS.COMPLETED);
+  const updated = await db.getConversation(convId);
+  assert.equal(updated.messages.length, 2);
 });
 
 test('R34 P2-UI-1: createJob bloquea ejecución concurrente sin sobrescribir activeJob ni marcar incompletos como COMPLETED', async () => {

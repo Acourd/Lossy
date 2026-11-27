@@ -39,11 +39,35 @@
     return st;
   }
 
+  function extractIdentityParts(entity) {
+    const plat = String(entity?.source?.platform || entity?.platform || '').toLowerCase().trim();
+    let convId = entity?.source?.conversationId ? String(entity.source.conversationId).trim() : '';
+    if (!convId && typeof entity?.source?.url === 'string') {
+      const m = entity.source.url.match(/\/(?:c|chat|app)\/([a-zA-Z0-9_-]+)/);
+      if (m && m[1]) convId = m[1];
+    }
+    return {
+      platform: plat && plat !== 'unknown' ? plat : '',
+      convId
+    };
+  }
+
+  function hasConflictingIdentity(incoming, existing) {
+    if (!existing || !incoming) return null;
+    const ex = extractIdentityParts(existing);
+    const inc = extractIdentityParts(incoming);
+    if (ex.platform && inc.platform && ex.platform !== inc.platform) {
+      return `SOURCE_IDENTITY_MISMATCH: Proveedor incompatible (${inc.platform} != ${ex.platform}).`;
+    }
+    if (ex.convId && inc.convId && ex.convId !== inc.convId) {
+      return `SOURCE_IDENTITY_MISMATCH: Conversación distinta (${inc.convId} != ${ex.convId}) bajo el mismo canonicalId.`;
+    }
+    return null;
+  }
+
   function retainLocalCapture(incoming, existing) {
     if (!existing || existing.canonicalId !== incoming.canonicalId) return incoming;
-    const existingPlat = String(existing.source?.platform || '').toLowerCase();
-    const incomingPlat = String(incoming.source?.platform || '').toLowerCase();
-    if (existingPlat && incomingPlat && existingPlat !== 'unknown' && incomingPlat !== 'unknown' && existingPlat !== incomingPlat) {
+    if (hasConflictingIdentity(incoming, existing)) {
       return existing;
     }
     const isCompleteStatus = s => ['captured', 'harvested', 'complete'].includes(String(s || '').toLowerCase());
@@ -363,21 +387,55 @@
       return this._wipeEpoch + this._remoteWipeEpoch + (shared ? shared.epoch : 0);
     }
 
-    _resolveBaselineIdbEpoch() {
+    _resolveBaselineIdbEpoch(options) {
+      if (options && Number.isInteger(options.expectedIdbWipeEpoch)) {
+        return options.expectedIdbWipeEpoch;
+      }
       const shared = this.useMemoryFallback ? null : getSharedWipeState(this.indexedDB);
       return Math.max(this._knownIdbWipeEpoch, shared ? (shared.idbEpoch || 0) : 0);
     }
 
-    _resolveWriteEpoch(options) {
-      return (options && Number.isInteger(options.expectedWipeEpoch)) ? options.expectedWipeEpoch : this.getWipeEpoch();
+    async captureWipeSnapshot() {
+      await this.open();
+      if (this.useMemoryFallback) {
+        return { wipeEpoch: this.getWipeEpoch(), idbWipeEpoch: this._wipeEpoch };
+      }
+      if (this._hasDiagStore()) {
+        try {
+          const persisted = await new Promise((resolve) => {
+            const tx = this.db.transaction(['diagnostics'], 'readonly');
+            const req = tx.objectStore('diagnostics').get(WIPE_EPOCH_KEY);
+            req.onsuccess = () => resolve(Number(req.result?.epoch || 0));
+            req.onerror = () => resolve(this._knownIdbWipeEpoch);
+          });
+          if (persisted > this._knownIdbWipeEpoch) this._knownIdbWipeEpoch = persisted;
+        } catch (_) {}
+      }
+      return {
+        wipeEpoch: this.getWipeEpoch(),
+        idbWipeEpoch: this._resolveBaselineIdbEpoch()
+      };
     }
 
-    _assertWriteEpoch(expectedEpoch) {
+    _resolveWriteEpoch(options) {
+      if (options && Number.isInteger(options.expectedWipeEpoch)) return options.expectedWipeEpoch;
+      return this.getWipeEpoch();
+    }
+
+    _assertWriteEpoch(expectedEpoch, options) {
       const shared = this.useMemoryFallback ? null : getSharedWipeState(this.indexedDB);
       if (this._clearing || (shared && shared.clearing > 0) || this.getWipeEpoch() !== expectedEpoch) {
         const err = new Error('WRITE_ABORTED_BY_CLEAR_ALL');
         err.code = 'WRITE_ABORTED_BY_CLEAR_ALL';
         throw err;
+      }
+      if (options && Number.isInteger(options.expectedIdbWipeEpoch)) {
+        const curBaseline = Math.max(this._knownIdbWipeEpoch, shared ? (shared.idbEpoch || 0) : 0);
+        if (curBaseline > options.expectedIdbWipeEpoch) {
+          const err = new Error('WRITE_ABORTED_BY_CLEAR_ALL');
+          err.code = 'WRITE_ABORTED_BY_CLEAR_ALL';
+          throw err;
+        }
       }
     }
 
@@ -533,19 +591,25 @@
       }
 
       const prepare = existing => {
-        this._assertWriteEpoch(writeEpoch);
+        this._assertWriteEpoch(writeEpoch, options);
+        const conflictMsg = hasConflictingIdentity(conv, existing);
+        if (conflictMsg) {
+          const err = new Error(conflictMsg);
+          err.code = 'SOURCE_IDENTITY_MISMATCH';
+          throw err;
+        }
         const merged = retainLocalCapture(conv, existing);
         return this.conversationRecords(merged);
       };
       if (this.useMemoryFallback) {
-        this._assertWriteEpoch(writeEpoch);
+        this._assertWriteEpoch(writeEpoch, options);
         const { record, meta } = prepare(this.memoryStores.conversations.get(conv.canonicalId));
-        this._assertWriteEpoch(writeEpoch);
+        this._assertWriteEpoch(writeEpoch, options);
         this.memoryStores.conversations.set(record.canonicalId, structuredClone(record));
         this.memoryStores.metadata_index.set(record.canonicalId, meta);
         return record.canonicalId;
       }
-      const baselineIdbEpoch = this._resolveBaselineIdbEpoch();
+      const baselineIdbEpoch = this._resolveBaselineIdbEpoch(options);
       return this._runGuardedTx(
         ['conversations', 'metadata_index'],
         writeEpoch,

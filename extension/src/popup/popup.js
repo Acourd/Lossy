@@ -561,6 +561,14 @@ function initPopup() {
     setStatus('detecting', detectedActive.label, 'Capturando contexto...');
     showFeedback('Iniciando captura de conversación...', false);
 
+    let wipeSnapshot = null;
+    try {
+      const startDb = typeof LinerDB !== 'undefined' ? new LinerDB() : null;
+      if (startDb && typeof startDb.captureWipeSnapshot === 'function') {
+        wipeSnapshot = await startDb.captureWipeSnapshot();
+      }
+    } catch (_) {}
+
     const sendRequest = (isRetry = false) => {
       chrome.tabs.sendMessage(currentTab.id, { action: 'ACQUIRE_CONVERSATION', conversationId: targetConvId }, (response) => {
         const lastError = chrome.runtime && chrome.runtime.lastError;
@@ -616,9 +624,16 @@ function initPopup() {
         }
 
         const acquired = response.data;
+        const detectedPlat = String(detectedActive.platform || 'chatgpt').toLowerCase();
+        const receivedPlat = acquired.source?.platform ? String(acquired.source.platform).toLowerCase() : null;
         // SOURCE IDENTITY INVARIANT:
-        if (targetConvId && (!acquired.source?.conversationId || acquired.source.conversationId !== targetConvId)) {
-          setStatus('error', 'Mismatch de identidad', 'Los datos recibidos pertenecen a otra conversación');
+        if (targetConvId && (
+          !acquired.source?.conversationId ||
+          acquired.source.conversationId !== targetConvId ||
+          (receivedPlat && receivedPlat !== detectedPlat) ||
+          (acquired.canonicalId && acquired.canonicalId !== `conv_${detectedPlat}_${targetConvId}`)
+        )) {
+          setStatus('error', 'Mismatch de identidad', 'Los datos recibidos pertenecen a otra conversación o proveedor');
           showFeedback('Error crítico: Mismatch de identidad entre pestaña y captura. Abortado.', true);
           finalizeAcquisition();
           return;
@@ -639,7 +654,7 @@ function initPopup() {
         const totalMessages = extractedData.messages ? extractedData.messages.length : (meta.totalMessages || 0);
         const integrity = extractedData.integrity?.status || meta.integrity || 'harvested';
 
-        // Persistir / actualizar en LinerDB con identidad garantizada
+        // Persistir / actualizar en LinerDB con identidad y época de borrado garantizadas
         (async () => {
           let persistenceError;
           try {
@@ -660,7 +675,8 @@ function initPopup() {
                 attachments: extractedData.attachments || [],
                 references: extractedData.references || []
               };
-              await db.saveConversation(canonicalConv);
+              const saveOpts = wipeSnapshot ? { expectedIdbWipeEpoch: wipeSnapshot.idbWipeEpoch } : undefined;
+              await db.saveConversation(canonicalConv, saveOpts);
               extractedData = canonicalConv;
               capturePersisted = true;
             }

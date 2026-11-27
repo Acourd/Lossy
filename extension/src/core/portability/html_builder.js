@@ -394,7 +394,18 @@
       const roleLabel = isUser ? 'USUARIO' : (msg.author || platform);
       const text = typeof msg.text === 'string' ? msg.text : (msg.content?.text || '');
       let bodyHtml = renderSimpleMarkdownToHtml(text, { omitImages: options.imageStrategy === 'omit' });
-      const storedCode = Array.isArray(msg.codeBlocks) ? msg.codeBlocks : (Array.isArray(msg.content?.codeBlocks) ? msg.content.codeBlocks : []);
+      const topBlocks = Array.isArray(msg.codeBlocks) ? msg.codeBlocks : [];
+      const contentBlocks = Array.isArray(msg.content?.codeBlocks) ? msg.content.codeBlocks : [];
+      const storedCode = [];
+      const seenStored = new Set();
+      for (const cb of [...topBlocks, ...contentBlocks]) {
+        if (!cb) continue;
+        const normBody = String(cb.code || '').replace(/\r\n/g, '\n').replace(/^\n+|\n+$/g, '').trim();
+        const key = `${String(cb.language || '').trim().toLowerCase()}\u0001${normBody}`;
+        if (seenStored.has(key)) continue;
+        seenStored.add(key);
+        storedCode.push(cb);
+      }
       if (storedCode.length > 0) {
         const normCode = s => String(s || '').replace(/\r\n/g, '\n').replace(/^\n+|\n+$/g, '').trim();
         const inlineBodies = [];

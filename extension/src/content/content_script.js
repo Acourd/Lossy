@@ -105,6 +105,11 @@
     }
     return acc;
   }
+  function indentContinuationLines(rawBlock, pad) {
+    const lines = String(rawBlock || '').trim().split('\n');
+    if (lines.length <= 1) return lines[0] || '';
+    return lines[0] + '\n' + lines.slice(1).map(l => (l.trim() ? pad + l : '')).join('\n');
+  }
   function messageDomText(node, listDepthOrIndent = '') {
     if (!node) return '';
     if (node.nodeType === 3) return node.textContent || '';
@@ -128,9 +133,10 @@
       const items = joinMarkdownParts(Array.from(node.childNodes || []).map(child => {
         if (child && child.nodeType === 1 && (child.tagName || '').toLowerCase() === 'li') {
           const marker = tag === 'ol' ? `${itemNum++}.` : '-';
-          const childIndent = listIndent + ' '.repeat(marker.length + 1);
-          const item = joinMarkdownParts(Array.from(child.childNodes || []).map(c => messageDomText(c, childIndent))).trim();
-          return item ? `\n${listIndent}${marker} ${item}` : '';
+          const pad = ' '.repeat(marker.length + 1);
+          const rawItem = joinMarkdownParts(Array.from(child.childNodes || []).map(c => messageDomText(c))).trim();
+          const item = indentContinuationLines(rawItem, pad);
+          return item ? `\n${marker} ${item}` : '';
         }
         return messageDomText(child, listIndent);
       }));
@@ -145,7 +151,7 @@
     if (tag === 'code') return wrapInlineCode(childParts.join(''));
     const text = joinMarkdownParts(childParts);
     if (/^h[1-6]$/.test(tag)) return '\n\n' + '#'.repeat(Number(tag[1])) + ' ' + text + '\n\n';
-    if (tag === 'li') return `\n${listIndent}- ${text.trim()}`;
+    if (tag === 'li') return `\n${listIndent}- ${indentContinuationLines(text, listIndent + '  ')}`;
     if (['p','div'].includes(tag)) return '\n' + text + '\n';
     if (tag === 'strong' || tag === 'b') return '**' + text + '**';
     if (tag === 'em' || tag === 'i') return '*' + text + '*';
@@ -936,14 +942,11 @@
         return false;
       };
 
-      const settleDomWindow = async (pollMs = 100, maxWaitMs = 1050, minSettleMs = 0, preSig = '', preHeight = -1) => {
+      const settleDomWindow = async (pollMs = 100, maxWaitMs = 1100, minSettleMs = 0) => {
         const settleStart = Date.now();
         let lastHeight = container.scrollHeight;
         let lastSnapshot = extractVisibleTurns(document);
         let lastSig = lastSnapshot.map(t => `${t.role}:::${t.text}`).join('\u0001');
-        let sawChangeFromPre = Boolean(
-          (preHeight >= 0 && lastHeight !== preHeight) || (preSig && lastSig !== preSig)
-        );
         let stablePolls = 0;
         while (true) {
           await waitMs(pollMs);
@@ -953,15 +956,12 @@
           const curSig = curSnap.map(t => `${t.role}:::${t.text}`).join('\u0001');
           const elapsed = Date.now() - settleStart;
           const changed = curHeight !== lastHeight || curSig !== lastSig;
-          if (changed || (preHeight >= 0 && curHeight !== preHeight) || (preSig && curSig !== preSig)) {
-            sawChangeFromPre = true;
-          }
           lastHeight = curHeight;
           lastSnapshot = curSnap;
           lastSig = curSig;
           if (changed) {
             stablePolls = 0;
-          } else if (elapsed >= minSettleMs || (sawChangeFromPre && elapsed >= pollMs)) {
+          } else if (elapsed >= minSettleMs) {
             stablePolls++;
             if (stablePolls >= 1) {
               return { aborted: false, snapshot: curSnap, signatures: curSnap.map(t => `${t.role}:::${t.text}`), timedOut: false };
@@ -975,13 +975,11 @@
 
       // 1. Desplazamiento inicial al techo para forzar montaje de los primeros turnos (espera virtualización diferida)
       let stepStartTime = Date.now();
-      const preTopSig = previousSnapshotSignatures.join('\u0001');
-      const preTopHeight = container.scrollHeight;
       const jumpedToTop = container.scrollTop > 0;
       if (jumpedToTop) {
         container.scrollTop = 0;
       }
-      const topSettled = await settleDomWindow(100, 1050, jumpedToTop ? 520 : 240, preTopSig, preTopHeight);
+      const topSettled = await settleDomWindow(100, 1100, jumpedToTop ? 480 : 240);
       if (topSettled.aborted) {
         return {
           turns: [],
@@ -1029,13 +1027,11 @@
       while (sweeps < MAX_SWEEPS) {
         stepStartTime = Date.now();
         const prevSweepPos = container.scrollTop;
-        const preSweepHeight = container.scrollHeight;
-        const preSweepSig = previousSnapshotSignatures.join('\u0001');
         const dynamicMaxScrollBefore = Math.max(container.scrollHeight - clientHeight, 0);
         currentPos = Math.min(currentPos + step, dynamicMaxScrollBefore);
         container.scrollTop = currentPos;
         const movedScroll = currentPos !== prevSweepPos;
-        const settled = await settleDomWindow(100, 1050, movedScroll ? 520 : 140, preSweepSig, preSweepHeight);
+        const settled = await settleDomWindow(100, 1100, movedScroll ? 480 : 140);
         if (settled.aborted || checkAbortOrNav()) {
           break;
         }
