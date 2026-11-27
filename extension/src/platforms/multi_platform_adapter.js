@@ -186,10 +186,10 @@
 
   function extractCodeBlocks(text) {
     const blocks = [];
-    const re = /```([a-zA-Z0-9_\-+.]*)\n([\s\S]*?)```/g;
+    const re = /(?:^|\n)(`{3,})([a-zA-Z0-9_\-+.]*)\n([\s\S]*?)\n\1(?=\n|$)/g;
     let m;
     while ((m = re.exec(text)) !== null) {
-      blocks.push({ language: m[1] || 'plaintext', code: m[2].trim() });
+      blocks.push({ language: m[2] || 'plaintext', code: m[3] });
     }
     return blocks;
   }

@@ -117,7 +117,7 @@
       const headM = trimmed.match(/^(#{1,4})\s+(.+)$/);
       if (headM) {
         const lvl = Math.min(4, headM[1].length + 1);
-        blocks.push(`<h${lvl}>${renderInline(headM[2])}</h${lvl}>`);
+        blocks.push(`<h${lvl}>${renderInline(headM[2], opts)}</h${lvl}>`);
         i++;
         continue;
       }
@@ -131,8 +131,8 @@
           rows.push(splitMarkdownTableRow(lines[i]));
           i++;
         }
-        const thead = `<thead><tr>${headers.map(h => `<th>${renderInline(h)}</th>`).join('')}</tr></thead>`;
-        const tbody = `<tbody>${rows.map(r => `<tr>${r.map(c => `<td>${renderInline(c)}</td>`).join('')}</tr>`).join('')}</tbody>`;
+        const thead = `<thead><tr>${headers.map(h => `<th>${renderInline(h, opts)}</th>`).join('')}</tr></thead>`;
+        const tbody = `<tbody>${rows.map(r => `<tr>${r.map(c => `<td>${renderInline(c, opts)}</td>`).join('')}</tr>`).join('')}</tbody>`;
         blocks.push(`<div class="l-table-wrap"><table>${thead}${tbody}</table></div>`);
         continue;
       }
@@ -141,7 +141,7 @@
       if (/^[-*]\s+/.test(trimmed)) {
         const items = [];
         while (i < lines.length && /^[-*]\s+/.test(lines[i].trim())) {
-          items.push(`<li>${renderInline(lines[i].trim().replace(/^[-*]\s+/, ''))}</li>`);
+          items.push(`<li>${renderInline(lines[i].trim().replace(/^[-*]\s+/, ''), opts)}</li>`);
           i++;
         }
         blocks.push(`<ul>${items.join('')}</ul>`);
@@ -152,7 +152,7 @@
       if (/^\d+\.\s+/.test(trimmed)) {
         const items = [];
         while (i < lines.length && /^\d+\.\s+/.test(lines[i].trim())) {
-          items.push(`<li>${renderInline(lines[i].trim().replace(/^\d+\.\s+/, ''))}</li>`);
+          items.push(`<li>${renderInline(lines[i].trim().replace(/^\d+\.\s+/, ''), opts)}</li>`);
           i++;
         }
         blocks.push(`<ol>${items.join('')}</ol>`);
@@ -163,7 +163,7 @@
       if (trimmed.startsWith('>')) {
         const qLines = [];
         while (i < lines.length && lines[i].trim().startsWith('>')) {
-          qLines.push(renderInline(lines[i].trim().replace(/^>\s?/, '')));
+          qLines.push(renderInline(lines[i].trim().replace(/^>\s?/, ''), opts));
           i++;
         }
         blocks.push(`<blockquote>${qLines.join('<br>')}</blockquote>`);

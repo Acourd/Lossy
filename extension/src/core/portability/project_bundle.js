@@ -14,12 +14,25 @@
  }
  const ALLOWED_PLATFORMS=new Set(['chatgpt','gemini','claude','unknown']);
  const isSafeCount=v=>v===undefined||v===null||(typeof v==='number'&&Number.isFinite(v)&&v>=0&&v<=10000000);
+ function validateAttachments(list){
+  if(list===undefined||list===null)return;
+  if(!Array.isArray(list)||list.length>5000)throw Error('Lista de adjuntos inválida');
+  for(const a of list){
+   if(!a||typeof a!=='object'||Array.isArray(a))throw Error('Adjunto inválido');
+   for(const k of ['id','assetId','filename','name','mimeType','kind','sourceType','sourceURL','url','dataURI','availability']){
+    if(a[k]!==undefined&&a[k]!==null&&typeof a[k]!=='string')throw Error('Campo de adjunto inválido: '+k);
+   }
+  }
+ }
  function validateEntity(entity){
   if(!entity||typeof entity!=='object'||typeof entity.canonicalId!=='string'||!entity.canonicalId||entity.canonicalId.length>300)throw Error('Una fuente del proyecto no tiene un identificador válido');
   const messages=entity.selectedMessages||entity.messages;if(!Array.isArray(messages)||messages.some(m=>!m||typeof m!=='object'||typeof m.role!=='string'||(m.content?.text!==undefined&&typeof m.content.text!=='string')))throw Error('Una fuente del proyecto contiene mensajes inválidos');
   if(entity.entityType==='clip'&&!Array.isArray(entity.selectedMessages))throw Error('Clip sin selección de mensajes');
-  const plat=entity.source?.platform??entity.sourcePlatform;
-  if(plat!==undefined&&plat!==null&&(typeof plat!=='string'||!ALLOWED_PLATFORMS.has(plat.toLowerCase())))throw Error('Plataforma de fuente inválida');
+  for(const plat of [entity.source?.platform, entity.sourcePlatform]){
+   if(plat!==undefined&&plat!==null&&(typeof plat!=='string'||!ALLOWED_PLATFORMS.has(plat.toLowerCase())))throw Error('Plataforma de fuente inválida');
+  }
+  validateAttachments(entity.attachments);
+  for(const m of messages){validateAttachments(m.attachments);validateAttachments(m.content?.attachments);}
   for(const k of ['conversationMessageCount','visibleMessageCount','sourceNodeCount'])if(!isSafeCount(entity[k]))throw Error('Métrica numérica inválida: '+k);
   if(entity.nodeMetrics!==undefined&&entity.nodeMetrics!==null){
    if(typeof entity.nodeMetrics!=='object'||Array.isArray(entity.nodeMetrics))throw Error('Métricas de nodo inválidas');

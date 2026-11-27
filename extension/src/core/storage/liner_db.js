@@ -35,23 +35,28 @@
     const existingCount = (existing.messages || []).length;
     const incomingCount = (incoming.messages || []).length;
     if (!incoming.forceOverwrite && existingCount > 0) {
-      if (incomingCount === 0 && isPartialStatus(incoming.integrity?.status)) {
+      if (incomingCount === 0 || incomingCount < existingCount) {
         return { ...existing, title: incoming.title || existing.title, updatedAt: incoming.updatedAt || existing.updatedAt };
       }
       if (isCompleteStatus(existing.integrity?.status) && isPartialStatus(incoming.integrity?.status)) {
         return { ...existing, title: incoming.title || existing.title, updatedAt: incoming.updatedAt || existing.updatedAt };
       }
-      if (isPartialStatus(incoming.integrity?.status) && incomingCount < existingCount) {
-        return { ...existing, title: incoming.title || existing.title, updatedAt: incoming.updatedAt || existing.updatedAt };
-      }
     }
-    const fileIdentity = asset => {
+    const stableFileId = asset => {
       for (const value of [asset.fileId, asset.assetPointer, asset.id, asset.assetId]) {
         if (typeof value !== 'string') continue;
         const clean = value.replace(/^(?:sediment|file-service):\/\//, '');
-        if (/^(?:file|att)[_-][\w-]+$/.test(clean)) return clean;
+        if (/^file[_-][\w-]+$/.test(clean)) return clean;
       }
-      if (typeof asset.sourceURL === 'string' && /^https?:\/\//i.test(asset.sourceURL)) return asset.sourceURL;
+      return '';
+    };
+    const fileIdentity = asset => {
+      const fid = stableFileId(asset);
+      if (fid) return 'fid:' + fid;
+      if (typeof asset.sourceURL === 'string' && /^https?:\/\//i.test(asset.sourceURL)) return 'url:' + asset.sourceURL;
+      for (const value of [asset.id, asset.assetId]) {
+        if (typeof value === 'string' && /^att[_-][\w-]+$/.test(value)) return 'att:' + value;
+      }
       return '';
     };
     const oldMessages = new Map((existing.messages || []).filter(m => m.id).map(m => [m.id, m]));
@@ -61,6 +66,7 @@
         const old = known.get(fileIdentity(asset));
         if (!old || asset.dataURI || asset.data || asset.blob) return asset;
         if (!old.dataURI && !old.data && !old.blob) return asset;
+        if (old.sourceURL && asset.sourceURL && old.sourceURL !== asset.sourceURL) return asset;
         const restored = { ...asset };
         for (const key of ['dataURI', 'data', 'blob', 'mimeType', 'width', 'height']) if (old[key]) restored[key] = old[key];
         restored.availability = 'embedded';

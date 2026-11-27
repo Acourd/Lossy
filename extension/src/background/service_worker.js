@@ -10,7 +10,7 @@ chrome.runtime.onInstalled.addListener(() => {
 });
 
 chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
-  if (sender?.id && sender.id !== chrome.runtime.id) return false;
+  if (chrome.runtime?.id && (!sender || sender.id !== chrome.runtime.id)) return false;
   if (!request || typeof request !== 'object') return false;
   if(request.action==='SAVE_CLIP'){
     if(typeof request.clip?.canonicalId !== 'string' || !request.clip.canonicalId.startsWith('clip_')){sendResponse({success:false,error:'Clip inválido'});return false;}

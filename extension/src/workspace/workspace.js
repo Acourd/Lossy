@@ -1379,7 +1379,7 @@
           }
         }
         const clipModelDisplay = clipModel ? escapeHtml(clipModel) : '—';
-        const sourcePlatform = (conv.sourcePlatform || 'ChatGPT').toUpperCase();
+        const sourcePlatform = escapeHtml(String(conv.sourcePlatform || conv.source?.platform || 'ChatGPT').toUpperCase());
         const messagesCount = (conv.selectedMessages || []).length;
 
         const clipMessagesList = (conv.selectedMessages || []).map((m, idx) => `
@@ -2138,7 +2138,7 @@
         if (!m) return false;
         if (includeTechnical) return true;
         const rawT = String(m.text ?? m.content?.text ?? '').trim();
-        if (/^\{[\s\S]*"path"\s*:\s*"\/Automations\//i.test(rawT)) return false;
+        if (msg.role !== 'user' && /^\{[\s\S]*"path"\s*:\s*"\/Automations\//i.test(rawT)) return false;
         return m.isConversational !== false && m.nodeCategory !== 'tool' && m.nodeCategory !== 'system' && m.role !== 'tool' && m.role !== 'system';
       });
 
@@ -3523,7 +3523,7 @@
           const isClip = c.entityType === 'clip' || (c.canonicalId && c.canonicalId.startsWith('clip_'));
           const dateStr = c.updatedAt || c.createdAt ? new Date(c.updatedAt || c.createdAt).toLocaleDateString() : '-';
           const fullDateStr = c.updatedAt || c.createdAt ? new Date(c.updatedAt || c.createdAt).toLocaleString() : '';
-          const platformDisplay = (c.sourcePlatform || c.source?.platform || 'ChatGPT').toUpperCase();
+          const platformDisplay = escapeHtml(String(c.sourcePlatform || c.source?.platform || 'ChatGPT').toUpperCase());
 
           let titleDisplay = '';
           let modelDisplay = '';

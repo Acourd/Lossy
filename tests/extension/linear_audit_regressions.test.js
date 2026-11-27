@@ -228,3 +228,127 @@ test('P2-1: ProjectBundle rejects malformed entity metrics and invalid platforms
   const zipBytes = zip.createZip(files);
   await assert.rejects(() => ProjectBundle.readProjectPackage(zipBytes), /Plataforma de fuente inválida|Métrica numérica inválida/);
 });
+
+// Round 2 P1-A: Captura incompleta etiquetada 'captured' (ej. Gemini 3 -> 1) no sobrescribe historial
+test('R2 P1-A: LinerDB preserves 3-message history when a 1-message recapture arrives labeled captured without forceOverwrite', async () => {
+  const db = new LinerDB();
+  const conv3 = {
+    canonicalId: 'conv_gemini_r2_a',
+    title: 'Gemini Chat',
+    source: { platform: 'gemini', conversationId: 'r2_a' },
+    integrity: { status: 'captured' },
+    messages: [
+      { id: 'm1', role: 'user', text: 'Uno', content: { text: 'Uno' } },
+      { id: 'm2', role: 'assistant', text: 'Dos', content: { text: 'Dos' } },
+      { id: 'm3', role: 'user', text: 'Tres', content: { text: 'Tres' } }
+    ]
+  };
+  await db.saveConversation(conv3);
+  await db.saveConversation({ ...conv3, messages: [conv3.messages[0]] });
+  const stored = await db.getConversation('conv_gemini_r2_a');
+  assert.equal(stored.messages.length, 3, 'Recapture with fewer messages must not silently shrink history even if labeled captured');
+});
+
+// Round 2 P1-B: Dos mensajes con mismo assetId y bytes distintos exportan ambos binarios intactos
+test('R2 P1-B: ExportCenter preserves distinct binary payloads for colliding assetIds across messages', async () => {
+  const ZipBuilder = require('../../extension/src/core/portability/zip_builder.js');
+  const bytesA = new Uint8Array([137, 80, 78, 71, 13, 10, 26, 10, 1, 1, 1, 1]);
+  const bytesB = new Uint8Array([137, 80, 78, 71, 13, 10, 26, 10, 2, 2, 2, 2]);
+  const conv = {
+    canonicalId: 'conv_chatgpt_r2_b',
+    title: 'Colliding Asset IDs',
+    source: { platform: 'chatgpt' },
+    messages: [
+      { id: 'm1', role: 'user', isConversational: true, text: 'First', attachments: [{ id: 'dom_att_img_0_0', assetId: 'dom_att_img_0_0', kind: 'image', mimeType: 'image/png', filename: 'img.png', data: bytesA }] },
+      { id: 'm2', role: 'assistant', isConversational: true, text: 'Second', attachments: [{ id: 'dom_att_img_0_0', assetId: 'dom_att_img_0_0', kind: 'image', mimeType: 'image/png', filename: 'img.png', data: bytesB }] }
+    ]
+  };
+  const center = new ExportCenterMod.ExportCenter();
+  const res = await center.exportSingle(conv, 'md', 'ai', { imageStrategy: 'package' });
+  const files = await ZipBuilder.unzip(res.data);
+  const assetEntries = Object.entries(files).filter(([k]) => k.startsWith('assets/'));
+  assert.equal(assetEntries.length, 2, 'Both distinct images must be packaged');
+  assert.notDeepEqual(Buffer.from(assetEntries[0][1]), Buffer.from(assetEntries[1][1]), 'Each image must retain its own distinct bytes');
+});
+
+// Round 2 P1-C: Imagen nueva con igual ID posicional y distinta URL NO hereda DataURI antiguo
+test('R2 P1-C: LinerDB never attributes old dataURI to a new image with different sourceURL', async () => {
+  const db = new LinerDB();
+  const oldUri = 'data:image/png;base64,OLDIMAGEBYTES';
+  const conv1 = {
+    canonicalId: 'conv_gemini_r2_c',
+    title: 'Image Update',
+    source: { platform: 'gemini', conversationId: 'r2_c' },
+    messages: [{ id: 'm1', role: 'user', text: 'Pic', attachments: [{ id: 'att_gemini_1_1', sourceURL: 'https://lh3.googleusercontent.com/old', dataURI: oldUri }] }]
+  };
+  await db.saveConversation(conv1);
+  const conv2 = {
+    canonicalId: 'conv_gemini_r2_c',
+    title: 'Image Update',
+    source: { platform: 'gemini', conversationId: 'r2_c' },
+    messages: [{ id: 'm1', role: 'user', text: 'Pic', attachments: [{ id: 'att_gemini_1_1', sourceURL: 'https://lh3.googleusercontent.com/new', dataURI: null }] }]
+  };
+  await db.saveConversation(conv2);
+  const stored = await db.getConversation('conv_gemini_r2_c');
+  assert.equal(stored.messages[0].attachments[0].dataURI, null, 'New image URL must never inherit old image dataURI');
+});
+
+// Round 2 P1-D & P1-3 residual: Turno con imagen hermana de bloque textual vacío y turno en crecimiento
+test('R2 P1-D & P1-3: extractVisibleTurns captures image-only sibling turns and alignAndAppendTurns updates growing turns without duplication', () => {
+  const imgNode = {
+    nodeType: 1, tagName: 'IMG', src: 'https://files.oaiusercontent.com/pic.png', width: 320, height: 240,
+    getAttribute: k => (k === 'src' ? 'https://files.oaiusercontent.com/pic.png' : k === 'alt' ? 'Diagram' : null),
+    closest: () => null, parentNode: null
+  };
+  const emptyMd = {
+    nodeType: 1, tagName: 'DIV', childNodes: [], textContent: '',
+    getAttribute: () => null, querySelector: () => null, querySelectorAll: () => [],
+    cloneNode() { return this; }
+  };
+  const turnNode = {
+    nodeType: 1, tagName: 'DIV', childNodes: [emptyMd, imgNode], textContent: '',
+    getAttribute: k => (k === 'data-message-author-role' ? 'assistant' : k === 'data-message-id' ? 'msg_img_only' : null),
+    querySelector: sel => (sel === '.markdown' ? emptyMd : null),
+    querySelectorAll: sel => (sel === 'img' ? [imgNode] : []),
+    cloneNode() { return this; }
+  };
+  const mockRoot = { querySelectorAll: sel => (sel === '[data-message-author-role]' ? [turnNode] : []) };
+  const turns = ContentScript.extractVisibleTurns(mockRoot);
+  assert.equal(turns.length, 1, 'Image-only turn with sibling empty .markdown must be extracted');
+  assert.equal(turns[0].attachments.length, 1);
+
+  const grown = ContentScript.alignAndAppendTurns(
+    [{ id: 'm1', role: 'assistant', text: 'Hello' }],
+    [{ id: 'm1', role: 'assistant', text: 'Hello world extended' }]
+  );
+  assert.equal(grown.length, 1, 'Growing turn with same ID must update in place without duplication');
+  assert.equal(grown[0].text, 'Hello world extended');
+});
+
+// Round 2 P2-5, P2-6, P2-7: omitImages en headings/listas/tablas/citas, backticks en DOCX, y emojis intactos en PDF
+test('R2 P2-5/6/7: HtmlBuilder omit strips Base64 everywhere; DOCX keeps inline backticks; PDF wraps emojis without splitting surrogates', async () => {
+  const ZipBuilder = require('../../extension/src/core/portability/zip_builder.js');
+  const png = 'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=';
+  const html = HtmlBuilder.buildStandaloneHtml({
+    title: 'Omit All',
+    messages: [{ id: 'm1', role: 'assistant', text: `# H ![a](${png})\n\n- L ![b](${png})\n\n> Q ![c](${png})\n\n| Col |\n| --- |\n| ![d](${png}) |` }]
+  }, { imageStrategy: 'omit' });
+  assert.ok(!html.includes('data:image/png;base64,'), 'omit must strip Base64 inside headings, lists, blockquotes, and tables');
+
+  const docxFiles = await ZipBuilder.unzip(DocxBuilder.buildDocx({
+    canonicalId: 'c_ticks',
+    title: 'Ticks',
+    messages: [{ id: 'm1', role: 'assistant', text: 'Intro\n\n````md\ninline ```ticks``` inside\n````\n\nOutro' }]
+  }, {}));
+  const docXml = Buffer.from(docxFiles['word/document.xml']).toString('utf8');
+  assert.ok(docXml.includes('inline ```ticks``` inside'), 'DOCX must preserve literal triple backticks inside 4-backtick fence');
+
+  const emojiPdf = Buffer.from(PdfBuilder.buildPdf({
+    canonicalId: 'c_emoji',
+    title: 'Emoji Wrap',
+    messages: [{ id: 'm1', role: 'assistant', text: '🚀'.repeat(40) }]
+  }, {})).toString('latin1');
+  assert.ok(!emojiPdf.includes('[U+D83D]') && !emojiPdf.includes('[U+DE80]'), 'PDF wrapping must never split UTF-16 surrogate pairs');
+  assert.ok(emojiPdf.includes('[U+1F680]'), 'PDF must preserve full astral code points cleanly');
+});
+

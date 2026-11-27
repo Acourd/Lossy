@@ -203,16 +203,18 @@
             warnings.push('Recurso sin binario local ni URL de descarga');
           }
 
-          const assetId = att.assetId || att.id || `asset_${mIdx}_${aIdx}`;
-          const identity = att.fileId || att.assetPointer?.replace(/^(?:sediment|file-service):\/\//, '') || assetId;
+          const rawAssetId = att.assetId || att.id || `asset_${mIdx}_${aIdx}`;
+          const identity = att.fileId || att.assetPointer?.replace(/^(?:sediment|file-service):\/\//, '') || rawAssetId;
           const existing = index.identities.get(identity);
           if (existing) {
             if (!existing.dataURI && dataURI) { existing.dataURI=dataURI;existing.availability='embedded';index.locations.add(dataURI); }
             return;
           }
-          const scopedKey = `${msgId}::${assetId}`;
+          const scopedKey = `${msgId}::${rawAssetId}`;
           if (seenKeys.has(scopedKey)) return;
           seenKeys.add(scopedKey);
+          const assetId = seenMsgAssetIds.has(rawAssetId) ? `${rawAssetId}__m${mIdx}_${aIdx}` : rawAssetId;
+          seenMsgAssetIds.add(rawAssetId);
           seenMsgAssetIds.add(assetId);
 
           const mimeType = att.mimeType || (att.kind === 'image' ? 'image/png' : 'application/octet-stream');

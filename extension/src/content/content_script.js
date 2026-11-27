@@ -100,6 +100,12 @@
       { selector: 'document.scrollingElement', elem: document.scrollingElement },
       { selector: 'document.documentElement', elem: document.documentElement }
     ];
+    // Prefer a candidate that actually overflows vertically so a non-scrollable wrapper never hides a scrollable child
+    for (const c of candidates) {
+      if (c.elem && (c.elem.scrollHeight || 0) > (c.elem.clientHeight || 0) + 16) {
+        return { element: c.elem, matchedSelector: c.selector };
+      }
+    }
     for (const c of candidates) {
       if (c.elem) return { element: c.elem, matchedSelector: c.selector };
     }
@@ -230,6 +236,19 @@
       return accumulator.concat(newSnapshot.slice(1));
     }
 
+    // Handle streaming/growing turn with identical ID or prefix growth at boundary
+    const tail = accumulator[accumulator.length - 1];
+    const head = newSnapshot[0];
+    if (tail && head && tail.role === head.role) {
+      const sameId = Boolean(tail.id && head.id && tail.id === head.id);
+      const grewInPlace = !tail.id && !head.id && tail.text && head.text && head.text.length > tail.text.length && head.text.startsWith(tail.text);
+      if (sameId || grewInPlace) {
+        const merged = accumulator.slice(0, -1);
+        merged.push(head);
+        return merged.concat(newSnapshot.slice(1));
+      }
+    }
+
     return accumulator.concat(newSnapshot);
   }
 
@@ -266,8 +285,9 @@
   /**
    * Resuelve asincrónicamente el DataURI de una imagen mediante Canvas o Fetch local autenticado.
    */
-  async function resolveImageAsDataUri(imgOrUrl) {
+  async function resolveImageAsDataUri(imgOrUrl, externalSignal = null) {
     if (!imgOrUrl) return null;
+    if (externalSignal?.aborted) return null;
     let src = '';
     let imgElem = null;
     if (typeof imgOrUrl === 'string') {
@@ -283,75 +303,94 @@
     const syncDataUri = extractImageDataUri(imgElem || { src, getAttribute: () => src });
     if (syncDataUri) return syncDataUri;
 
-    // 2. Intento por fetch autenticado en la página de ChatGPT con timeout fail-safe
+    // 2. Intento por fetch autenticado en la página de ChatGPT con timeout y señal compartida
+    const controller = typeof AbortController !== 'undefined' ? new AbortController() : null;
+    const onExternalAbort = () => controller?.abort();
+    if (externalSignal && controller) externalSignal.addEventListener('abort', onExternalAbort, { once: true });
+    const timer = controller ? setTimeout(() => controller.abort(), 1200) : null;
     try {
       if (typeof fetch === 'function' && (src.startsWith('http://') || src.startsWith('https://') || src.startsWith('/'))) {
-        const controller = typeof AbortController !== 'undefined' ? new AbortController() : null;
-        const timer = controller ? setTimeout(() => controller.abort(), 1200) : null;
-        const resp = await fetch(src, { credentials: 'include', signal: controller?.signal }).finally(() => {
-          if (timer) clearTimeout(timer);
-        });
-        if (resp && resp.ok) {
+        const resp = await fetch(src, { credentials: 'include', signal: controller?.signal });
+        if (resp && resp.ok && !controller?.signal?.aborted) {
           const blob = await resp.blob();
+          if (controller?.signal?.aborted) return null;
           if (typeof FileReader !== 'undefined') {
             return await new Promise((resolve) => {
               const reader = new FileReader();
-              const readTimer = setTimeout(() => resolve(null), 1000);
-              reader.onloadend = () => { clearTimeout(readTimer); resolve(reader.result); };
-              reader.onerror = () => { clearTimeout(readTimer); resolve(null); };
+              const readTimer = setTimeout(() => { try { reader.abort(); } catch (_) {} resolve(null); }, 1000);
+              const onAbort = () => { clearTimeout(readTimer); try { reader.abort(); } catch (_) {} resolve(null); };
+              controller?.signal?.addEventListener('abort', onAbort, { once: true });
+              reader.onloadend = () => { clearTimeout(readTimer); controller?.signal?.removeEventListener('abort', onAbort); resolve(controller?.signal?.aborted ? null : reader.result); };
+              reader.onerror = () => { clearTimeout(readTimer); controller?.signal?.removeEventListener('abort', onAbort); resolve(null); };
               reader.readAsDataURL(blob);
             });
           }
         }
       }
-    } catch (_) {}
+    } catch (_) {
+    } finally {
+      if (timer) clearTimeout(timer);
+      if (externalSignal) externalSignal.removeEventListener('abort', onExternalAbort);
+    }
     return null;
   }
 
   /**
    * Enriquece un objeto canónico con los recursos de imagen observados físicamente en el DOM de la página.
-   * Concurrencia paralela acotada y límite de tiempo estricto para no demorar la captura.
+   * Concurrencia paralela acotada y límite de tiempo estricto con cancelación real de descargas en vuelo.
    */
-  async function enrichConversationWithLiveDomAssets(canonicalConv) {
+  async function enrichConversationWithLiveDomAssets(canonicalConv, externalSignal = null) {
     if (!canonicalConv || typeof document === 'undefined') return canonicalConv;
 
     const original = canonicalConv;
     canonicalConv = structuredClone(canonicalConv);
-    const task = (async () => {
-    const messages = canonicalConv.messages || [];
-    const nodes = Array.from(document.querySelectorAll('[data-message-id]'));
-    for (const msg of messages) {
-      // Match provenance, never assign another turn's image by global position.
-      const node = nodes.find(n => n.getAttribute('data-message-id') === msg.id);
-      if (!node) continue;
-      const images = Array.from(node.querySelectorAll('img')).filter(isContentImage);
-      const atts = msg.attachments || msg.content?.attachments || [];
-      for (let i = 0; i < images.length; i++) {
-        const img = images[i];
-        const src = img.currentSrc || img.getAttribute('src') || img.src;
-        let att = atts.find(a => a.sourceURL === src || a.url === src);
-        const identity=getChatGPTAssets()?.fileId({url:src});
-        if(!att && identity)att=atts.find(a=>getChatGPTAssets().fileId(a)===identity);
-        if (!att && !identity) att = atts.filter(a => a.kind === 'image' && !a.dataURI && !a.sourceURL && !a.url)[0];
-        if (!att) {
-          att = { id: 'dom_' + msg.id + '_' + i, assetId: 'dom_' + msg.id + '_' + i, kind: 'image', filename: 'imagen_' + i + '.png', mimeType: 'image/png', sourceType: 'dom-image' };
-          atts.push(att);
-        }
-        att.sourceURL = src;
-        att.url = src;
-        att.dataURI = att.dataURI || await resolveImageAsDataUri(img);
-        att.availability = att.dataURI ? 'embedded' : 'referenced';
-      }
-      msg.attachments = atts;
-      msg.content = { ...msg.content, attachments: atts };
+    const controller = typeof AbortController !== 'undefined' ? new AbortController() : null;
+    const onExternalAbort = () => controller?.abort();
+    if (externalSignal && controller) {
+      if (externalSignal.aborted) return original;
+      externalSignal.addEventListener('abort', onExternalAbort, { once: true });
     }
-    canonicalConv.attachments = messages.flatMap(m => m.attachments || []);
-    return canonicalConv;
+    if (controller) activeAssetControllers.add(controller);
+    const task = (async () => {
+      const messages = canonicalConv.messages || [];
+      const nodes = Array.from(document.querySelectorAll('[data-message-id]'));
+      for (const msg of messages) {
+        if (controller?.signal?.aborted) return original;
+        const node = nodes.find(n => n.getAttribute('data-message-id') === msg.id);
+        if (!node) continue;
+        const images = Array.from(node.querySelectorAll('img')).filter(isContentImage);
+        const atts = msg.attachments || msg.content?.attachments || [];
+        for (let i = 0; i < images.length; i++) {
+          if (controller?.signal?.aborted) return original;
+          const img = images[i];
+          const src = img.currentSrc || img.getAttribute('src') || img.src;
+          let att = atts.find(a => a.sourceURL === src || a.url === src);
+          const identity=getChatGPTAssets()?.fileId({url:src});
+          if(!att && identity)att=atts.find(a=>getChatGPTAssets().fileId(a)===identity);
+          if (!att && !identity) att = atts.filter(a => a.kind === 'image' && !a.dataURI && !a.sourceURL && !a.url)[0];
+          if (!att) {
+            att = { id: 'dom_' + msg.id + '_' + i, assetId: 'dom_' + msg.id + '_' + i, kind: 'image', filename: 'imagen_' + i + '.png', mimeType: 'image/png', sourceType: 'dom-image' };
+            atts.push(att);
+          }
+          att.sourceURL = src;
+          att.url = src;
+          att.dataURI = att.dataURI || await resolveImageAsDataUri(img, controller?.signal);
+          att.availability = att.dataURI ? 'embedded' : 'referenced';
+        }
+        msg.attachments = atts;
+        msg.content = { ...msg.content, attachments: atts };
+      }
+      canonicalConv.attachments = messages.flatMap(m => m.attachments || []);
+      return canonicalConv;
     })();
     let timer;
     try {
-      return await Promise.race([task, new Promise(resolve => { timer = setTimeout(() => resolve(original), 8000); })]);
-    } finally { clearTimeout(timer); }
+      return await Promise.race([task, new Promise(resolve => { timer = setTimeout(() => { controller?.abort(); resolve(original); }, 8000); })]);
+    } finally {
+      clearTimeout(timer);
+      if (controller) activeAssetControllers.delete(controller);
+      if (externalSignal) externalSignal.removeEventListener('abort', onExternalAbort);
+    }
   }
 
   /**
@@ -391,8 +430,8 @@
           availability: dataUri ? 'embedded' : 'referenced'
         });
 
-        const mdImgNode = document.createTextNode('');
-        if (img.parentNode) {
+        if (img.parentNode && typeof document !== 'undefined') {
+          const mdImgNode = document.createTextNode('');
           img.parentNode.replaceChild(mdImgNode, img);
         }
       });
@@ -407,6 +446,10 @@
         const role = rawRole === 'user' ? 'user' : 'assistant';
         const msgId = node.getAttribute('data-message-id') || undefined;
         const textContainer = node.querySelector('.markdown') || node.querySelector('.whitespace-pre-wrap') || node;
+
+        // Extract images from the FULL turn node so sibling <img> elements outside .markdown are never lost
+        const fullTurnClone = cleanMessageDom(node.cloneNode(true));
+        const attachments = extractTurnAttachments(fullTurnClone, msgId);
 
         const clone = cleanMessageDom((textContainer || node).cloneNode(true));
         if (clone.querySelectorAll) {
@@ -428,8 +471,6 @@
             pre.parentNode.replaceChild(mdNode, pre);
           }
         });
-
-        const attachments = extractTurnAttachments(clone, msgId);
 
         let text = cleanText(messageDomText(clone));
         text = text.replace(/File\s+([a-zA-Z0-9_\-]{8,})/g, '[Archivo adjunto: $1]');
@@ -1467,12 +1508,20 @@
       }
     };
 
-    return await resolveCapturedAssets(convResult, options);
+    const resolvedDomResult = await resolveCapturedAssets(convResult, options);
+    assertCaptureCurrent();
+    const finalConvId = detectActiveConversationId();
+    if (convId && finalConvId !== convId) {
+      throw new Error(`SOURCE_IDENTITY_MISMATCH: La conversación cambió durante la resolución de recursos (de ${convId} a ${finalConvId || 'inicio'}). Resultado descartado.`);
+    }
+    return resolvedDomResult;
   }
 
   // Responder a peticiones del Popup y Workspace con gestión estricta de ciclo de vida
   if (typeof chrome !== 'undefined' && chrome.runtime && chrome.runtime.onMessage) {
     chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
+      if (chrome.runtime?.id && (!sender || sender.id !== chrome.runtime.id)) return false;
+      if (!request || typeof request !== 'object') return false;
       const action = request.action;
 
       if (action === 'RESOLVE_CONVERSATION_ASSETS') {

@@ -83,21 +83,50 @@
     return res;
   }
 
+  // Calcula la longitud visual real tras la expansión WinAnsi/[U+XXXX] (sin cortar pares suplentes UTF-16)
+  function renderedVisualLength(str) {
+    let total = 0;
+    for (const ch of String(str || '')) {
+      if (ch === '\t') { total += 4; continue; }
+      if (WIN_ANSI_MAP[ch]) { total += WIN_ANSI_MAP[ch].startsWith('\\') ? 1 : WIN_ANSI_MAP[ch].length; continue; }
+      const cp = ch.codePointAt(0);
+      if (cp <= 255) total += 1;
+      else total += `[U+${cp.toString(16).toUpperCase().padStart(4, '0')}]`.length;
+    }
+    return total;
+  }
+
+  function splitByVisualWidth(str, maxVisualCols) {
+    const chunks = [];
+    let cur = '';
+    let curCols = 0;
+    for (const ch of String(str || '')) {
+      const chCols = renderedVisualLength(ch);
+      if (cur && curCols + chCols > maxVisualCols) {
+        chunks.push(cur);
+        cur = ch;
+        curCols = chCols;
+      } else {
+        cur += ch;
+        curCols += chCols;
+      }
+    }
+    if (cur) chunks.push(cur);
+    return chunks.length ? chunks : [''];
+  }
+
   // Estimador de ancho de caracteres para fuentes Helvetica (proporcional) y Courier (monoespacio)
   function estimateTextWidth(text, fontSize, isMonospace = false) {
     if (!text) return 0;
-    if (isMonospace) {
-      return text.length * fontSize * 0.6;
-    }
-    // Promedio ponderado para fuente proporcional Helvetica
-    return text.length * fontSize * 0.52;
+    const visLen = renderedVisualLength(text);
+    return visLen * fontSize * (isMonospace ? 0.6 : 0.54);
   }
 
   function wrapText(text, maxPts, fontSize, isMonospace = false) {
     if (!text) return [''];
     if (isMonospace) {
       const columns = Math.max(1, Math.floor(maxPts / (fontSize * 0.6)));
-      return text.replace(/\t/g, '    ').split('\n').flatMap(line => line.length ? Array.from({length: Math.ceil(line.length / columns)}, (_,i) => line.slice(i * columns, (i+1) * columns)) : ['']);
+      return text.replace(/\t/g, '    ').split('\n').flatMap(line => line.length ? splitByVisualWidth(line, columns) : ['']);
     }
     const paragraphs = text.split('\n');
     const lines = [];
@@ -108,8 +137,8 @@
         continue;
       }
 
-      const maxChars = Math.max(1, Math.floor(maxPts / (fontSize * 0.52)));
-      const words = paragraph.split(/\s+/).flatMap(word => word.length > maxChars ? word.match(new RegExp('.{1,' + maxChars + '}', 'g')) : [word]);
+      const maxCols = Math.max(1, Math.floor(maxPts / (fontSize * 0.54)));
+      const words = paragraph.split(/\s+/).flatMap(word => renderedVisualLength(word) > maxCols ? splitByVisualWidth(word, maxCols) : [word]);
       let currentLine = '';
 
       for (const word of words) {

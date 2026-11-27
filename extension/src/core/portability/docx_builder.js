@@ -356,14 +356,14 @@
         });
       };
 
-      const fenceRe = /(`{3,})([^\n]*)\n([\s\S]*?)\1/g;
+      const fenceRe = /(?:^|\n)(`{3,})([^\n]*)\n([\s\S]*?)\n\1(?=\n|$)/g;
       let lastIdx = 0;
       let foundInlineFences = false;
       let fm;
       while ((fm = fenceRe.exec(originalText)) !== null) {
         foundInlineFences = true;
         if (fm.index > lastIdx) pushProse(originalText.slice(lastIdx, fm.index));
-        pushCodeBlock({ language: fm[2].trim(), code: fm[3].replace(/\n$/, '') });
+        pushCodeBlock({ language: fm[2].trim(), code: fm[3] });
         lastIdx = fm.index + fm[0].length;
       }
       if (lastIdx < originalText.length) pushProse(originalText.slice(lastIdx));
