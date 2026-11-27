@@ -649,6 +649,42 @@ test('R34 P1-3: primera captura tras navegación SPA A->B en Claude y Gemini rec
     const freshImgOnly = await callMsg({ action: 'ACQUIRE_CONVERSATION' });
     assert.equal(freshImgOnly.success, true, `${spec.platform}: imagen nueva exclusiva sin texto debe aceptarse`);
     assert.equal(freshImgOnly.data.messages[1].attachments[0].sourceURL, 'https://cdn.test/roma.png');
+
+    // R38 P1/P2: DataURI con igual prefijo (64+ chars) y longitud pero píxeles distintos (rojo vs azul)
+    const pngPrefix = 'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8';
+    const redDataUri = `${pngPrefix}z8Dw/wAAAP//AwAI/AL+X5a1AAAAAElFTkSuQmCC`;
+    const blueDataUri = `${pngPrefix}AAAAAP8A/wAAAwAC/AL+Y9b2AAAAAElFTkSuQmCC`;
+    assert.equal(redDataUri.length, blueDataUri.length);
+    assert.equal(redDataUri.slice(0, 64), blueDataUri.slice(0, 64));
+
+    const makeCustomUrl = (hexTag) => spec.urlB.replace(/(?:22222222-2222-2222-2222-222222222222|bbbbbbbbbbbb)/, hexTag);
+    historyObj.pushState({}, '', makeCustomUrl('deadbeef0001'));
+    multiTurns = [
+      { id: 'u_col', role: 'user', text: 'Genera cuadrado de color', attachments: [] },
+      { id: 'a_red', role: 'assistant', text: '', attachments: [{ kind: 'image', sourceURL: 'https://cdn.test/pixel.png?w=512', dataURI: redDataUri }] }
+    ];
+    assert.equal((await callMsg({ action: 'ACQUIRE_CONVERSATION' })).success, true);
+
+    // P1 R38: Misma imagen DataURI anterior pero URL mutada (?w=512 -> ?w=1024) y pregunta nueva -> RECHAZA STALE
+    historyObj.pushState({}, '', makeCustomUrl('deadbeef0002'));
+    multiTurns = [
+      { id: 'u_w1024', role: 'user', text: 'Otra pregunta totalmente distinta', attachments: [] },
+      { id: 'a_red_reurl', role: 'assistant', text: '', attachments: [{ kind: 'image', sourceURL: 'https://cdn.test/pixel.png?w=1024', dataURI: redDataUri }] }
+    ];
+    const staleRehostedImg = await callMsg({ action: 'ACQUIRE_CONVERSATION' });
+    assert.equal(staleRehostedImg.success, false, `${spec.platform}: misma imagen DataURI con query URL distinto debe rechazarse`);
+    assert.match(staleRehostedImg.error, /STALE_DOM/);
+
+    // P2 R38: Imagen nueva azul con igual longitud y prefijo 64-char bajo pregunta repetida -> ACEPTA
+    setTimeout(() => {
+      multiTurns = [
+        { id: 'u_col_blue', role: 'user', text: 'Genera cuadrado de color', attachments: [] },
+        { id: 'a_blue', role: 'assistant', text: '', attachments: [{ kind: 'image', sourceURL: 'https://cdn.test/pixel.png?w=512', dataURI: blueDataUri }] }
+      ];
+    }, 120);
+    const freshBlueImg = await callMsg({ action: 'ACQUIRE_CONVERSATION' });
+    assert.equal(freshBlueImg.success, true, `${spec.platform}: PNG distinto con igual prefijo/longitud no debe colisionar`);
+    assert.equal(freshBlueImg.data.messages[1].attachments[0].dataURI, blueDataUri);
   }
 });
 

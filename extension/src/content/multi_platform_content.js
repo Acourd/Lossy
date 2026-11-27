@@ -30,12 +30,41 @@
   const foreignSignaturesByConv = new Map(); // convId -> Set<string>
   const foreignTurnsByConv = new Map();      // convId -> Set<string>
 
-  function attachmentFingerprint(att) {
-    if (!att || typeof att !== 'object') return '';
-    const uri = typeof att.dataURI === 'string' && att.dataURI
-      ? `${att.dataURI.slice(0, 64)}:${att.dataURI.length}`
-      : '';
-    return String(att.sourceURL || att.url || uri || att.assetId || att.id || att.filename || att.name || '').trim();
+  function hashFullString64(str) {
+    const s = String(str || '');
+    let h1 = 0x811c9dc5;
+    let h2 = 0x811c9dc5;
+    for (let i = 0; i < s.length; i++) {
+      const ch = s.charCodeAt(i);
+      h1 ^= ch;
+      h1 = Math.imul(h1, 0x01000193);
+      h2 ^= (ch + ((i + 1) & 0xff));
+      h2 = Math.imul(h2, 0x01000193);
+    }
+    return `${s.length}:${(h1 >>> 0).toString(36)}:${(h2 >>> 0).toString(36)}`;
+  }
+
+  function extractAttachmentDescriptor(att) {
+    if (!att || typeof att !== 'object') return null;
+    const rawUrl = String(att.sourceURL || att.url || '').trim();
+    const rawData = typeof att.dataURI === 'string' && att.dataURI.trim()
+      ? att.dataURI.trim()
+      : (/^data:/i.test(rawUrl) ? rawUrl : '');
+    const d = rawData ? `d:${hashFullString64(rawData)}` : '';
+    const u = (!/^data:/i.test(rawUrl) && rawUrl) ? `u:${rawUrl}` : '';
+    const fallback = String(att.assetId || att.id || att.filename || att.name || '').trim();
+    const f = (!d && !u && fallback) ? `f:${fallback}` : '';
+    if (!d && !u && !f) return null;
+    return { d, u, f };
+  }
+
+  function isSameAttachmentDescriptor(ca, pa) {
+    if (!ca || !pa) return false;
+    if (typeof ca === 'string' || typeof pa === 'string') return ca === pa;
+    if (ca.d && pa.d) return ca.d === pa.d;
+    if (ca.u && pa.u) return ca.u === pa.u;
+    if (ca.f && pa.f) return ca.f === pa.f;
+    return false;
   }
 
   function extractTurnEntries(data) {
@@ -46,7 +75,7 @@
         const rawAtts = Array.isArray(m?.attachments)
           ? m.attachments
           : (Array.isArray(m?.content?.attachments) ? m.content.attachments : []);
-        const atts = rawAtts.map(attachmentFingerprint).filter(Boolean);
+        const atts = rawAtts.map(extractAttachmentDescriptor).filter(Boolean);
         if (!body && atts.length === 0) return '';
         return JSON.stringify({ r: role, b: body, a: atts });
       })
@@ -132,7 +161,8 @@
       for (const prevRaw of prevSet) {
         const prevParsed = parseEntry(prevRaw);
         if (curParsed.r && prevParsed.r && curParsed.r !== prevParsed.r) continue;
-        if (curParsed.a.length > 0 && prevParsed.a.length > 0 && curParsed.a.some(att => prevParsed.a.includes(att))) {
+        if (curParsed.a.length > 0 && prevParsed.a.length > 0 &&
+            curParsed.a.some(ca => prevParsed.a.some(pa => isSameAttachmentDescriptor(ca, pa)))) {
           return true;
         }
         if (curParsed.b && prevParsed.b && curParsed.b === prevParsed.b) {
